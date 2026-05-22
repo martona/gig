@@ -12,11 +12,14 @@
 #include <string>
 #include <utility>
 
+#include <d3d11.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
@@ -118,6 +121,32 @@ AVPixelFormat chooseHardwarePixelFormat(AVCodecContext* context, const AVPixelFo
     return formats[0];
 }
 
+void d3d11LockCallback(void* lockContext)
+{
+    static_cast<std::recursive_mutex*>(lockContext)->lock();
+}
+
+void d3d11UnlockCallback(void* lockContext)
+{
+    static_cast<std::recursive_mutex*>(lockContext)->unlock();
+}
+
+bool codecSupportsD3D11(const AVCodec* decoder)
+{
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
+        if (!config) {
+            return false;
+        }
+
+        if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA
+            && config->pix_fmt == AV_PIX_FMT_D3D11
+            && (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+            return true;
+        }
+    }
+}
+
 void copyPlane(
     const std::uint8_t* source,
     int sourceStride,
@@ -178,6 +207,48 @@ bool emitNv12Frame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegD
 
     copyPlane(frame->data[0], frame->linesize[0], frame->width, frame->height, output.planes[0], output.strides[0]);
     copyPlane(frame->data[1], frame->linesize[1], chromaWidthBytes, chromaHeight, output.planes[1], output.strides[1]);
+
+    callback(std::move(output));
+    return true;
+}
+
+bool emitD3D11Frame(
+    const AVFrame* frame,
+    std::uint64_t frameIndex,
+    const std::shared_ptr<D3D11DecodeContext>& d3d11Context,
+    const FfmpegDecoder::FrameCallback& callback)
+{
+    if (!frame->data[0]) {
+        return false;
+    }
+
+    auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+    D3D11_TEXTURE2D_DESC desc = {};
+    texture->GetDesc(&desc);
+    if (desc.Format != DXGI_FORMAT_NV12) {
+        return false;
+    }
+
+    AVFrame* cloned = av_frame_clone(frame);
+    if (!cloned) {
+        throw std::runtime_error("Could not clone D3D11 hardware frame.");
+    }
+
+    VideoFrame output;
+    output.format = VideoFrameFormat::D3D11_NV12;
+    output.width = cloned->width;
+    output.height = cloned->height;
+    output.fullRange = isFullRangeYuv(cloned);
+    output.index = frameIndex;
+    output.d3d11Texture = reinterpret_cast<ID3D11Texture2D*>(cloned->data[0]);
+    output.d3d11ArraySlice = static_cast<int>(reinterpret_cast<std::intptr_t>(cloned->data[1]));
+    if (d3d11Context) {
+        output.d3d11Lock = d3d11Context->lock;
+    }
+    output.owner = std::shared_ptr<void>(cloned, [](void* pointer) {
+        AVFrame* ownedFrame = static_cast<AVFrame*>(pointer);
+        av_frame_free(&ownedFrame);
+    });
 
     callback(std::move(output));
     return true;
@@ -285,12 +356,72 @@ void emitDecodedFrame(
     emitBgraFrame(frame, frameIndex, swsContext, callback);
 }
 
+BufferRefPtr createD3D11DeviceContext(const std::shared_ptr<D3D11DecodeContext>& d3d11Context)
+{
+    if (!d3d11Context || !d3d11Context->device || !d3d11Context->lock) {
+        return BufferRefPtr(nullptr);
+    }
+
+    AVBufferRef* rawDevice = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    if (!rawDevice) {
+        throw std::runtime_error("Could not allocate D3D11VA hardware device context.");
+    }
+
+    BufferRefPtr device(rawDevice);
+    auto* deviceContext = reinterpret_cast<AVHWDeviceContext*>(device->data);
+    auto* d3d11 = reinterpret_cast<AVD3D11VADeviceContext*>(deviceContext->hwctx);
+    d3d11->device = d3d11Context->device;
+    d3d11->device->AddRef();
+    d3d11->lock = d3d11LockCallback;
+    d3d11->unlock = d3d11UnlockCallback;
+    d3d11->lock_ctx = d3d11Context->lock.get();
+    d3d11->BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
+
+    throwIfFailed(av_hwdevice_ctx_init(device.get()), "av_hwdevice_ctx_init(D3D11VA)");
+    return device;
+}
+
 CodecContextPtr openCodecContext(
     const AVCodec* decoder,
     AVStream* videoStream,
     HardwareDecodeState& hardwareState,
-    BufferRefPtr& hardwareDevice)
+    BufferRefPtr& hardwareDevice,
+    const std::shared_ptr<D3D11DecodeContext>& d3d11Context)
 {
+    if (d3d11Context && d3d11Context->device && d3d11Context->lock && codecSupportsD3D11(decoder)) {
+        try {
+            BufferRefPtr candidateDevice = createD3D11DeviceContext(d3d11Context);
+            CodecContextPtr candidate(avcodec_alloc_context3(decoder));
+            if (!candidate) {
+                throw std::runtime_error("Could not allocate AVCodecContext.");
+            }
+
+            throwIfFailed(avcodec_parameters_to_context(candidate.get(), videoStream->codecpar), "avcodec_parameters_to_context");
+            candidate->flags |= AV_CODEC_FLAG_LOW_DELAY;
+            candidate->thread_count = 1;
+            candidate->thread_type = 0;
+            candidate->opaque = &hardwareState;
+            candidate->get_format = chooseHardwarePixelFormat;
+            candidate->hw_device_ctx = av_buffer_ref(candidateDevice.get());
+            if (!candidate->hw_device_ctx) {
+                throw std::runtime_error("Could not reference D3D11 hardware device context.");
+            }
+
+            hardwareState.pixelFormat = AV_PIX_FMT_D3D11;
+            hardwareState.deviceType = AV_HWDEVICE_TYPE_D3D11VA;
+            throwIfFailed(avcodec_open2(candidate.get(), decoder, nullptr), "avcodec_open2(D3D11VA)");
+
+            std::cerr << "Hardware decode: d3d11va (d3d11, shared renderer device)\n";
+            hardwareDevice = std::move(candidateDevice);
+            return candidate;
+        } catch (const std::exception& error) {
+            std::cerr << "D3D11VA shared-device decode unavailable; falling back: "
+                      << error.what() << "\n";
+            hardwareState.pixelFormat = AV_PIX_FMT_NONE;
+            hardwareState.deviceType = AV_HWDEVICE_TYPE_NONE;
+        }
+    }
+
     for (int i = 0;; ++i) {
         const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
         if (!config) {
@@ -299,6 +430,7 @@ CodecContextPtr openCodecContext(
 
         if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
             || config->device_type == AV_HWDEVICE_TYPE_NONE
+            || config->device_type == AV_HWDEVICE_TYPE_D3D11VA
             || config->pix_fmt == AV_PIX_FMT_NONE) {
             continue;
         }
@@ -360,9 +492,14 @@ CodecContextPtr openCodecContext(
 
 } // namespace
 
-FfmpegDecoder::FfmpegDecoder(std::string url, TlsOptions tlsOptions, FrameCallback frameCallback)
+FfmpegDecoder::FfmpegDecoder(
+    std::string url,
+    TlsOptions tlsOptions,
+    std::shared_ptr<D3D11DecodeContext> d3d11Context,
+    FrameCallback frameCallback)
     : url_(std::move(url))
     , tlsOptions_(std::move(tlsOptions))
+    , d3d11Context_(std::move(d3d11Context))
     , frameCallback_(std::move(frameCallback))
 {
 }
@@ -450,7 +587,7 @@ void FfmpegDecoder::decodeOnce()
 
     HardwareDecodeState hardwareState;
     BufferRefPtr hardwareDevice(nullptr);
-    CodecContextPtr codecContext = openCodecContext(decoder, videoStream, hardwareState, hardwareDevice);
+    CodecContextPtr codecContext = openCodecContext(decoder, videoStream, hardwareState, hardwareDevice, d3d11Context_);
 
     std::cerr << "Video: " << avcodec_get_name(videoStream->codecpar->codec_id)
               << " " << codecContext->width << "x" << codecContext->height << "\n";
@@ -492,6 +629,13 @@ void FfmpegDecoder::decodeOnce()
             }
             throwIfFailed(receiveResult, "avcodec_receive_frame");
 
+            const std::uint64_t frameIndex = ++frameIndex_;
+            if (decodedFrame->format == AV_PIX_FMT_D3D11
+                && emitD3D11Frame(decodedFrame.get(), frameIndex, d3d11Context_, frameCallback_)) {
+                av_frame_unref(decodedFrame.get());
+                continue;
+            }
+
             if (hardwareState.pixelFormat != AV_PIX_FMT_NONE && decodedFrame->format == hardwareState.pixelFormat) {
                 FramePtr transferredFrame(av_frame_alloc());
                 if (!transferredFrame) {
@@ -500,9 +644,9 @@ void FfmpegDecoder::decodeOnce()
 
                 throwIfFailed(av_hwframe_transfer_data(transferredFrame.get(), decodedFrame.get(), 0), "av_hwframe_transfer_data");
                 av_frame_copy_props(transferredFrame.get(), decodedFrame.get());
-                emitDecodedFrame(transferredFrame.get(), ++frameIndex_, swsContext, frameCallback_);
+                emitDecodedFrame(transferredFrame.get(), frameIndex, swsContext, frameCallback_);
             } else {
-                emitDecodedFrame(decodedFrame.get(), ++frameIndex_, swsContext, frameCallback_);
+                emitDecodedFrame(decodedFrame.get(), frameIndex, swsContext, frameCallback_);
             }
 
             av_frame_unref(decodedFrame.get());

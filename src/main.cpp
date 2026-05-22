@@ -124,6 +124,7 @@ int main(int argc, char** argv)
         FfmpegDecoder decoder(
             options.url,
             options.tls,
+            renderer->d3d11DecodeContext(),
             [&](VideoFrame&& frame) {
                 decodedFrames = frame.index;
                 auto sharedFrame = std::make_shared<VideoFrame>(std::move(frame));

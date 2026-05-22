@@ -1,5 +1,6 @@
 #pragma once
 
+#include "d3d11_decode_context.h"
 #include "video_frame.h"
 
 #include <memory>
@@ -13,6 +14,7 @@ public:
     virtual bool initialize(SDL_Window* window) = 0;
     virtual void resize() = 0;
     virtual void render(const VideoFrame* frame) = 0;
+    virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };
 
 std::unique_ptr<VideoRenderer> createD3D11Renderer();

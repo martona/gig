@@ -1,10 +1,12 @@
 #pragma once
 
+#include "d3d11_decode_context.h"
 #include "video_frame.h"
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -20,7 +22,11 @@ class FfmpegDecoder {
 public:
     using FrameCallback = std::function<void(VideoFrame&&)>;
 
-    FfmpegDecoder(std::string url, TlsOptions tlsOptions, FrameCallback frameCallback);
+    FfmpegDecoder(
+        std::string url,
+        TlsOptions tlsOptions,
+        std::shared_ptr<D3D11DecodeContext> d3d11Context,
+        FrameCallback frameCallback);
     ~FfmpegDecoder();
 
     FfmpegDecoder(const FfmpegDecoder&) = delete;
@@ -35,6 +41,7 @@ private:
 
     std::string url_;
     TlsOptions tlsOptions_;
+    std::shared_ptr<D3D11DecodeContext> d3d11Context_;
     FrameCallback frameCallback_;
     std::atomic_bool stopRequested_ = false;
     std::thread worker_;

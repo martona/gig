@@ -5,9 +5,9 @@ Tiny Windows proof of concept for opening one Frigate/go2rtc camera stream with 
 This intentionally skips camera discovery, motion/activity handling, and Windows certificate store integration. It is just enough to prove the native pipeline:
 
 1. FFmpeg opens `https://.../api/stream.ts?src=...` with client cert files.
-2. A background thread decodes H.264, trying FFmpeg hardware devices automatically before falling back to software decode.
+2. A background thread decodes H.264 through D3D11VA on the renderer's D3D11 device when available, then falls back to other FFmpeg hardware devices or software decode.
 3. SDL owns the window.
-4. A thin D3D11 renderer uploads NV12/YUV420P planes directly and presents them letterboxed, with BGRA/swscale kept as a fallback for odd formats.
+4. A thin D3D11 renderer samples decoded D3D11 NV12 textures directly and presents them letterboxed, with CPU NV12/YUV420P/BGRA paths kept as fallbacks.
 
 ## Build
 
@@ -52,4 +52,4 @@ For a quick server-cert bypass while testing:
 - Replace PEM file options with a Windows certificate store backed TLS path.
 - Add Frigate API discovery and websocket camera activity.
 - Add a renderer abstraction for non-Windows backends.
-- Avoid the hardware-transfer copy by wiring a zero-copy D3D11VA path when the rest of the proof of concept is stable.
+- Replace the one-camera path with Frigate discovery and a dynamic grid.

@@ -17,6 +17,7 @@ find_package(FFMPEG REQUIRED)
 
 add_executable(frigate_d3d_poc
     src/main.cpp
+    src/d3d11_decode_context.h
     src/video_frame.h
     src/decode/ffmpeg_decoder.cpp
     src/decode/ffmpeg_decoder.h
