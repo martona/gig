@@ -5,7 +5,7 @@ param(
 
     [string]$Triplet = "",
 
-    [string]$VcpkgRoot = $env:VCPKG_ROOT,
+    [string]$VcpkgRoot = "",
 
     [string]$VcVarsAll = $env:VCVARSALL,
 
@@ -17,6 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$buildRoot = Join-Path $repoRoot "build"
 
 if (-not $Triplet) {
     $Triplet = "x64-windows-static"
@@ -127,52 +128,102 @@ function Import-VcVarsEnvironment {
     }
 }
 
+function Resolve-ProjectPath {
+    param([string]$Path)
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
+}
+
+function Get-VcpkgBaseline {
+    $manifestPath = Join-Path $repoRoot "vcpkg.json"
+    if (-not (Test-Path $manifestPath)) {
+        return ""
+    }
+
+    $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+    if ($manifest.'builtin-baseline') {
+        return $manifest.'builtin-baseline'
+    }
+
+    return ""
+}
+
+function Invoke-VcpkgBootstrap {
+    param([string]$Root)
+
+    $bootstrap = Join-Path $Root "bootstrap-vcpkg.bat"
+    if (-not (Test-Path $bootstrap)) {
+        throw "Could not find vcpkg bootstrap script at $bootstrap."
+    }
+
+    Push-Location $Root
+    try {
+        & cmd.exe /d /c "bootstrap-vcpkg.bat -disableMetrics"
+        if ($LASTEXITCODE -ne 0) {
+            throw "'$bootstrap' failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 function Resolve-VcpkgRoot {
     param([string]$RequestedRoot)
 
-    $candidates = @()
-
     if ($RequestedRoot) {
-        $candidates += $RequestedRoot
+        $root = Resolve-ProjectPath -Path $RequestedRoot
+    }
+    else {
+        $root = Join-Path $buildRoot "vcpkg"
     }
 
-    if ($env:VCPKG_ROOT) {
-        $candidates += $env:VCPKG_ROOT
-    }
-
-    $candidates += @(
-        (Join-Path $repoRoot "vcpkg"),
-        (Join-Path (Split-Path $repoRoot -Parent) "vcpkg"),
-        (Join-Path $env:USERPROFILE "vcpkg"),
-        (Join-Path $env:LOCALAPPDATA "vcpkg"),
-        "C:\src\vcpkg",
-        "C:\dev\vcpkg",
-        "C:\tools\vcpkg",
-        "C:\vcpkg"
-    )
-
-    $fromPath = Get-Command vcpkg -ErrorAction SilentlyContinue
-    if ($fromPath) {
-        $candidates += Split-Path $fromPath.Source -Parent
-    }
-
-    foreach ($candidate in $candidates) {
-        if (-not $candidate) {
-            continue
+    $toolchain = Join-Path $root "scripts\buildsystems\vcpkg.cmake"
+    if (-not (Test-Path $toolchain)) {
+        if (Test-Path $root) {
+            throw "vcpkg root exists but is incomplete: $root"
         }
 
-        $resolved = Resolve-Path $candidate -ErrorAction SilentlyContinue
-        if (-not $resolved) {
-            continue
-        }
+        $gitExe = Resolve-Executable -Name "git" -Candidates @(
+            "C:\Program Files\Git\cmd\git.exe",
+            "C:\Program Files\Git\bin\git.exe"
+        )
 
-        $toolchain = Join-Path $resolved "scripts\buildsystems\vcpkg.cmake"
-        if (Test-Path $toolchain) {
-            return $resolved.Path
+        New-Item -ItemType Directory -Force -Path (Split-Path $root -Parent) | Out-Null
+        Write-Host "Cloning private vcpkg root into $root..."
+        Invoke-NativeCommand -FilePath $gitExe -Arguments @(
+            "clone",
+            "https://github.com/microsoft/vcpkg.git",
+            $root
+        )
+
+        $baseline = Get-VcpkgBaseline
+        if ($baseline) {
+            Write-Host "Checking out vcpkg baseline $baseline..."
+            Invoke-NativeCommand -FilePath $gitExe -Arguments @(
+                "-C", $root,
+                "checkout",
+                "--detach",
+                $baseline
+            )
         }
     }
 
-    throw "Could not find vcpkg. Set VCPKG_ROOT or pass -VcpkgRoot C:\path\to\vcpkg."
+    $vcpkgExe = Join-Path $root "vcpkg.exe"
+    if (-not (Test-Path $vcpkgExe)) {
+        Write-Host "Bootstrapping private vcpkg..."
+        Invoke-VcpkgBootstrap -Root $root
+    }
+
+    if (-not (Test-Path $toolchain)) {
+        throw "vcpkg toolchain file was not found at $toolchain."
+    }
+
+    return $root
 }
 
 $cmakeCandidates = @(
@@ -206,11 +257,16 @@ if (-not (Find-Executable -Name "cmake" -Candidates $cmakeCandidates) -or -not (
 $resolvedVcpkgRoot = Resolve-VcpkgRoot -RequestedRoot $VcpkgRoot
 $env:VCPKG_ROOT = $resolvedVcpkgRoot
 $toolchainFile = Join-Path $resolvedVcpkgRoot "scripts\buildsystems\vcpkg.cmake"
-$buildDir = Join-Path $repoRoot "build\windows-$($BuildType.ToLowerInvariant())"
-$vcpkgInstalledDir = Join-Path $repoRoot ".vcpkg"
-$cacheFile = Join-Path $buildDir "CMakeCache.txt"
+$buildDir = Join-Path $buildRoot "windows-$($BuildType.ToLowerInvariant())"
+$vcpkgInstalledDir = Join-Path $buildRoot "vcpkg-installed"
+$vcpkgCacheDir = Join-Path $buildRoot "vcpkg-binary-cache"
+$vcpkgDownloadsDir = Join-Path $buildRoot "vcpkg-downloads"
 $cmakeExe = Resolve-Executable -Name "cmake" -Candidates $cmakeCandidates
 $ninjaExe = Resolve-Executable -Name "ninja" -Candidates $ninjaCandidates
+
+New-Item -ItemType Directory -Force -Path $vcpkgCacheDir, $vcpkgDownloadsDir | Out-Null
+$env:VCPKG_BINARY_SOURCES = "clear;files,$vcpkgCacheDir,readwrite"
+$env:VCPKG_DOWNLOADS = $vcpkgDownloadsDir
 
 $configureArgs = @(
     "-S", $repoRoot,
@@ -218,6 +274,7 @@ $configureArgs = @(
     "-G", "Ninja",
     "-DCMAKE_MAKE_PROGRAM=$ninjaExe",
     "-DCMAKE_BUILD_TYPE=$BuildType",
+    "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile",
     "-DVCPKG_TARGET_TRIPLET=$Triplet",
     "-DVCPKG_INSTALLED_DIR=$vcpkgInstalledDir",
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
@@ -225,10 +282,6 @@ $configureArgs = @(
 
 if ($env:VCPKG_INSTALL_OPTIONS) {
     $configureArgs += "-DVCPKG_INSTALL_OPTIONS=$env:VCPKG_INSTALL_OPTIONS"
-}
-
-if (-not (Test-Path $cacheFile)) {
-    $configureArgs += "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile"
 }
 
 Write-Host "Configuring frigate_d3d_poc ($BuildType, $Triplet)..."

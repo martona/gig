@@ -1,7 +1,5 @@
 #include "render/video_renderer.h"
 
-#include <SDL_syswm.h>
-
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -52,7 +50,7 @@ PSIn VSMain(VSIn input) {
 }
 )";
 
-const char* PixelShaderSource = R"(
+const char* BgraPixelShaderSource = R"(
 Texture2D frameTexture : register(t0);
 SamplerState frameSampler : register(s0);
 
@@ -65,6 +63,92 @@ float4 PSMain(PSIn input) : SV_TARGET {
     return frameTexture.Sample(frameSampler, input.uv);
 }
 )";
+
+const char* Nv12PixelShaderSource = R"(
+Texture2D yTexture : register(t0);
+Texture2D uvTexture : register(t1);
+SamplerState frameSampler : register(s0);
+
+cbuffer ColorMatrix : register(b0) {
+    float4 yuvToRgbR;
+    float4 yuvToRgbG;
+    float4 yuvToRgbB;
+    float4 unusedRow;
+};
+
+struct PSIn {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+float4 PSMain(PSIn input) : SV_TARGET {
+    float y = yTexture.Sample(frameSampler, input.uv).r;
+    float2 uv = uvTexture.Sample(frameSampler, input.uv).rg;
+    float4 sample = float4(y, uv.x, uv.y, 1.0f);
+    return float4(
+        saturate(dot(yuvToRgbR, sample)),
+        saturate(dot(yuvToRgbG, sample)),
+        saturate(dot(yuvToRgbB, sample)),
+        1.0f);
+}
+)";
+
+const char* Yuv420PixelShaderSource = R"(
+Texture2D yTexture : register(t0);
+Texture2D uTexture : register(t1);
+Texture2D vTexture : register(t2);
+SamplerState frameSampler : register(s0);
+
+cbuffer ColorMatrix : register(b0) {
+    float4 yuvToRgbR;
+    float4 yuvToRgbG;
+    float4 yuvToRgbB;
+    float4 unusedRow;
+};
+
+struct PSIn {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+float4 PSMain(PSIn input) : SV_TARGET {
+    float y = yTexture.Sample(frameSampler, input.uv).r;
+    float u = uTexture.Sample(frameSampler, input.uv).r;
+    float v = vTexture.Sample(frameSampler, input.uv).r;
+    float4 sample = float4(y, u, v, 1.0f);
+    return float4(
+        saturate(dot(yuvToRgbR, sample)),
+        saturate(dot(yuvToRgbG, sample)),
+        saturate(dot(yuvToRgbB, sample)),
+        1.0f);
+}
+)";
+
+struct ColorMatrixConstants {
+    float r[4];
+    float g[4];
+    float b[4];
+    float unused[4];
+};
+
+ColorMatrixConstants yuvToRgbMatrix(bool fullRange)
+{
+    if (fullRange) {
+        return {
+            { 1.0f, 0.0f, 1.5748f, -0.7874f },
+            { 1.0f, -0.1873f, -0.4681f, 0.3277f },
+            { 1.0f, 1.8556f, 0.0f, -0.9278f },
+            { 0.0f, 0.0f, 0.0f, 0.0f },
+        };
+    }
+
+    return {
+        { 1.164383f, 0.0f, 1.792741f, -0.969430f },
+        { 1.164383f, -0.213249f, -0.532909f, 0.300047f },
+        { 1.164383f, 2.112402f, 0.0f, -1.129253f },
+        { 0.0f, 0.0f, 0.0f, 0.0f },
+    };
+}
 
 bool failed(HRESULT result, const char* action)
 {
@@ -82,14 +166,18 @@ public:
     {
         window_ = window;
 
-        SDL_SysWMinfo wmInfo = {};
-        SDL_VERSION(&wmInfo.version);
-        if (!SDL_GetWindowWMInfo(window_, &wmInfo)) {
-            std::cerr << "SDL_GetWindowWMInfo failed: " << SDL_GetError() << "\n";
+        SDL_PropertiesID properties = SDL_GetWindowProperties(window_);
+        if (!properties) {
+            std::cerr << "SDL_GetWindowProperties failed: " << SDL_GetError() << "\n";
             return false;
         }
 
-        hwnd_ = wmInfo.info.win.window;
+        hwnd_ = static_cast<HWND>(SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        if (!hwnd_) {
+            std::cerr << "SDL window has no Win32 HWND property.\n";
+            return false;
+        }
+
         readClientSize();
 
         DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
@@ -166,7 +254,7 @@ public:
             return;
         }
 
-        if (frame && !frame->bgra.empty()) {
+        if (frame && !frame->planes[0].empty()) {
             uploadFrame(*frame);
         }
 
@@ -183,7 +271,7 @@ public:
         context_->RSSetViewports(1, &fullViewport);
         context_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
 
-        if (textureView_) {
+        if (planeViews_[0]) {
             D3D11_VIEWPORT videoViewport = computeVideoViewport();
             context_->RSSetViewports(1, &videoViewport);
 
@@ -194,15 +282,36 @@ public:
             context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
             context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
-            context_->PSSetShader(pixelShader_.Get(), nullptr, 0);
-            ID3D11ShaderResourceView* shaderResources[] = { textureView_.Get() };
+
+            ID3D11ShaderResourceView* shaderResources[] = {
+                planeViews_[0].Get(),
+                planeViews_[1].Get(),
+                planeViews_[2].Get(),
+            };
             ID3D11SamplerState* samplers[] = { sampler_.Get() };
-            context_->PSSetShaderResources(0, 1, shaderResources);
+            UINT shaderResourceCount = 1;
+            if (textureFormat_ == VideoFrameFormat::NV12) {
+                updateColorMatrix(frame && frame->fullRange);
+                context_->PSSetShader(nv12PixelShader_.Get(), nullptr, 0);
+                ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
+                context_->PSSetConstantBuffers(0, 1, constantBuffers);
+                shaderResourceCount = 2;
+            } else if (textureFormat_ == VideoFrameFormat::YUV420P) {
+                updateColorMatrix(frame && frame->fullRange);
+                context_->PSSetShader(yuv420PixelShader_.Get(), nullptr, 0);
+                ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
+                context_->PSSetConstantBuffers(0, 1, constantBuffers);
+                shaderResourceCount = 3;
+            } else {
+                context_->PSSetShader(bgraPixelShader_.Get(), nullptr, 0);
+            }
+
+            context_->PSSetShaderResources(0, shaderResourceCount, shaderResources);
             context_->PSSetSamplers(0, 1, samplers);
             context_->Draw(4, 0);
 
-            ID3D11ShaderResourceView* nullResources[] = { nullptr };
-            context_->PSSetShaderResources(0, 1, nullResources);
+            ID3D11ShaderResourceView* nullResources[] = { nullptr, nullptr, nullptr };
+            context_->PSSetShaderResources(0, 3, nullResources);
         }
 
         const HRESULT presentResult = swapChain_->Present(1, 0);
@@ -263,9 +372,13 @@ private:
     bool createPipeline()
     {
         ComPtr<ID3DBlob> vertexShaderBlob;
-        ComPtr<ID3DBlob> pixelShaderBlob;
+        ComPtr<ID3DBlob> bgraPixelShaderBlob;
+        ComPtr<ID3DBlob> nv12PixelShaderBlob;
+        ComPtr<ID3DBlob> yuv420PixelShaderBlob;
         if (!compileShader(VertexShaderSource, "VSMain", "vs_4_0", vertexShaderBlob)
-            || !compileShader(PixelShaderSource, "PSMain", "ps_4_0", pixelShaderBlob)) {
+            || !compileShader(BgraPixelShaderSource, "PSMain", "ps_4_0", bgraPixelShaderBlob)
+            || !compileShader(Nv12PixelShaderSource, "PSMain", "ps_4_0", nv12PixelShaderBlob)
+            || !compileShader(Yuv420PixelShaderSource, "PSMain", "ps_4_0", yuv420PixelShaderBlob)) {
             return false;
         }
 
@@ -279,11 +392,29 @@ private:
         }
 
         result = device_->CreatePixelShader(
-            pixelShaderBlob->GetBufferPointer(),
-            pixelShaderBlob->GetBufferSize(),
+            bgraPixelShaderBlob->GetBufferPointer(),
+            bgraPixelShaderBlob->GetBufferSize(),
             nullptr,
-            pixelShader_.GetAddressOf());
-        if (failed(result, "ID3D11Device::CreatePixelShader")) {
+            bgraPixelShader_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreatePixelShader(BGRA)")) {
+            return false;
+        }
+
+        result = device_->CreatePixelShader(
+            nv12PixelShaderBlob->GetBufferPointer(),
+            nv12PixelShaderBlob->GetBufferSize(),
+            nullptr,
+            nv12PixelShader_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreatePixelShader(NV12)")) {
+            return false;
+        }
+
+        result = device_->CreatePixelShader(
+            yuv420PixelShaderBlob->GetBufferPointer(),
+            yuv420PixelShaderBlob->GetBufferSize(),
+            nullptr,
+            yuv420PixelShader_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreatePixelShader(YUV420P)")) {
             return false;
         }
 
@@ -323,7 +454,103 @@ private:
         samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
 
         result = device_->CreateSamplerState(&samplerDesc, sampler_.GetAddressOf());
-        return !failed(result, "ID3D11Device::CreateSamplerState");
+        if (failed(result, "ID3D11Device::CreateSamplerState")) {
+            return false;
+        }
+
+        D3D11_BUFFER_DESC colorMatrixDesc = {};
+        colorMatrixDesc.ByteWidth = sizeof(ColorMatrixConstants);
+        colorMatrixDesc.Usage = D3D11_USAGE_DEFAULT;
+        colorMatrixDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+
+        result = device_->CreateBuffer(&colorMatrixDesc, nullptr, colorMatrixBuffer_.GetAddressOf());
+        return !failed(result, "ID3D11Device::CreateBuffer(ColorMatrix)");
+    }
+
+    void updateColorMatrix(bool fullRange)
+    {
+        const ColorMatrixConstants constants = yuvToRgbMatrix(fullRange);
+        context_->UpdateSubresource(colorMatrixBuffer_.Get(), 0, nullptr, &constants, 0, 0);
+    }
+
+    void resetFrameTextures()
+    {
+        for (std::size_t i = 0; i < planeTextures_.size(); ++i) {
+            planeTextures_[i].Reset();
+            planeViews_[i].Reset();
+            planeWidths_[i] = 0;
+            planeHeights_[i] = 0;
+            planeFormats_[i] = DXGI_FORMAT_UNKNOWN;
+        }
+    }
+
+    bool uploadPlane(
+        std::size_t planeIndex,
+        DXGI_FORMAT format,
+        int width,
+        int height,
+        const std::vector<std::uint8_t>& source,
+        int sourceStride,
+        int copyBytes)
+    {
+        if (planeIndex >= planeTextures_.size() || width <= 0 || height <= 0 || source.empty()) {
+            return false;
+        }
+
+        if (!planeTextures_[planeIndex]
+            || planeWidths_[planeIndex] != width
+            || planeHeights_[planeIndex] != height
+            || planeFormats_[planeIndex] != format) {
+            planeTextures_[planeIndex].Reset();
+            planeViews_[planeIndex].Reset();
+
+            D3D11_TEXTURE2D_DESC textureDesc = {};
+            textureDesc.Width = static_cast<UINT>(width);
+            textureDesc.Height = static_cast<UINT>(height);
+            textureDesc.MipLevels = 1;
+            textureDesc.ArraySize = 1;
+            textureDesc.Format = format;
+            textureDesc.SampleDesc.Count = 1;
+            textureDesc.Usage = D3D11_USAGE_DYNAMIC;
+            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+            HRESULT result = device_->CreateTexture2D(&textureDesc, nullptr, planeTextures_[planeIndex].GetAddressOf());
+            if (failed(result, "ID3D11Device::CreateTexture2D")) {
+                return false;
+            }
+
+            result = device_->CreateShaderResourceView(
+                planeTextures_[planeIndex].Get(),
+                nullptr,
+                planeViews_[planeIndex].GetAddressOf());
+            if (failed(result, "ID3D11Device::CreateShaderResourceView")) {
+                planeTextures_[planeIndex].Reset();
+                return false;
+            }
+
+            planeWidths_[planeIndex] = width;
+            planeHeights_[planeIndex] = height;
+            planeFormats_[planeIndex] = format;
+        }
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        HRESULT result = context_->Map(planeTextures_[planeIndex].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        if (failed(result, "ID3D11DeviceContext::Map")) {
+            return false;
+        }
+
+        const auto* sourceData = source.data();
+        auto* destination = static_cast<std::uint8_t*>(mapped.pData);
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(
+                destination + static_cast<std::size_t>(y) * mapped.RowPitch,
+                sourceData + static_cast<std::size_t>(y) * sourceStride,
+                static_cast<std::size_t>(copyBytes));
+        }
+
+        context_->Unmap(planeTextures_[planeIndex].Get(), 0);
+        return true;
     }
 
     void uploadFrame(const VideoFrame& frame)
@@ -332,54 +559,39 @@ private:
             return;
         }
 
-        if (!texture_ || textureWidth_ != frame.width || textureHeight_ != frame.height) {
-            texture_.Reset();
-            textureView_.Reset();
-
-            D3D11_TEXTURE2D_DESC textureDesc = {};
-            textureDesc.Width = static_cast<UINT>(frame.width);
-            textureDesc.Height = static_cast<UINT>(frame.height);
-            textureDesc.MipLevels = 1;
-            textureDesc.ArraySize = 1;
-            textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            textureDesc.SampleDesc.Count = 1;
-            textureDesc.Usage = D3D11_USAGE_DYNAMIC;
-            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
-            HRESULT result = device_->CreateTexture2D(&textureDesc, nullptr, texture_.GetAddressOf());
-            if (failed(result, "ID3D11Device::CreateTexture2D")) {
-                return;
-            }
-
-            result = device_->CreateShaderResourceView(texture_.Get(), nullptr, textureView_.GetAddressOf());
-            if (failed(result, "ID3D11Device::CreateShaderResourceView")) {
-                texture_.Reset();
-                return;
-            }
-
+        if (textureFormat_ != frame.format || textureWidth_ != frame.width || textureHeight_ != frame.height) {
+            resetFrameTextures();
+            textureFormat_ = frame.format;
             textureWidth_ = frame.width;
             textureHeight_ = frame.height;
         }
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        HRESULT result = context_->Map(texture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (failed(result, "ID3D11DeviceContext::Map")) {
-            return;
+        bool uploaded = false;
+        if (frame.format == VideoFrameFormat::BGRA) {
+            uploaded = uploadPlane(
+                0,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                frame.width,
+                frame.height,
+                frame.planes[0],
+                frame.strides[0],
+                frame.width * 4);
+        } else if (frame.format == VideoFrameFormat::NV12) {
+            const int chromaWidth = frame.strides[1] / 2;
+            const int chromaHeight = (frame.height + 1) / 2;
+            uploaded = uploadPlane(0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
+                && uploadPlane(1, DXGI_FORMAT_R8G8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], frame.strides[1]);
+        } else if (frame.format == VideoFrameFormat::YUV420P) {
+            const int chromaWidth = (frame.width + 1) / 2;
+            const int chromaHeight = (frame.height + 1) / 2;
+            uploaded = uploadPlane(0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
+                && uploadPlane(1, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], chromaWidth)
+                && uploadPlane(2, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[2], frame.strides[2], chromaWidth);
         }
 
-        const auto* source = frame.bgra.data();
-        auto* destination = static_cast<std::uint8_t*>(mapped.pData);
-        const int copyBytes = frame.width * 4;
-        for (int y = 0; y < frame.height; ++y) {
-            std::memcpy(
-                destination + static_cast<std::size_t>(y) * mapped.RowPitch,
-                source + static_cast<std::size_t>(y) * frame.stride,
-                static_cast<std::size_t>(copyBytes));
+        if (uploaded) {
+            uploadedFrameIndex_ = frame.index;
         }
-
-        context_->Unmap(texture_.Get(), 0);
-        uploadedFrameIndex_ = frame.index;
     }
 
     D3D11_VIEWPORT computeVideoViewport() const
@@ -422,13 +634,24 @@ private:
     ComPtr<IDXGISwapChain> swapChain_;
     ComPtr<ID3D11RenderTargetView> renderTargetView_;
     ComPtr<ID3D11VertexShader> vertexShader_;
-    ComPtr<ID3D11PixelShader> pixelShader_;
+    ComPtr<ID3D11PixelShader> bgraPixelShader_;
+    ComPtr<ID3D11PixelShader> nv12PixelShader_;
+    ComPtr<ID3D11PixelShader> yuv420PixelShader_;
     ComPtr<ID3D11InputLayout> inputLayout_;
     ComPtr<ID3D11Buffer> vertexBuffer_;
     ComPtr<ID3D11SamplerState> sampler_;
-    ComPtr<ID3D11Texture2D> texture_;
-    ComPtr<ID3D11ShaderResourceView> textureView_;
+    ComPtr<ID3D11Buffer> colorMatrixBuffer_;
+    std::array<ComPtr<ID3D11Texture2D>, 3> planeTextures_;
+    std::array<ComPtr<ID3D11ShaderResourceView>, 3> planeViews_;
+    std::array<int, 3> planeWidths_ = {};
+    std::array<int, 3> planeHeights_ = {};
+    std::array<DXGI_FORMAT, 3> planeFormats_ = {
+        DXGI_FORMAT_UNKNOWN,
+        DXGI_FORMAT_UNKNOWN,
+        DXGI_FORMAT_UNKNOWN,
+    };
 
+    VideoFrameFormat textureFormat_ = VideoFrameFormat::BGRA;
     int textureWidth_ = 0;
     int textureHeight_ = 0;
     std::uint64_t uploadedFrameIndex_ = 0;

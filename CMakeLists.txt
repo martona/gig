@@ -12,7 +12,7 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-find_package(SDL2 CONFIG REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 
 add_executable(frigate_d3d_poc
@@ -37,17 +37,7 @@ target_link_libraries(frigate_d3d_poc PRIVATE
     ${FFMPEG_LIBRARIES}
 )
 
-if(TARGET SDL2::SDL2main)
-    target_link_libraries(frigate_d3d_poc PRIVATE SDL2::SDL2main)
-endif()
-
-if(TARGET SDL2::SDL2-static)
-    target_link_libraries(frigate_d3d_poc PRIVATE SDL2::SDL2-static)
-elseif(TARGET SDL2::SDL2)
-    target_link_libraries(frigate_d3d_poc PRIVATE SDL2::SDL2)
-else()
-    message(FATAL_ERROR "SDL2 CMake target was not found.")
-endif()
+target_link_libraries(frigate_d3d_poc PRIVATE SDL3::SDL3)
 
 if(WIN32)
     target_compile_definitions(frigate_d3d_poc PRIVATE

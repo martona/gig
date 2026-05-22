@@ -2,7 +2,8 @@
 #include "render/video_renderer.h"
 #include "video_frame.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 
 #include <atomic>
 #include <chrono>
@@ -75,7 +76,7 @@ class SdlLifetime {
 public:
     SdlLifetime()
     {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
             throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
         }
     }
@@ -102,11 +103,9 @@ int main(int argc, char** argv)
         auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(
             SDL_CreateWindow(
                 "Frigate D3D PoC",
-                SDL_WINDOWPOS_CENTERED,
-                SDL_WINDOWPOS_CENTERED,
                 1280,
                 720,
-                SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI),
+                SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY),
             SDL_DestroyWindow);
 
         if (!window) {
@@ -139,12 +138,11 @@ int main(int argc, char** argv)
         while (running) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
-                if (event.type == SDL_QUIT) {
+                if (event.type == SDL_EVENT_QUIT) {
                     running = false;
-                } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+                } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
                     running = false;
-                } else if (event.type == SDL_WINDOWEVENT
-                    && (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || event.window.event == SDL_WINDOWEVENT_RESIZED)) {
+                } else if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                     renderer->resize();
                 }
             }
