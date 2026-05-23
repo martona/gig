@@ -3,6 +3,14 @@
   "version-string": "0.1.0",
   "builtin-baseline": "a0df28c67403290f611347d837ee849fe98e5ad1",
   "dependencies": [
+    {
+      "name": "boost-asio",
+      "features": [
+        "ssl"
+      ]
+    },
+    "boost-beast",
+    "boost-json",
     "sdl3",
     {
       "name": "ffmpeg",

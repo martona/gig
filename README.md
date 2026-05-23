@@ -60,7 +60,7 @@ Use `probe` to check whether a Frigate or raw go2rtc base URL exposes the endpoi
   --key "C:\certs\marton@mars11.key"
 ```
 
-It probes Frigate config, Frigate-proxied go2rtc streams, and raw go2rtc stream status endpoints. Add `--stream-check` to read a small prefix from stream endpoints, `--dump` to print full fetched bodies, or `--endpoint /path` to test a custom path.
+It probes Frigate config, Frigate-proxied go2rtc streams, and raw go2rtc stream status endpoints, then parses the Frigate response to list cameras and their go2rtc streams. Add `--stream-check` to read a small prefix from stream endpoints, `--dump` to print fetched bodies, `--max-bytes N` to raise the response cap, or `--endpoint /path` to test a custom path.
 
 ## Next Steps
 

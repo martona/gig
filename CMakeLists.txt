@@ -12,8 +12,10 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+find_package(Boost REQUIRED COMPONENTS json)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 add_executable(frigate_d3d_poc
     src/main.cpp
@@ -40,7 +42,13 @@ target_link_libraries(frigate_d3d_poc PRIVATE
     ${FFMPEG_LIBRARIES}
 )
 
-target_link_libraries(frigate_d3d_poc PRIVATE SDL3::SDL3)
+target_link_libraries(frigate_d3d_poc PRIVATE
+    Boost::boost
+    Boost::json
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    SDL3::SDL3
+)
 
 if(WIN32)
     target_compile_definitions(frigate_d3d_poc PRIVATE

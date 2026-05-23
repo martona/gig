@@ -10,7 +10,7 @@ struct ProbeOptions {
     std::string baseUrl;
     std::string streamName;
     TlsOptions tls;
-    std::size_t maxBytes = 16 * 1024;
+    std::size_t maxBytes = 2 * 1024 * 1024;
     bool dumpBody = false;
     bool checkStreams = false;
     std::vector<std::string> extraEndpoints;
