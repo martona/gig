@@ -21,6 +21,8 @@ add_executable(frigate_d3d_poc
     src/video_frame.h
     src/decode/ffmpeg_decoder.cpp
     src/decode/ffmpeg_decoder.h
+    src/probe/http_probe.cpp
+    src/probe/http_probe.h
     src/render/d3d11_renderer.cpp
     src/render/video_renderer.h
 )

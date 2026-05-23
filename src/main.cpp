@@ -1,4 +1,5 @@
 #include "decode/ffmpeg_decoder.h"
+#include "probe/http_probe.h"
 #include "render/video_renderer.h"
 #include "video_frame.h"
 
@@ -17,8 +18,15 @@ namespace {
 
 constexpr const char* DefaultUrl = "https://frigate.lan/security-go2rtc/api/stream.ts?src=frontgate";
 
+enum class Command {
+    Run,
+    Probe,
+};
+
 struct ProgramOptions {
+    Command command = Command::Run;
     std::string url = DefaultUrl;
+    ProbeOptions probe;
     TlsOptions tls;
     bool showHelp = false;
 };
@@ -27,8 +35,9 @@ void printUsage()
 {
     std::cout
         << "frigate_d3d_poc [--url URL] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
+        << "frigate_d3d_poc probe --base URL [--src STREAM] [--stream-check] [--endpoint PATH]\n"
         << "\n"
-        << "If --url is omitted, this default is used:\n"
+        << "If the viewer --url is omitted, this default is used:\n"
         << "  " << DefaultUrl << "\n";
 }
 
@@ -42,16 +51,59 @@ std::string requireValue(int& index, int argc, char** argv, const char* option)
     return argv[index];
 }
 
+std::string baseUrlFromStreamUrl(std::string url)
+{
+    const std::size_t query = url.find('?');
+    if (query != std::string::npos) {
+        url.erase(query);
+    }
+
+    const std::string apiMarker = "/api/";
+    const std::size_t api = url.find(apiMarker);
+    if (api != std::string::npos) {
+        url.erase(api);
+    } else if (url.ends_with("/api")) {
+        url.erase(url.size() - 4);
+    }
+
+    while (!url.empty() && url.back() == '/') {
+        url.pop_back();
+    }
+    return url;
+}
+
 ProgramOptions parseOptions(int argc, char** argv)
 {
     ProgramOptions options;
 
-    for (int i = 1; i < argc; ++i) {
+    int firstOption = 1;
+    if (argc > 1 && std::string(argv[1]) == "probe") {
+        options.command = Command::Probe;
+        firstOption = 2;
+    }
+
+    for (int i = firstOption; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
             options.showHelp = true;
         } else if (arg == "--url") {
             options.url = requireValue(i, argc, argv, "--url");
+            if (options.command == Command::Probe) {
+                options.probe.baseUrl = options.url;
+            }
+        } else if (arg == "--base") {
+            options.probe.baseUrl = requireValue(i, argc, argv, "--base");
+        } else if (arg == "--src") {
+            options.probe.streamName = requireValue(i, argc, argv, "--src");
+        } else if (arg == "--max-bytes") {
+            const std::string value = requireValue(i, argc, argv, "--max-bytes");
+            options.probe.maxBytes = static_cast<std::size_t>(std::stoull(value));
+        } else if (arg == "--dump") {
+            options.probe.dumpBody = true;
+        } else if (arg == "--stream-check") {
+            options.probe.checkStreams = true;
+        } else if (arg == "--endpoint") {
+            options.probe.extraEndpoints.push_back(requireValue(i, argc, argv, "--endpoint"));
         } else if (arg == "--ca") {
             options.tls.caFile = requireValue(i, argc, argv, "--ca");
         } else if (arg == "--cert") {
@@ -63,9 +115,22 @@ ProgramOptions parseOptions(int argc, char** argv)
         } else if (arg == "--insecure") {
             options.tls.verifyServer = false;
         } else if (!arg.starts_with("--")) {
-            options.url = arg;
+            if (options.command == Command::Probe) {
+                options.probe.baseUrl = arg;
+            } else {
+                options.url = arg;
+            }
         } else {
             throw std::runtime_error("Unknown option: " + arg);
+        }
+    }
+
+    options.probe.tls = options.tls;
+    if (options.command == Command::Probe) {
+        if (options.probe.baseUrl.empty()) {
+            options.probe.baseUrl = baseUrlFromStreamUrl(options.url);
+        } else {
+            options.probe.baseUrl = baseUrlFromStreamUrl(options.probe.baseUrl);
         }
     }
 
@@ -96,6 +161,9 @@ int main(int argc, char** argv)
         if (options.showHelp) {
             printUsage();
             return 0;
+        }
+        if (options.command == Command::Probe) {
+            return runProbe(options.probe);
         }
 
         SdlLifetime sdl;

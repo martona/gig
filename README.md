@@ -47,6 +47,21 @@ For a quick server-cert bypass while testing:
 .\build\windows-release\frigate_d3d_poc.exe --insecure --cert C:\certs\client.crt --key C:\certs\client.key
 ```
 
+## Probe
+
+Use `probe` to check whether a Frigate or raw go2rtc base URL exposes the endpoints this app can use for discovery/status:
+
+```powershell
+.\build\windows-release\frigate_d3d_poc.exe probe `
+  --base "https://frigate.lan/security" `
+  --src frontgate `
+  --ca "C:\certs\myca.pem" `
+  --cert "C:\certs\marton@mars11.crt" `
+  --key "C:\certs\marton@mars11.key"
+```
+
+It probes Frigate config, Frigate-proxied go2rtc streams, and raw go2rtc stream status endpoints. Add `--stream-check` to read a small prefix from stream endpoints, `--dump` to print full fetched bodies, or `--endpoint /path` to test a custom path.
+
 ## Next Steps
 
 - Replace PEM file options with a Windows certificate store backed TLS path.
