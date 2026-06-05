@@ -1,5 +1,7 @@
 #include "net/tls_context.hpp"
 
+#include "net/cng_tls.hpp"
+
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -45,13 +47,29 @@ void configureSslContext(ssl::context& context, const TlsOptions& tls)
     context.set_options(ssl::context::default_workarounds);
     if (tls.verifyServer) {
         context.set_verify_mode(ssl::verify_peer);
-        if (!tls.caFile.empty()) {
+        if (tls.useWindowsStore) {
+            // Trust roots from the Windows certificate store (our private CA lives
+            // in Trusted Root). Proven via the certstore probe.
+            if (SSL_CTX_load_verify_store(context.native_handle(), "org.openssl.winstore://") != 1) {
+                throw std::runtime_error("failed to load Windows store trust roots: " + opensslErrorString());
+            }
+        } else if (!tls.caFile.empty()) {
             context.load_verify_file(requireReadableFile(tls.caFile, "CA certificate"));
         } else {
             context.set_default_verify_paths();
         }
     } else {
         context.set_verify_mode(ssl::verify_none);
+    }
+
+    if (tls.useWindowsStore) {
+        // Client cert from CurrentUser\MY via the CNG signing bridge. Pops the
+        // Windows consent prompt on first use; the selection is cached process-wide
+        // so every context shares one picker + one consent.
+        if (!useWindowsStoreClientCert(context.native_handle())) {
+            throw std::runtime_error("no usable Windows store client certificate was selected");
+        }
+        return;
     }
 
     if (!tls.certFile.empty()) {

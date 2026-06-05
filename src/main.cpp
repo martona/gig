@@ -5,6 +5,7 @@
 #include "net/cookie_jar.hpp"
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
+#include "net/win_cert_store.h"
 #include "probe/cert_probe.h"
 #include "probe/http_probe.h"
 #include "render/grid_layout.h"
@@ -131,6 +132,9 @@ void printUsage()
         << "gig discover --base URL [--stream-url TEMPLATE] [--ca CA] [--cert C] [--key K]\n"
         << "gig certstore --base URL [--server-only|--capi]   (Windows cert store; default = CNG client-cert bridge)\n"
         << "\n"
+        << "  With no --ca/--cert/--key, the Windows certificate store is used (store CA + CNG client\n"
+        << "  cert); this pops a Windows consent prompt on first use.\n"
+        << "\n"
         << "If the viewer --url is omitted, this default is used:\n"
         << "  " << DefaultUrl << "\n";
 }
@@ -237,6 +241,12 @@ ProgramOptions parseOptions(int argc, char** argv)
         }
     }
 
+    // The Windows certificate store is implicit when no PEM material is given:
+    // store trust roots for server verification + a CurrentUser\MY client cert.
+    options.tls.useWindowsStore = options.tls.caFile.empty()
+        && options.tls.certFile.empty()
+        && options.tls.keyFile.empty();
+
     options.probe.tls = options.tls;
     if (options.command == Command::Probe || options.command == Command::Discover
         || options.command == Command::CertStore) {
@@ -308,6 +318,17 @@ int main(int argc, char** argv)
         if (!window) {
             throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
         }
+
+#ifdef _WIN32
+        // Own the Windows cert picker + CNG consent / key-access prompts to our
+        // window so they are modal to it: a disabled main window can't be closed
+        // mid-prompt, which would otherwise deadlock shutdown (join) against a
+        // thread blocked in the prompt.
+        if (const SDL_PropertiesID windowProps = SDL_GetWindowProperties(window.get())) {
+            void* hwnd = SDL_GetPointerProperty(windowProps, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+            gig::setConsentParentWindow(hwnd);
+        }
+#endif
 
         auto renderer = createD3D11Renderer();
         if (!renderer->initialize(window.get())) {

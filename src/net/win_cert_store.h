@@ -11,6 +11,14 @@
 
 namespace gig {
 
+// Set the owner window for the cert picker and the CNG consent / key-access
+// dialogs, so they are modal to our application window. While such a prompt is up
+// the owner window is disabled, so the user can't try to close the app mid-prompt
+// -- which would otherwise deadlock shutdown (a join against a thread blocked in
+// the prompt). Pass the HWND as void*; nullptr (the default) means no owner (the
+// CLI probes). Call once at startup, before the first store operation.
+void setConsentParentWindow(void* hwnd);
+
 // A client certificate selected from the Windows store, holding its (typically
 // non-exportable) CNG private key open for signing. Move-only; releases the key
 // on destruction.

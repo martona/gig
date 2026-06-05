@@ -9,6 +9,19 @@
 #include <ncrypt.h>
 
 namespace gig {
+namespace {
+
+// Owner window for the picker + CNG UI. Set once at startup before any store op,
+// read on the same (main) thread when the cert is selected; no synchronization
+// needed.
+HWND g_consentParent = nullptr;
+
+} // namespace
+
+void setConsentParentWindow(void* hwnd)
+{
+    g_consentParent = static_cast<HWND>(hwnd);
+}
 
 WinClientCert::~WinClientCert()
 {
@@ -52,7 +65,7 @@ WinClientCert selectClientCertFromStore()
     }
 
     PCCERT_CONTEXT cert = CryptUIDlgSelectCertificateFromStore(
-        store, nullptr, nullptr, nullptr, CRYPTUI_SELECT_LOCATION_COLUMN, 0, nullptr);
+        store, g_consentParent, nullptr, nullptr, CRYPTUI_SELECT_LOCATION_COLUMN, 0, nullptr);
     if (!cert) {
         CertCloseStore(store, 0);
         return result;
@@ -75,6 +88,15 @@ WinClientCert selectClientCertFromStore()
         result.keyHandle = static_cast<std::uintptr_t>(key);
         // CryptAcquireCertificatePrivateKey returns an NCRYPT handle the caller
         // owns; WinClientCert frees it. (callerOwnsKey is expected TRUE here.)
+
+        // Own any consent / key-access UI this key shows (on whatever thread later
+        // signs) to our window, so it is modal to the app and can't be closed
+        // behind. Best effort: ignore failure (falls back to an unowned prompt).
+        if (g_consentParent != nullptr) {
+            NCryptSetProperty(
+                key, NCRYPT_WINDOW_HANDLE_PROPERTY,
+                reinterpret_cast<PBYTE>(&g_consentParent), sizeof(g_consentParent), 0);
+        }
     }
 
     CertFreeCertificateContext(cert);

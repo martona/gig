@@ -31,6 +31,8 @@ add_executable(gig
     src/discovery/frigate_discovery.h
     src/health/stream_health.cpp
     src/health/stream_health.h
+    src/net/cng_tls.cpp
+    src/net/cng_tls.hpp
     src/net/cookie_jar.cpp
     src/net/cookie_jar.hpp
     src/net/http_client.cpp

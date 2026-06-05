@@ -1,10 +1,14 @@
 # Handoff — start here
 
-Notes for the next session. The grid app is done and working, **and the Phase 2 TLS
-re-plumb is now DONE and verified** (we terminate all TLS ourselves; FFmpeg no
-longer does any networking). The remaining work is **Phase 1: flip the now-single
-TLS stack to the Windows store + CNG client cert.** `PLAN.md` has the grid-milestone
-history.
+Notes for the next session. The grid app is done and working, **and the TLS re-plumb
+is COMPLETE** — both Phase 2 (we terminate all TLS ourselves; FFmpeg does no
+networking) and Phase 1 (Windows store + CNG client cert) are done and verified
+against the user's Frigate. `PLAN.md` has the grid-milestone history.
+
+**Default auth is now the Windows store** (store trust roots + a CurrentUser\MY
+client cert via the CNG bridge) — implicit whenever no `--ca/--cert/--key` PEM args
+are given; pops the Windows cert picker + one consent prompt on first use. PEM is the
+explicit fallback. No `--winstore` flag — it's derived from the absence of PEM args.
 
 ## What the app is
 
@@ -38,19 +42,27 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
 - `src/net/http_client.*` — Boost.Beast mTLS client (control plane: discovery + health).
 - `src/net/tls_client.*` — **`TlsClient`** (the app-lifetime TLS holder: one shared
   `ssl::context`) + **`MediaStream`** (streaming HTTPS GET, de-chunked `buffer_body`,
-  the custom-AVIO byte source). **Phase 1 client cert lives here / via tls_context.**
+  the custom-AVIO byte source).
 - `src/net/tls_context.*` — **`configureSslContext`** — the single place every TLS
-  consumer (control plane + video) is configured. **Phase 1 edits this one function.**
+  consumer (control plane + video) is configured: winstore CA + CNG client cert when no
+  PEM args, else PEM.
+- `src/net/cng_tls.*` — **`useWindowsStoreClientCert(SSL_CTX*)`**: the OpenSSL↔CNG
+  signing bridge (RSA `RSA_METHOD` / EC `EC_KEY_METHOD` → `NCryptSignHash`) + a
+  process-wide cached `WinClientCert` (one picker + one consent). RSA pins TLS 1.2 +
+  PKCS#1; EC is TLS 1.3.
 - `src/net/cookie_jar.*` — thread-safe cookie jar shared by control plane + video
   (seam for dropping mTLS → native Frigate auth later; empty under mTLS today).
 - `src/net/tls_session_cache.*` — TLS resumption pool (ported from `../hitsc`), shared
   across control plane + all video connections.
-- `src/net/win_cert_store.*` — Win32/CNG cert picker + RSA & EC signers. **Phase 1 uses.**
-- `src/probe/cert_probe.*` — the `certstore` probe + the OpenSSL↔CNG bridge to relocate in Phase 1.
+- `src/net/win_cert_store.*` — Win32/CNG cert picker + RSA & EC signers (used by `cng_tls`)
+  + `setConsentParentWindow` (owns the picker/consent/key-access dialogs to the app
+  window so it can't be closed mid-prompt — else shutdown's join deadlocks against the
+  thread stuck in the prompt). `main.cpp` feeds it the SDL HWND.
+- `src/probe/cert_probe.*` — the `certstore` probe; its CNG path calls `cng_tls`.
 - `src/probe/http_probe.*` — the `probe` command (self-contained Beast, own anon-namespace TLS).
 - `src/render/*` — D3D11 per-tile grid renderer, `grid_layout`, `text_overlay` (GDI font-atlas HUD).
 
-## TLS architecture NOW (post Phase 2)
+## TLS architecture (final)
 
 There is **one TLS stack**: our Boost.Beast + OpenSSL. Both planes go through
 `configureSslContext` (`tls_context.cpp`):
@@ -60,9 +72,11 @@ There is **one TLS stack**: our Boost.Beast + OpenSSL. Both planes go through
    is built **without** the `openssl` feature (`--disable-openssl --enable-schannel`)
    and we dropped `avformat_network_init()` — FFmpeg uses zero protocols now.
 
-Today still on PEM (`--ca/--cert/--key`). Control plane and video each build their own
-`ssl::context` (both via `configureSslContext`) but share the one `TlsSessionCache`
-and `CookieJar`.
+Auth: **Windows store by default** (store trust roots + a CurrentUser\MY client cert
+via the CNG bridge), or PEM when `--ca/--cert/--key` are given. Control plane and video
+each build their own `ssl::context` (both via `configureSslContext`) but share the one
+`TlsSessionCache`, `CookieJar`, and — via `cng_tls`'s process-wide cache — the one
+selected `WinClientCert`, so the picker + consent fire once.
 
 ## TLS / cert R&D — DONE and PROVEN (read before touching TLS for Phase 1)
 
@@ -114,36 +128,43 @@ surface** — disable its network/protocol layer (we use zero FFmpeg protocols) 
 unused demuxers/codecs (we only need h264/h265 + mpegts + swscale) via custom vcpkg
 port options. Separate, bigger effort; not done.
 
-## Phase 1 — flip the (now single) TLS stack to the Windows store (THE REMAINING WORK)
+## Phase 1 — DONE ✅ (Windows store + CNG client cert, default)
 
-**Goal:** swap PEM → Windows store for the real client: winstore CA + CNG client cert.
-- Relocate the OpenSSL↔CNG bridge helpers (the `RSA_METHOD`/`EC_KEY_METHOD` build funcs
-  + key-type detect) out of `cert_probe.cpp` into a reusable spot — cleanest is to fold
-  them into **`tls_context.cpp`** (or a new `src/net/cng_tls.*` it calls).
-  `win_cert_store.*` is already reusable.
-- **`configureSslContext` (`tls_context.cpp`) is now the single chokepoint** — edit it:
-  - Server CA: `SSL_CTX_load_verify_store(ctx, "org.openssl.winstore://")` + verify_peer.
-  - Client cert: `selectClientCertFromStore()` **once** at startup (or remember the
-    thumbprint in config to skip the picker), build the bridge EVP_PKEY,
-    `SSL_CTX_use_certificate` + `SSL_CTX_use_PrivateKey`.
-  - RSA: pin TLS 1.2 + PKCS#1 sigalgs (see probe). EC: no pin.
-- New flag (e.g. `--winstore`); keep PEM (`--ca/--cert/--key`) as default/fallback.
-- **Lifetime / one-consent gotcha:** `configureSslContext` is called **per context** —
-  control plane (`HttpClient`) builds one, `TlsClient` builds another. To get **one**
-  consent, select the `WinClientCert` **once** and reuse it across both contexts (e.g.
-  a process-wide/lazy-static holding the live `NCRYPT_KEY_HANDLE`), or unify to a single
-  shared context. The handle must outlive every SSL_CTX + handshake; session resumption
-  (already shared) then avoids re-signing on reconnects. `TlsClient` is the natural
-  app-lifetime home if you go the holder route.
-- **CONSENT-PROMPT CONSTRAINT:** once the app uses a store cert, *running it pops the
-  prompt*. A fresh Claude must hand runs to the user — build, then ask.
+Built + verified against the user's Frigate (full grid on store certs + the `certstore`
+probe). What landed:
+- `cng_tls.*` — the OpenSSL↔CNG bridge relocated out of `cert_probe.cpp`, exposing
+  `useWindowsStoreClientCert(SSL_CTX*)`: selects the cert **once** via a process-wide
+  cached `WinClientCert` (one picker + one consent across both SSL contexts), builds the
+  bridge `EVP_PKEY` (RSA `RSA_METHOD` / EC `EC_KEY_METHOD` → `NCryptSignHash`), pins RSA
+  to TLS 1.2 + PKCS#1, leaves EC on TLS 1.3.
+- `tls_context.cpp` (`configureSslContext`, the single chokepoint): when
+  `useWindowsStore`, server CA via `SSL_CTX_load_verify_store("org.openssl.winstore://")`
+  + `useWindowsStoreClientCert`; else PEM.
+- `tls_options.h`: `useWindowsStore` is **derived, not a flag** — set in `main.cpp` when
+  no `--ca/--cert/--key` is given. (There is intentionally no `--winstore`.)
+- `cert_probe.cpp`: de-duped — its CNG path now calls `cng_tls` (single source of truth).
+- Verified: `certstore --server-only` validates the server cert via the store over TLS
+  1.3 (`verify result: 0 (ok)`); the full grid runs on the store cert with one consent
+  (session resumption + the startup stagger keep it to one).
+
+## Possible future work (not started)
+
+- **Shrink the exe for real:** the Phase-2 `openssl`-feature drop did NOT shrink it (see
+  the size note above). To actually cut size, trim FFmpeg's own surface via custom vcpkg
+  port options — disable its network/protocol layer (we use zero FFmpeg protocols) and
+  the demuxers/codecs we don't need (only h264/h265 + mpegts + swscale).
+- **Native Frigate auth:** the shared `CookieJar` is the seam — add a login flow that
+  populates it, then mTLS becomes optional.
+- **TLS 1.3 for RSA store certs:** would need a full OpenSSL 3.x *provider* (RSA-PSS),
+  replacing the legacy `RSA_METHOD` bridge. EC already does TLS 1.3.
 
 ## Operational constraints for the next Claude
 
-- **Cannot run unattended:** `certstore` (default), or the real app once on store
-  certs — both pop a Windows consent prompt; hand to the user.
-- **Can run solo:** builds, PEM-based grid runs, `certstore --server-only`,
-  `discover`, `probe`.
+- **Cannot run unattended:** the app or `discover` with **no PEM args** (the default →
+  Windows store → cert picker + consent prompt), and `certstore` (default CNG). Hand to
+  the user.
+- **Can run solo:** builds, **PEM grid runs / `discover`** (explicit `--ca/--cert/--key`
+  → no consent), `certstore --server-only`, `probe`.
 - **This dev VM has no usable GPU** (D3D adapter is software/WARP) — HW decode
   auto-falls-back to software; use `--software` or rely on the fallback. The user
   validates HW decode on a separate GPU box.
