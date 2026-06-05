@@ -40,4 +40,9 @@ WinClientCert selectClientCertFromStore();
 // Windows consent UI for a UI-protected key.
 std::vector<std::uint8_t> cngSignPkcs1(std::uintptr_t keyHandle, const std::uint8_t* digest, std::size_t digestLen);
 
+// ECDSA signature over an already-computed digest, using the CNG key. Returns
+// the raw r||s (each half the curve's field size), or empty on failure. Also
+// triggers the Windows consent UI for a UI-protected key.
+std::vector<std::uint8_t> cngSignEcdsa(std::uintptr_t keyHandle, const std::uint8_t* digest, std::size_t digestLen);
+
 } // namespace gig

@@ -123,4 +123,34 @@ std::vector<std::uint8_t> cngSignPkcs1(std::uintptr_t keyHandle, const std::uint
     return signature;
 }
 
+std::vector<std::uint8_t> cngSignEcdsa(std::uintptr_t keyHandle, const std::uint8_t* digest, std::size_t digestLen)
+{
+    std::vector<std::uint8_t> signature;
+    if (keyHandle == 0 || digest == nullptr) {
+        return signature;
+    }
+
+    // ECDSA: no padding info; NCrypt returns the raw r||s.
+    auto key = static_cast<NCRYPT_KEY_HANDLE>(keyHandle);
+    DWORD signatureLen = 0;
+    SECURITY_STATUS status = NCryptSignHash(
+        key, nullptr, const_cast<PBYTE>(digest), static_cast<DWORD>(digestLen),
+        nullptr, 0, &signatureLen, 0);
+    if (status != ERROR_SUCCESS) {
+        return signature;
+    }
+
+    signature.resize(signatureLen);
+    status = NCryptSignHash(
+        key, nullptr, const_cast<PBYTE>(digest), static_cast<DWORD>(digestLen),
+        signature.data(), signatureLen, &signatureLen, 0);
+    if (status != ERROR_SUCCESS) {
+        signature.clear();
+        return signature;
+    }
+
+    signature.resize(signatureLen);
+    return signature;
+}
+
 } // namespace gig

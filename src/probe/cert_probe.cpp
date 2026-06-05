@@ -21,6 +21,8 @@
 
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
 #include <openssl/engine.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -100,7 +102,7 @@ RSA_METHOD* cngRsaMethod()
 
 // Build an EVP_PKEY whose public half comes from `leaf` and whose signing is
 // delegated to the store key. Returns nullptr on failure.
-EVP_PKEY* buildCngClientKey(const WinClientCert& cert, X509* leaf)
+EVP_PKEY* buildCngRsaKey(const WinClientCert& cert, X509* leaf)
 {
     EVP_PKEY* pub = X509_get_pubkey(leaf);
     if (!pub) {
@@ -126,6 +128,100 @@ EVP_PKEY* buildCngClientKey(const WinClientCert& cert, X509* leaf)
     EVP_PKEY* pkey = EVP_PKEY_new();
     if (EVP_PKEY_assign_RSA(pkey, signRsa) != 1) {
         RSA_free(signRsa);
+        EVP_PKEY_free(pkey);
+        return nullptr;
+    }
+    return pkey;
+}
+
+// EC variant. ECDSA has no padding, so the sign hook gets the bare digest and
+// this works on TLS 1.2 and 1.3 alike.
+int ecCngExIndex()
+{
+    static const int index = EC_KEY_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+
+int cngEcSign(int type, const unsigned char* digest, int digestLen,
+              unsigned char* sig, unsigned int* sigLen,
+              const BIGNUM* kinv, const BIGNUM* rp, EC_KEY* eckey)
+{
+    (void)type;
+    (void)kinv;
+    (void)rp;
+    const auto keyHandle = reinterpret_cast<std::uintptr_t>(EC_KEY_get_ex_data(eckey, ecCngExIndex()));
+    const std::vector<std::uint8_t> raw = cngSignEcdsa(keyHandle, digest, static_cast<std::size_t>(digestLen));
+    if (raw.empty() || (raw.size() % 2) != 0) {
+        return 0;
+    }
+
+    const std::size_t half = raw.size() / 2;
+    ECDSA_SIG* sigObj = ECDSA_SIG_new();
+    if (!sigObj) {
+        return 0;
+    }
+    BIGNUM* r = BN_bin2bn(raw.data(), static_cast<int>(half), nullptr);
+    BIGNUM* s = BN_bin2bn(raw.data() + half, static_cast<int>(half), nullptr);
+    if (!r || !s || ECDSA_SIG_set0(sigObj, r, s) != 1) {
+        BN_free(r);
+        BN_free(s);
+        ECDSA_SIG_free(sigObj);
+        return 0;
+    }
+
+    unsigned char* out = sig;
+    const int len = i2d_ECDSA_SIG(sigObj, &out); // DER-encode r,s into the caller's buffer
+    ECDSA_SIG_free(sigObj);
+    if (len <= 0) {
+        return 0;
+    }
+    *sigLen = static_cast<unsigned int>(len);
+    return 1;
+}
+
+EC_KEY_METHOD* cngEcMethod()
+{
+    static EC_KEY_METHOD* method = [] {
+        EC_KEY_METHOD* m = EC_KEY_METHOD_new(EC_KEY_get_default_method());
+        int (*defaultSign)(int, const unsigned char*, int, unsigned char*, unsigned int*,
+                           const BIGNUM*, const BIGNUM*, EC_KEY*) = nullptr;
+        int (*defaultSetup)(EC_KEY*, BN_CTX*, BIGNUM**, BIGNUM**) = nullptr;
+        ECDSA_SIG* (*defaultSignSig)(const unsigned char*, int, const BIGNUM*, const BIGNUM*, EC_KEY*) = nullptr;
+        EC_KEY_METHOD_get_sign(m, &defaultSign, &defaultSetup, &defaultSignSig);
+        EC_KEY_METHOD_set_sign(m, cngEcSign, defaultSetup, defaultSignSig);
+        return m;
+    }();
+    return method;
+}
+
+EVP_PKEY* buildCngEcKey(const WinClientCert& cert, X509* leaf)
+{
+    EVP_PKEY* pub = X509_get_pubkey(leaf);
+    if (!pub) {
+        return nullptr;
+    }
+    EC_KEY* pubEc = EVP_PKEY_get1_EC_KEY(pub);
+    EVP_PKEY_free(pub);
+    if (!pubEc) {
+        return nullptr;
+    }
+
+    EC_KEY* signEc = EC_KEY_new();
+    if (!signEc
+        || EC_KEY_set_group(signEc, EC_KEY_get0_group(pubEc)) != 1
+        || EC_KEY_set_public_key(signEc, EC_KEY_get0_public_key(pubEc)) != 1) {
+        EC_KEY_free(pubEc);
+        EC_KEY_free(signEc);
+        return nullptr;
+    }
+    EC_KEY_free(pubEc);
+
+    EC_KEY_set_method(signEc, cngEcMethod());
+    EC_KEY_set_ex_data(signEc, ecCngExIndex(), reinterpret_cast<void*>(cert.keyHandle));
+
+    EVP_PKEY* pkey = EVP_PKEY_new();
+    if (EVP_PKEY_assign_EC_KEY(pkey, signEc) != 1) {
+        EC_KEY_free(signEc);
         EVP_PKEY_free(pkey);
         return nullptr;
     }
@@ -200,16 +296,39 @@ int runCertProbe(const std::string& baseUrl, ClientCertMode mode)
         } else {
             const unsigned char* der = storeCert.certDer.data();
             leaf = d2i_X509(nullptr, &der, static_cast<long>(storeCert.certDer.size()));
-            EVP_PKEY* pkey = leaf ? buildCngClientKey(storeCert, leaf) : nullptr;
+
+            int keyType = 0;
+            if (leaf) {
+                EVP_PKEY* pub = X509_get_pubkey(leaf);
+                keyType = pub ? EVP_PKEY_base_id(pub) : 0;
+                EVP_PKEY_free(pub);
+            }
+
+            EVP_PKEY* pkey = nullptr;
+            const char* describe = "";
+            bool pinPkcs1 = false;
+            if (keyType == EVP_PKEY_RSA) {
+                pkey = buildCngRsaKey(storeCert, leaf);
+                pinPkcs1 = true;
+                describe = "RSA (TLS 1.2, PKCS#1)";
+            } else if (keyType == EVP_PKEY_EC) {
+                pkey = buildCngEcKey(storeCert, leaf);
+                describe = "EC (TLS 1.2/1.3, ECDSA)";
+            } else if (leaf) {
+                std::cout << "[client cert] unsupported key type (only RSA and EC are bridged)\n";
+            }
+
             if (leaf && pkey
                 && SSL_CTX_use_certificate(native, leaf) == 1
                 && SSL_CTX_use_PrivateKey(native, pkey) == 1) {
-                // The legacy RSA bridge only does PKCS#1, so pin sig algs + TLS 1.2.
-                SSL_CTX_set_max_proto_version(native, TLS1_2_VERSION);
-                SSL_CTX_set1_sigalgs_list(native, "RSA+SHA256:RSA+SHA384:RSA+SHA512");
+                if (pinPkcs1) {
+                    // The legacy RSA bridge only does PKCS#1, so pin TLS 1.2 + PKCS#1 sig algs.
+                    SSL_CTX_set_max_proto_version(native, TLS1_2_VERSION);
+                    SSL_CTX_set1_sigalgs_list(native, "RSA+SHA256:RSA+SHA384:RSA+SHA512");
+                }
                 std::cout << "[client cert] store cert wired via CNG bridge: " << subjectOf(leaf)
-                          << " (TLS 1.2, PKCS#1)\n";
-            } else {
+                          << " -- " << describe << "\n";
+            } else if (pkey) {
                 std::cout << "[client cert] failed to wire store cert: " << opensslErrors() << "\n";
             }
             if (pkey) {
