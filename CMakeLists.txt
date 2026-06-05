@@ -19,13 +19,25 @@ find_package(OpenSSL REQUIRED)
 
 add_executable(frigate_d3d_poc
     src/main.cpp
+    src/log.cpp
+    src/log.hpp
     src/d3d11_decode_context.h
     src/video_frame.h
     src/decode/ffmpeg_decoder.cpp
     src/decode/ffmpeg_decoder.h
+    src/discovery/frigate_discovery.cpp
+    src/discovery/frigate_discovery.h
+    src/net/tls_options.h
+    src/net/tls_session_cache.cpp
+    src/net/tls_session_cache.hpp
+    src/net/url.h
+    src/net/http_client.cpp
+    src/net/http_client.hpp
     src/probe/http_probe.cpp
     src/probe/http_probe.h
     src/render/d3d11_renderer.cpp
+    src/render/grid_layout.cpp
+    src/render/grid_layout.h
     src/render/video_renderer.h
 )
 

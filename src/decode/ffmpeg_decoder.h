@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d11_decode_context.h"
+#include "net/tls_options.h"
 #include "video_frame.h"
 
 #include <atomic>
@@ -10,14 +11,6 @@
 #include <string>
 #include <thread>
 
-struct TlsOptions {
-    bool verifyServer = true;
-    std::string caFile;
-    std::string certFile;
-    std::string keyFile;
-    std::int64_t rwTimeoutUs = 10'000'000;
-};
-
 class FfmpegDecoder {
 public:
     using FrameCallback = std::function<void(VideoFrame&&)>;
@@ -26,7 +19,8 @@ public:
         std::string url,
         TlsOptions tlsOptions,
         std::shared_ptr<D3D11DecodeContext> d3d11Context,
-        FrameCallback frameCallback);
+        FrameCallback frameCallback,
+        bool softwareOnly = false);
     ~FfmpegDecoder();
 
     FfmpegDecoder(const FfmpegDecoder&) = delete;
@@ -43,6 +37,7 @@ private:
     TlsOptions tlsOptions_;
     std::shared_ptr<D3D11DecodeContext> d3d11Context_;
     FrameCallback frameCallback_;
+    bool softwareOnly_ = false;
     std::atomic_bool stopRequested_ = false;
     std::thread worker_;
     std::uint64_t frameIndex_ = 0;

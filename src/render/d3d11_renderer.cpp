@@ -1,3 +1,4 @@
+#include "render/grid_layout.h"
 #include "render/video_renderer.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -253,76 +255,61 @@ public:
         createRenderTarget();
     }
 
-    void render(const VideoFrame* frame) override
+    void render(const std::vector<std::shared_ptr<VideoFrame>>& frames) override
     {
         if (!context_ || !swapChain_ || !renderTargetView_) {
             return;
         }
 
-        auto d3dLock = lockD3D11();
-        if (frame && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty())) {
-            uploadFrame(*frame);
-        }
+        {
+            auto d3dLock = lockD3D11();
 
-        const float clearColor[] = { 0.01f, 0.01f, 0.012f, 1.0f };
-        context_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
-
-        D3D11_VIEWPORT fullViewport = {};
-        fullViewport.TopLeftX = 0.0f;
-        fullViewport.TopLeftY = 0.0f;
-        fullViewport.Width = static_cast<float>(backBufferWidth_);
-        fullViewport.Height = static_cast<float>(backBufferHeight_);
-        fullViewport.MinDepth = 0.0f;
-        fullViewport.MaxDepth = 1.0f;
-        context_->RSSetViewports(1, &fullViewport);
-        context_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
-
-        if (planeViews_[0]) {
-            D3D11_VIEWPORT videoViewport = computeVideoViewport();
-            context_->RSSetViewports(1, &videoViewport);
-
-            UINT stride = sizeof(Vertex);
-            UINT offset = 0;
-            ID3D11Buffer* vertexBuffers[] = { vertexBuffer_.Get() };
-            context_->IASetInputLayout(inputLayout_.Get());
-            context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-            context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
-            context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
-
-            ID3D11ShaderResourceView* shaderResources[] = {
-                planeViews_[0].Get(),
-                planeViews_[1].Get(),
-                planeViews_[2].Get(),
-            };
-            ID3D11SamplerState* samplers[] = { sampler_.Get() };
-            UINT shaderResourceCount = 1;
-            if (textureFormat_ == VideoFrameFormat::NV12 || textureFormat_ == VideoFrameFormat::D3D11_NV12) {
-                updateColorMatrix(textureFullRange_);
-                context_->PSSetShader(nv12PixelShader_.Get(), nullptr, 0);
-                ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
-                context_->PSSetConstantBuffers(0, 1, constantBuffers);
-                shaderResourceCount = 2;
-            } else if (textureFormat_ == VideoFrameFormat::YUV420P) {
-                updateColorMatrix(textureFullRange_);
-                context_->PSSetShader(yuv420PixelShader_.Get(), nullptr, 0);
-                ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
-                context_->PSSetConstantBuffers(0, 1, constantBuffers);
-                shaderResourceCount = 3;
-            } else {
-                context_->PSSetShader(bgraPixelShader_.Get(), nullptr, 0);
+            if (tiles_.size() != frames.size()) {
+                tiles_.resize(frames.size());
             }
 
-            context_->PSSetShaderResources(0, shaderResourceCount, shaderResources);
-            context_->PSSetSamplers(0, 1, samplers);
-            context_->Draw(4, 0);
+            const float clearColor[] = { 0.01f, 0.01f, 0.012f, 1.0f };
+            context_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
 
-            ID3D11ShaderResourceView* nullResources[] = { nullptr, nullptr, nullptr };
-            context_->PSSetShaderResources(0, 3, nullResources);
-        }
+            D3D11_VIEWPORT fullViewport = {};
+            fullViewport.TopLeftX = 0.0f;
+            fullViewport.TopLeftY = 0.0f;
+            fullViewport.Width = static_cast<float>(backBufferWidth_);
+            fullViewport.Height = static_cast<float>(backBufferHeight_);
+            fullViewport.MinDepth = 0.0f;
+            fullViewport.MaxDepth = 1.0f;
+            context_->RSSetViewports(1, &fullViewport);
+            context_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
 
-        const HRESULT presentResult = swapChain_->Present(1, 0);
-        if (presentResult == DXGI_ERROR_DEVICE_REMOVED || presentResult == DXGI_ERROR_DEVICE_RESET) {
-            std::cerr << "D3D device was lost.\n";
+            const gig::GridLayout layout = gig::computeGridLayout(
+                static_cast<int>(frames.size()),
+                static_cast<int>(backBufferWidth_),
+                static_cast<int>(backBufferHeight_));
+
+            for (std::size_t i = 0; i < frames.size(); ++i) {
+                TileState& tile = tiles_[i];
+                const VideoFrame* frame = frames[i].get();
+                if (frame && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty())) {
+                    uploadFrame(tile, *frame);
+                }
+
+                if (!tile.planeViews[0] || i >= layout.tiles.size()) {
+                    continue;
+                }
+
+                const D3D11_VIEWPORT videoViewport =
+                    computeVideoViewport(layout.tiles[i], tile.textureWidth, tile.textureHeight);
+                context_->RSSetViewports(1, &videoViewport);
+                drawTile(tile);
+            }
+
+            // Non-waiting Present: submits and returns immediately so the shared
+            // D3D11 lock is never held across a vsync wait (which would starve
+            // the decoder threads). The render loop paces itself instead.
+            const HRESULT presentResult = swapChain_->Present(0, 0);
+            if (presentResult == DXGI_ERROR_DEVICE_REMOVED || presentResult == DXGI_ERROR_DEVICE_RESET) {
+                std::cerr << "D3D device was lost.\n";
+            }
         }
     }
 
@@ -332,6 +319,29 @@ public:
     }
 
 private:
+    // Per-camera GPU state. One frame's worth of textures/views plus the cached
+    // identity of what was last uploaded, so each tile re-uploads only on change.
+    struct TileState {
+        std::array<ComPtr<ID3D11Texture2D>, 3> planeTextures;
+        std::array<ComPtr<ID3D11ShaderResourceView>, 3> planeViews;
+        std::array<int, 3> planeWidths = {};
+        std::array<int, 3> planeHeights = {};
+        std::array<DXGI_FORMAT, 3> planeFormats = {
+            DXGI_FORMAT_UNKNOWN,
+            DXGI_FORMAT_UNKNOWN,
+            DXGI_FORMAT_UNKNOWN,
+        };
+
+        VideoFrameFormat textureFormat = VideoFrameFormat::BGRA;
+        int textureWidth = 0;
+        int textureHeight = 0;
+        bool textureFullRange = false;
+        std::uint64_t uploadedFrameIndex = 0;
+        std::shared_ptr<void> activeFrameOwner;
+        ID3D11Texture2D* d3d11SourceTexture = nullptr;
+        int d3d11SourceSlice = 0;
+    };
+
     std::unique_lock<std::recursive_mutex> lockD3D11() const
     {
         if (decodeContext_ && decodeContext_->lock) {
@@ -493,18 +503,18 @@ private:
         context_->UpdateSubresource(colorMatrixBuffer_.Get(), 0, nullptr, &constants, 0, 0);
     }
 
-    void resetFrameTextures()
+    void resetFrameTextures(TileState& tile)
     {
-        for (std::size_t i = 0; i < planeTextures_.size(); ++i) {
-            planeTextures_[i].Reset();
-            planeViews_[i].Reset();
-            planeWidths_[i] = 0;
-            planeHeights_[i] = 0;
-            planeFormats_[i] = DXGI_FORMAT_UNKNOWN;
+        for (std::size_t i = 0; i < tile.planeTextures.size(); ++i) {
+            tile.planeTextures[i].Reset();
+            tile.planeViews[i].Reset();
+            tile.planeWidths[i] = 0;
+            tile.planeHeights[i] = 0;
+            tile.planeFormats[i] = DXGI_FORMAT_UNKNOWN;
         }
-        activeFrameOwner_.reset();
-        d3d11SourceTexture_ = nullptr;
-        d3d11SourceSlice_ = 0;
+        tile.activeFrameOwner.reset();
+        tile.d3d11SourceTexture = nullptr;
+        tile.d3d11SourceSlice = 0;
     }
 
     bool createD3D11FramePlaneView(
@@ -537,7 +547,7 @@ private:
         return !failed(result, "ID3D11Device::CreateShaderResourceView(D3D11 frame)");
     }
 
-    bool useD3D11FrameTexture(const VideoFrame& frame)
+    bool useD3D11FrameTexture(TileState& tile, const VideoFrame& frame)
     {
         if (!frame.d3d11Texture) {
             return false;
@@ -555,49 +565,50 @@ private:
             return false;
         }
 
-        if (d3d11SourceTexture_ == frame.d3d11Texture
-            && d3d11SourceSlice_ == frame.d3d11ArraySlice
-            && planeViews_[0]
-            && planeViews_[1]) {
-            activeFrameOwner_ = frame.owner;
-            textureFullRange_ = frame.fullRange;
+        if (tile.d3d11SourceTexture == frame.d3d11Texture
+            && tile.d3d11SourceSlice == frame.d3d11ArraySlice
+            && tile.planeViews[0]
+            && tile.planeViews[1]) {
+            tile.activeFrameOwner = frame.owner;
+            tile.textureFullRange = frame.fullRange;
             return true;
         }
 
-        resetFrameTextures();
+        resetFrameTextures(tile);
         if (!createD3D11FramePlaneView(
                 frame.d3d11Texture,
                 textureDesc,
                 frame.d3d11ArraySlice,
                 DXGI_FORMAT_R8_UNORM,
-                planeViews_[0])
+                tile.planeViews[0])
             || !createD3D11FramePlaneView(
                 frame.d3d11Texture,
                 textureDesc,
                 frame.d3d11ArraySlice,
                 DXGI_FORMAT_R8G8_UNORM,
-                planeViews_[1])) {
-            resetFrameTextures();
+                tile.planeViews[1])) {
+            resetFrameTextures(tile);
             return false;
         }
 
-        d3d11SourceTexture_ = frame.d3d11Texture;
-        d3d11SourceSlice_ = frame.d3d11ArraySlice;
-        activeFrameOwner_ = frame.owner;
-        textureWidth_ = frame.width;
-        textureHeight_ = frame.height;
-        textureFormat_ = frame.format;
-        textureFullRange_ = frame.fullRange;
-        planeWidths_[0] = frame.width;
-        planeHeights_[0] = frame.height;
-        planeWidths_[1] = (frame.width + 1) / 2;
-        planeHeights_[1] = (frame.height + 1) / 2;
-        planeFormats_[0] = DXGI_FORMAT_R8_UNORM;
-        planeFormats_[1] = DXGI_FORMAT_R8G8_UNORM;
+        tile.d3d11SourceTexture = frame.d3d11Texture;
+        tile.d3d11SourceSlice = frame.d3d11ArraySlice;
+        tile.activeFrameOwner = frame.owner;
+        tile.textureWidth = frame.width;
+        tile.textureHeight = frame.height;
+        tile.textureFormat = frame.format;
+        tile.textureFullRange = frame.fullRange;
+        tile.planeWidths[0] = frame.width;
+        tile.planeHeights[0] = frame.height;
+        tile.planeWidths[1] = (frame.width + 1) / 2;
+        tile.planeHeights[1] = (frame.height + 1) / 2;
+        tile.planeFormats[0] = DXGI_FORMAT_R8_UNORM;
+        tile.planeFormats[1] = DXGI_FORMAT_R8G8_UNORM;
         return true;
     }
 
     bool uploadPlane(
+        TileState& tile,
         std::size_t planeIndex,
         DXGI_FORMAT format,
         int width,
@@ -606,16 +617,16 @@ private:
         int sourceStride,
         int copyBytes)
     {
-        if (planeIndex >= planeTextures_.size() || width <= 0 || height <= 0 || source.empty()) {
+        if (planeIndex >= tile.planeTextures.size() || width <= 0 || height <= 0 || source.empty()) {
             return false;
         }
 
-        if (!planeTextures_[planeIndex]
-            || planeWidths_[planeIndex] != width
-            || planeHeights_[planeIndex] != height
-            || planeFormats_[planeIndex] != format) {
-            planeTextures_[planeIndex].Reset();
-            planeViews_[planeIndex].Reset();
+        if (!tile.planeTextures[planeIndex]
+            || tile.planeWidths[planeIndex] != width
+            || tile.planeHeights[planeIndex] != height
+            || tile.planeFormats[planeIndex] != format) {
+            tile.planeTextures[planeIndex].Reset();
+            tile.planeViews[planeIndex].Reset();
 
             D3D11_TEXTURE2D_DESC textureDesc = {};
             textureDesc.Width = static_cast<UINT>(width);
@@ -628,27 +639,27 @@ private:
             textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
             textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-            HRESULT result = device_->CreateTexture2D(&textureDesc, nullptr, planeTextures_[planeIndex].GetAddressOf());
+            HRESULT result = device_->CreateTexture2D(&textureDesc, nullptr, tile.planeTextures[planeIndex].GetAddressOf());
             if (failed(result, "ID3D11Device::CreateTexture2D")) {
                 return false;
             }
 
             result = device_->CreateShaderResourceView(
-                planeTextures_[planeIndex].Get(),
+                tile.planeTextures[planeIndex].Get(),
                 nullptr,
-                planeViews_[planeIndex].GetAddressOf());
+                tile.planeViews[planeIndex].GetAddressOf());
             if (failed(result, "ID3D11Device::CreateShaderResourceView")) {
-                planeTextures_[planeIndex].Reset();
+                tile.planeTextures[planeIndex].Reset();
                 return false;
             }
 
-            planeWidths_[planeIndex] = width;
-            planeHeights_[planeIndex] = height;
-            planeFormats_[planeIndex] = format;
+            tile.planeWidths[planeIndex] = width;
+            tile.planeHeights[planeIndex] = height;
+            tile.planeFormats[planeIndex] = format;
         }
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        HRESULT result = context_->Map(planeTextures_[planeIndex].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        HRESULT result = context_->Map(tile.planeTextures[planeIndex].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
         if (failed(result, "ID3D11DeviceContext::Map")) {
             return false;
         }
@@ -662,28 +673,29 @@ private:
                 static_cast<std::size_t>(copyBytes));
         }
 
-        context_->Unmap(planeTextures_[planeIndex].Get(), 0);
+        context_->Unmap(tile.planeTextures[planeIndex].Get(), 0);
         return true;
     }
 
-    void uploadFrame(const VideoFrame& frame)
+    void uploadFrame(TileState& tile, const VideoFrame& frame)
     {
-        if (uploadedFrameIndex_ == frame.index) {
+        if (tile.uploadedFrameIndex == frame.index) {
             return;
         }
 
-        if (textureFormat_ != frame.format || textureWidth_ != frame.width || textureHeight_ != frame.height) {
-            resetFrameTextures();
-            textureFormat_ = frame.format;
-            textureWidth_ = frame.width;
-            textureHeight_ = frame.height;
+        if (tile.textureFormat != frame.format || tile.textureWidth != frame.width || tile.textureHeight != frame.height) {
+            resetFrameTextures(tile);
+            tile.textureFormat = frame.format;
+            tile.textureWidth = frame.width;
+            tile.textureHeight = frame.height;
         }
 
         bool uploaded = false;
         if (frame.format == VideoFrameFormat::D3D11_NV12) {
-            uploaded = useD3D11FrameTexture(frame);
+            uploaded = useD3D11FrameTexture(tile, frame);
         } else if (frame.format == VideoFrameFormat::BGRA) {
             uploaded = uploadPlane(
+                tile,
                 0,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 frame.width,
@@ -694,50 +706,93 @@ private:
         } else if (frame.format == VideoFrameFormat::NV12) {
             const int chromaWidth = frame.strides[1] / 2;
             const int chromaHeight = (frame.height + 1) / 2;
-            uploaded = uploadPlane(0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
-                && uploadPlane(1, DXGI_FORMAT_R8G8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], frame.strides[1]);
+            uploaded = uploadPlane(tile, 0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
+                && uploadPlane(tile, 1, DXGI_FORMAT_R8G8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], frame.strides[1]);
         } else if (frame.format == VideoFrameFormat::YUV420P) {
             const int chromaWidth = (frame.width + 1) / 2;
             const int chromaHeight = (frame.height + 1) / 2;
-            uploaded = uploadPlane(0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
-                && uploadPlane(1, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], chromaWidth)
-                && uploadPlane(2, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[2], frame.strides[2], chromaWidth);
+            uploaded = uploadPlane(tile, 0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
+                && uploadPlane(tile, 1, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], chromaWidth)
+                && uploadPlane(tile, 2, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[2], frame.strides[2], chromaWidth);
         }
 
         if (uploaded) {
-            textureFullRange_ = frame.fullRange;
-            uploadedFrameIndex_ = frame.index;
+            tile.textureFullRange = frame.fullRange;
+            tile.uploadedFrameIndex = frame.index;
         }
     }
 
-    D3D11_VIEWPORT computeVideoViewport() const
+    D3D11_VIEWPORT computeVideoViewport(const gig::TileRect& cell, int textureWidth, int textureHeight) const
     {
         D3D11_VIEWPORT viewport = {};
         viewport.MinDepth = 0.0f;
         viewport.MaxDepth = 1.0f;
 
-        if (textureWidth_ <= 0 || textureHeight_ <= 0) {
-            viewport.Width = static_cast<float>(backBufferWidth_);
-            viewport.Height = static_cast<float>(backBufferHeight_);
+        if (textureWidth <= 0 || textureHeight <= 0 || cell.width <= 0.0f || cell.height <= 0.0f) {
+            viewport.TopLeftX = cell.x;
+            viewport.TopLeftY = cell.y;
+            viewport.Width = cell.width;
+            viewport.Height = cell.height;
             return viewport;
         }
 
-        const float outputAspect = static_cast<float>(backBufferWidth_) / static_cast<float>(backBufferHeight_);
-        const float videoAspect = static_cast<float>(textureWidth_) / static_cast<float>(textureHeight_);
+        const float cellAspect = cell.width / cell.height;
+        const float videoAspect = static_cast<float>(textureWidth) / static_cast<float>(textureHeight);
 
-        if (outputAspect > videoAspect) {
-            viewport.Height = static_cast<float>(backBufferHeight_);
+        if (cellAspect > videoAspect) {
+            viewport.Height = cell.height;
             viewport.Width = viewport.Height * videoAspect;
-            viewport.TopLeftX = (static_cast<float>(backBufferWidth_) - viewport.Width) * 0.5f;
-            viewport.TopLeftY = 0.0f;
+            viewport.TopLeftX = cell.x + (cell.width - viewport.Width) * 0.5f;
+            viewport.TopLeftY = cell.y;
         } else {
-            viewport.Width = static_cast<float>(backBufferWidth_);
+            viewport.Width = cell.width;
             viewport.Height = viewport.Width / videoAspect;
-            viewport.TopLeftX = 0.0f;
-            viewport.TopLeftY = (static_cast<float>(backBufferHeight_) - viewport.Height) * 0.5f;
+            viewport.TopLeftX = cell.x;
+            viewport.TopLeftY = cell.y + (cell.height - viewport.Height) * 0.5f;
         }
 
         return viewport;
+    }
+
+    void drawTile(const TileState& tile)
+    {
+        UINT stride = sizeof(Vertex);
+        UINT offset = 0;
+        ID3D11Buffer* vertexBuffers[] = { vertexBuffer_.Get() };
+        context_->IASetInputLayout(inputLayout_.Get());
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+        context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
+
+        ID3D11ShaderResourceView* shaderResources[] = {
+            tile.planeViews[0].Get(),
+            tile.planeViews[1].Get(),
+            tile.planeViews[2].Get(),
+        };
+        ID3D11SamplerState* samplers[] = { sampler_.Get() };
+        UINT shaderResourceCount = 1;
+        if (tile.textureFormat == VideoFrameFormat::NV12 || tile.textureFormat == VideoFrameFormat::D3D11_NV12) {
+            updateColorMatrix(tile.textureFullRange);
+            context_->PSSetShader(nv12PixelShader_.Get(), nullptr, 0);
+            ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
+            context_->PSSetConstantBuffers(0, 1, constantBuffers);
+            shaderResourceCount = 2;
+        } else if (tile.textureFormat == VideoFrameFormat::YUV420P) {
+            updateColorMatrix(tile.textureFullRange);
+            context_->PSSetShader(yuv420PixelShader_.Get(), nullptr, 0);
+            ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
+            context_->PSSetConstantBuffers(0, 1, constantBuffers);
+            shaderResourceCount = 3;
+        } else {
+            context_->PSSetShader(bgraPixelShader_.Get(), nullptr, 0);
+        }
+
+        context_->PSSetShaderResources(0, shaderResourceCount, shaderResources);
+        context_->PSSetSamplers(0, 1, samplers);
+        context_->Draw(4, 0);
+
+        ID3D11ShaderResourceView* nullResources[] = { nullptr, nullptr, nullptr };
+        context_->PSSetShaderResources(0, 3, nullResources);
     }
 
     SDL_Window* window_ = nullptr;
@@ -757,24 +812,8 @@ private:
     ComPtr<ID3D11Buffer> vertexBuffer_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11Buffer> colorMatrixBuffer_;
-    std::array<ComPtr<ID3D11Texture2D>, 3> planeTextures_;
-    std::array<ComPtr<ID3D11ShaderResourceView>, 3> planeViews_;
-    std::array<int, 3> planeWidths_ = {};
-    std::array<int, 3> planeHeights_ = {};
-    std::array<DXGI_FORMAT, 3> planeFormats_ = {
-        DXGI_FORMAT_UNKNOWN,
-        DXGI_FORMAT_UNKNOWN,
-        DXGI_FORMAT_UNKNOWN,
-    };
 
-    VideoFrameFormat textureFormat_ = VideoFrameFormat::BGRA;
-    int textureWidth_ = 0;
-    int textureHeight_ = 0;
-    bool textureFullRange_ = false;
-    std::uint64_t uploadedFrameIndex_ = 0;
-    std::shared_ptr<void> activeFrameOwner_;
-    ID3D11Texture2D* d3d11SourceTexture_ = nullptr;
-    int d3d11SourceSlice_ = 0;
+    std::vector<TileState> tiles_;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();
 };
 

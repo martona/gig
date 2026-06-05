@@ -386,9 +386,10 @@ CodecContextPtr openCodecContext(
     AVStream* videoStream,
     HardwareDecodeState& hardwareState,
     BufferRefPtr& hardwareDevice,
-    const std::shared_ptr<D3D11DecodeContext>& d3d11Context)
+    const std::shared_ptr<D3D11DecodeContext>& d3d11Context,
+    bool softwareOnly)
 {
-    if (d3d11Context && d3d11Context->device && d3d11Context->lock && codecSupportsD3D11(decoder)) {
+    if (!softwareOnly && d3d11Context && d3d11Context->device && d3d11Context->lock && codecSupportsD3D11(decoder)) {
         try {
             BufferRefPtr candidateDevice = createD3D11DeviceContext(d3d11Context);
             CodecContextPtr candidate(avcodec_alloc_context3(decoder));
@@ -422,7 +423,8 @@ CodecContextPtr openCodecContext(
         }
     }
 
-    for (int i = 0;; ++i) {
+    // Skip all hardware decoders entirely when software-only is requested.
+    if (!softwareOnly) for (int i = 0;; ++i) {
         const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
         if (!config) {
             break;
@@ -486,7 +488,7 @@ CodecContextPtr openCodecContext(
     codecContext->thread_count = 1;
     throwIfFailed(avcodec_open2(codecContext.get(), decoder, nullptr), "avcodec_open2");
 
-    std::cerr << "Hardware decode unavailable; using software decode.\n";
+    std::cerr << (softwareOnly ? "Software decode (forced).\n" : "Hardware decode unavailable; using software decode.\n");
     return codecContext;
 }
 
@@ -496,11 +498,13 @@ FfmpegDecoder::FfmpegDecoder(
     std::string url,
     TlsOptions tlsOptions,
     std::shared_ptr<D3D11DecodeContext> d3d11Context,
-    FrameCallback frameCallback)
+    FrameCallback frameCallback,
+    bool softwareOnly)
     : url_(std::move(url))
     , tlsOptions_(std::move(tlsOptions))
     , d3d11Context_(std::move(d3d11Context))
     , frameCallback_(std::move(frameCallback))
+    , softwareOnly_(softwareOnly)
 {
 }
 
@@ -587,7 +591,7 @@ void FfmpegDecoder::decodeOnce()
 
     HardwareDecodeState hardwareState;
     BufferRefPtr hardwareDevice(nullptr);
-    CodecContextPtr codecContext = openCodecContext(decoder, videoStream, hardwareState, hardwareDevice, d3d11Context_);
+    CodecContextPtr codecContext = openCodecContext(decoder, videoStream, hardwareState, hardwareDevice, d3d11Context_, softwareOnly_);
 
     std::cerr << "Video: " << avcodec_get_name(videoStream->codecpar->codec_id)
               << " " << codecContext->width << "x" << codecContext->height << "\n";
@@ -620,11 +624,22 @@ void FfmpegDecoder::decodeOnce()
         if (sendResult == AVERROR(EAGAIN)) {
             continue;
         }
+        if (sendResult == AVERROR_INVALIDDATA) {
+            // Corrupt or mid-GOP packet (common right after joining a live
+            // stream, before the first keyframe). Skip it and keep the stream
+            // alive rather than tearing the whole decoder down and reconnecting.
+            continue;
+        }
         throwIfFailed(sendResult, "avcodec_send_packet");
 
         while (!stopRequested_) {
             const int receiveResult = avcodec_receive_frame(codecContext.get(), decodedFrame.get());
             if (receiveResult == AVERROR(EAGAIN) || receiveResult == AVERROR_EOF) {
+                break;
+            }
+            if (receiveResult == AVERROR_INVALIDDATA) {
+                // Concealed/corrupt frame; wait for the next packet instead of
+                // treating it as a fatal stream error.
                 break;
             }
             throwIfFailed(receiveResult, "avcodec_receive_frame");
