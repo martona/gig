@@ -92,9 +92,9 @@ struct ProgramOptions {
 void printUsage()
 {
     std::cout
-        << "frigate_d3d_poc [--base URL | --url URL] [--software] [--no-overlay] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
-        << "frigate_d3d_poc probe --base URL [--src STREAM] [--stream-check] [--endpoint PATH]\n"
-        << "frigate_d3d_poc discover --base URL [--stream-url TEMPLATE] [--ca CA] [--cert C] [--key K]\n"
+        << "gig [--base URL | --url URL] [--software] [--no-overlay] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
+        << "gig probe --base URL [--src STREAM] [--stream-check] [--endpoint PATH]\n"
+        << "gig discover --base URL [--stream-url TEMPLATE] [--ca CA] [--cert C] [--key K]\n"
         << "\n"
         << "If the viewer --url is omitted, this default is used:\n"
         << "  " << DefaultUrl << "\n";
@@ -252,7 +252,7 @@ int main(int argc, char** argv)
 
         auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(
             SDL_CreateWindow(
-                "Frigate D3D PoC",
+                "gig",
                 1280,
                 720,
                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY),
@@ -376,7 +376,7 @@ int main(int argc, char** argv)
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;
 
-                std::string title = "Frigate D3D PoC - " + std::to_string(stats.camerasOnline)
+                std::string title = "gig - " + std::to_string(stats.camerasOnline)
                     + "/" + std::to_string(supervisor.cameraCount()) + " live - frames "
                     + std::to_string(total);
                 SDL_SetWindowTitle(window.get(), title.c_str());

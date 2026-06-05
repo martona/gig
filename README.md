@@ -1,4 +1,4 @@
-# Frigate D3D PoC
+# gig
 
 Windows-native streaming client for Frigate: it discovers every camera from the Frigate API and renders them all in a live Direct3D 11 grid, with click-to-zoom.
 
@@ -34,7 +34,7 @@ Useful overrides:
 Discover every camera and show the grid (pass `--base`, the Frigate root):
 
 ```powershell
-.\build\windows-release\frigate_d3d_poc.exe `
+.\build\windows-release\gig.exe `
   --base "https://frigate.lan/security" `
   --ca "C:\certs\myca.pem" `
   --cert "C:\certs\marton@mars11.crt" `
@@ -55,7 +55,7 @@ Flags:
 Use `probe` to check whether a Frigate or raw go2rtc base URL exposes the endpoints this app can use for discovery/status:
 
 ```powershell
-.\build\windows-release\frigate_d3d_poc.exe probe `
+.\build\windows-release\gig.exe probe `
   --base "https://frigate.lan/security" `
   --src frontgate `
   --ca "C:\certs\myca.pem" `

@@ -284,7 +284,7 @@ if ($env:VCPKG_INSTALL_OPTIONS) {
     $configureArgs += "-DVCPKG_INSTALL_OPTIONS=$env:VCPKG_INSTALL_OPTIONS"
 }
 
-Write-Host "Configuring frigate_d3d_poc ($BuildType, $Triplet)..."
+Write-Host "Configuring gig ($BuildType, $Triplet)..."
 Invoke-NativeCommand -FilePath $cmakeExe -Arguments $configureArgs
 
 if ($ConfigureOnly) {
@@ -292,7 +292,7 @@ if ($ConfigureOnly) {
     return
 }
 
-Write-Host "Building frigate_d3d_poc..."
+Write-Host "Building gig..."
 Invoke-NativeCommand -FilePath $cmakeExe -Arguments @("--build", $buildDir, "--config", $BuildType)
 
 Write-Host "Built: $buildDir"
