@@ -31,17 +31,23 @@ Useful overrides:
 
 ## Run
 
+** NOTE: This assumes that you're running Frigate behind a client-cert-verifying Nginx proxy, and that is the only
+authentication path; Frigate's auth is OFF. This is most likely not going to match your setup. It matches mine,
+but you've been warned.
+
 Discover every camera and show the grid (pass `--base`, the Frigate root):
 
 ```powershell
 .\build\windows-release\gig.exe `
-  --base "https://frigate.lan/security" `
+  --base "https://frigate.lan/" `
   --ca "C:\certs\myca.pem" `
-  --cert "C:\certs\marton@mars11.crt" `
-  --key "C:\certs\marton@mars11.key"
+  --cert "C:\certs\client.crt" `
+  --key "C:\certs\client.key"
 ```
 
-Each tile is labelled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU. Click a tile to zoom it to fill the window; click again (or press Esc) to return to the grid. Esc in the grid quits.
+Each tile is labeled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU. Click a tile to zoom it to fill the window; click again (or press Esc) to return to the grid. Esc in the grid quits.
+
+`--ca` is the CA cert used to sign Frigate's TLS cert. `--cert` / `--key` are the client TLS keys used to auth to Nginx.
 
 Flags:
 
@@ -68,7 +74,7 @@ It probes Frigate config, Frigate-proxied go2rtc streams, and raw go2rtc stream 
 ## Next Steps
 
 - Verify the shared-device D3D11VA zero-copy path with all cameras on real GPU hardware.
-- On-screen overlays (camera labels, "connecting/offline" state) — needs a text renderer.
 - Justified/aspect-aware layout and a hero+spotters mode beyond the uniform grid.
 - Replace PEM file options with a Windows certificate store backed TLS path.
 - Add a renderer abstraction for non-Windows backends.
+- Add proper Frigate authentication
