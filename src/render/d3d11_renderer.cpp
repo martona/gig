@@ -2,6 +2,8 @@
 #include "render/text_overlay.h"
 #include "render/video_renderer.h"
 
+#include "log.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -19,6 +21,10 @@
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <wrl/client.h>
+
+#include <imgui.h>
+#include <imgui_impl_dx11.h>
+#include <imgui_impl_sdl3.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -230,9 +236,29 @@ public:
             return false;
         }
         if (!overlay_.initialize(device_.Get())) {
-            std::cerr << "Text overlay unavailable; labels and diagnostics disabled.\n";
+            gig::logWarning() << "Text overlay unavailable; labels and diagnostics disabled.";
+        }
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr; // don't write/read an imgui.ini
+        ImGui::StyleColorsDark();
+        if (ImGui_ImplSDL3_InitForD3D(window_) && ImGui_ImplDX11_Init(device_.Get(), context_.Get())) {
+            imguiReady_ = true;
+        } else {
+            gig::logWarning() << "ImGui init failed; log view disabled.";
+            ImGui::DestroyContext();
         }
         return true;
+    }
+
+    ~D3D11Renderer() override
+    {
+        if (imguiReady_) {
+            ImGui_ImplDX11_Shutdown();
+            ImGui_ImplSDL3_Shutdown();
+            ImGui::DestroyContext();
+        }
     }
 
     void resize() override
@@ -319,6 +345,8 @@ public:
                 overlay_.flush(context_.Get());
             }
 
+            renderImGui();
+
             // Non-waiting Present: submits and returns immediately so the shared
             // D3D11 lock is never held across a vsync wait (which would starve
             // the decoder threads). The render loop paces itself instead.
@@ -353,6 +381,31 @@ public:
     {
         overlayStats_ = stats;
     }
+
+    bool handleEvent(const SDL_Event& event) override
+    {
+        if (!imguiReady_) {
+            return false;
+        }
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        const ImGuiIO& io = ImGui::GetIO();
+        switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_WHEEL:
+            return io.WantCaptureMouse;
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_TEXT_INPUT:
+            return io.WantCaptureKeyboard;
+        default:
+            return false;
+        }
+    }
+
+    void setLogViewVisible(bool visible) override { logViewVisible_ = visible; }
+    bool logViewVisible() const override { return logViewVisible_; }
 
 private:
     // Per-camera GPU state. One frame's worth of textures/views plus the cached
@@ -948,6 +1001,65 @@ private:
         overlay_.text(x, y, scale, body, line);
     }
 
+    // Run one ImGui frame into the bound back buffer (called after the tiles +
+    // overlay, before Present). The full cycle runs every frame so ImGui's
+    // WantCapture flags stay correct even when the log view is hidden.
+    void renderImGui()
+    {
+        if (!imguiReady_) {
+            return;
+        }
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+        if (logViewVisible_) {
+            buildLogWindow();
+        }
+        ImGui::Render();
+        context_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    }
+
+    void buildLogWindow()
+    {
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+
+        bool open = true;
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings;
+        if (ImGui::Begin("Log", &open, flags)) {
+            if (ImGui::Button("Clear")) {
+                gig::LogBuffer::instance().clear();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("wheel / drag scrollbar to scroll, Esc or X to close");
+            ImGui::Separator();
+
+            gig::LogBuffer::instance().snapshot(logScratch_);
+
+            ImGui::BeginChild("log_scroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(logScratch_.size()));
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    ImGui::TextUnformatted(logScratch_[static_cast<std::size_t>(i)].c_str());
+                }
+            }
+            clipper.End();
+            // Stick to the tail unless the user has scrolled up.
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+                ImGui::SetScrollHereY(1.0f);
+            }
+            ImGui::EndChild();
+        }
+        ImGui::End();
+        if (!open) {
+            logViewVisible_ = false;
+        }
+    }
+
     SDL_Window* window_ = nullptr;
     HWND hwnd_ = nullptr;
     LONG backBufferWidth_ = 1;
@@ -972,6 +1084,9 @@ private:
     std::vector<std::string> cameraLabels_;
     OverlayStats overlayStats_;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();
+    bool imguiReady_ = false;
+    bool logViewVisible_ = false;
+    std::vector<std::string> logScratch_;
 };
 
 } // namespace

@@ -1,5 +1,6 @@
 #include "decode/ffmpeg_decoder.h"
 
+#include "log.hpp"
 #include "net/tls_client.hpp"
 
 #include <array>
@@ -166,7 +167,26 @@ void ffmpegLogCallback(void* avcl, int level, const char* fmt, va_list args)
     if (level >= AV_LOG_ERROR && isSpuriousDecodeMessage(fmt)) {
         return;
     }
-    av_log_default_callback(avcl, level, fmt, args);
+    if (level > AV_LOG_INFO) {
+        return; // drop verbose/debug/trace
+    }
+
+    char line[1024];
+    int printPrefix = 1;
+    av_log_format_line2(avcl, level, fmt, args, line, sizeof(line), &printPrefix);
+
+    std::string text(line);
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+    if (text.empty()) {
+        return;
+    }
+
+    const gig::LogLevel mapped = (level <= AV_LOG_ERROR)   ? gig::LogLevel::Error
+        : (level <= AV_LOG_WARNING)                        ? gig::LogLevel::Warning
+                                                           : gig::LogLevel::Info;
+    gig::writeLog(mapped, text);
 }
 
 struct HardwareDecodeState {
@@ -503,7 +523,7 @@ CodecContextPtr openCodecContext(
     const bool softwareAdapter = d3d11Context && d3d11Context->device
         && d3d11DeviceIsSoftwareAdapter(d3d11Context->device);
     if (softwareAdapter && !softwareOnly) {
-        std::cerr << "Renderer is on a software D3D11 adapter; skipping hardware decode.\n";
+        gig::logWarning() << "Renderer is on a software D3D11 adapter; skipping hardware decode.";
     }
 
     if (!softwareOnly && !softwareAdapter && d3d11Context && d3d11Context->device && d3d11Context->lock && codecSupportsD3D11(decoder)) {
@@ -529,12 +549,12 @@ CodecContextPtr openCodecContext(
             hardwareState.deviceType = AV_HWDEVICE_TYPE_D3D11VA;
             throwIfFailed(avcodec_open2(candidate.get(), decoder, nullptr), "avcodec_open2(D3D11VA)");
 
-            std::cerr << "Hardware decode: d3d11va (d3d11, shared renderer device)\n";
+            gig::logInfo() << "Hardware decode: d3d11va (d3d11, shared renderer device)";
             hardwareDevice = std::move(candidateDevice);
             return candidate;
         } catch (const std::exception& error) {
-            std::cerr << "D3D11VA shared-device decode unavailable; falling back: "
-                      << error.what() << "\n";
+            gig::logWarning() << "D3D11VA shared-device decode unavailable; falling back: "
+                              << error.what();
             hardwareState.pixelFormat = AV_PIX_FMT_NONE;
             hardwareState.deviceType = AV_HWDEVICE_TYPE_NONE;
         }
@@ -560,7 +580,7 @@ CodecContextPtr openCodecContext(
     codecContext->thread_count = 1;
     throwIfFailed(avcodec_open2(codecContext.get(), decoder, nullptr), "avcodec_open2");
 
-    std::cerr << (softwareOnly ? "Software decode (forced).\n" : "Hardware decode unavailable; using software decode.\n");
+    gig::logInfo() << (softwareOnly ? "Software decode (forced)." : "Hardware decode unavailable; using software decode.");
     return codecContext;
 }
 
@@ -644,7 +664,7 @@ void FfmpegDecoder::run()
         try {
             decodeOnce();
         } catch (const std::exception& error) {
-            std::cerr << "Decoder error: " << error.what() << "\n";
+            gig::logError() << "Decoder error: " << error.what();
         }
 
         if (!stopRequested_) {
@@ -709,7 +729,7 @@ void FfmpegDecoder::decodeOnce()
     // probed by seeking). On failure avformat_open_input frees the context and
     // NULLs our pointer but leaves pb untouched (AVFMT_FLAG_CUSTOM_IO), so the
     // AVIO + stream still unwind via RAII.
-    std::cerr << "Opening stream: " << url_ << "\n";
+    gig::logInfo() << "Opening stream: " << url_;
     AVFormatContext* openTarget = formatContext.release();
     const int openResult = avformat_open_input(&openTarget, nullptr, inputFormat, nullptr);
     formatContext.reset(openTarget);
@@ -732,8 +752,8 @@ void FfmpegDecoder::decodeOnce()
     BufferRefPtr hardwareDevice(nullptr);
     CodecContextPtr codecContext = openCodecContext(decoder, videoStream, hardwareState, hardwareDevice, d3d11Context_, softwareOnly_);
 
-    std::cerr << "Video: " << avcodec_get_name(videoStream->codecpar->codec_id)
-              << " " << codecContext->width << "x" << codecContext->height << "\n";
+    gig::logInfo() << "Video: " << avcodec_get_name(videoStream->codecpar->codec_id)
+                   << " " << codecContext->width << "x" << codecContext->height;
 
     PacketPtr packet(av_packet_alloc());
     FramePtr decodedFrame(av_frame_alloc());

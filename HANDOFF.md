@@ -63,6 +63,12 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
 - `src/probe/cert_probe.*` — the `certstore` probe; its CNG path calls `cng_tls`.
 - `src/probe/http_probe.*` — the `probe` command (self-contained Beast, own anon-namespace TLS).
 - `src/render/*` — D3D11 per-tile grid renderer, `grid_layout`, `text_overlay` (GDI font-atlas HUD).
+  `d3d11_renderer` also hosts **Dear ImGui** (DX11 + SDL3 backends): a full-window **log view**
+  rendered before Present, toggled by clicking the diagnostics tile (Esc / X to close). Events go
+  through `VideoRenderer::handleEvent` so ImGui's WantCapture suppresses tile-clicks while it's up.
+- `src/log.*` — logging + **`LogBuffer`** (thread-safe 1000-line ring). `writeLog` tees every line
+  to it + stderr; the decoder's `std::cerr` and ffmpeg's `av_log` are routed through `gig` logging,
+  so the in-app log view shows everything.
 
 ## TLS architecture (final)
 

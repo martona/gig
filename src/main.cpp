@@ -525,15 +525,28 @@ int main(int argc, char** argv)
 
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
+                const bool imguiUsed = renderer->handleEvent(event);
+
                 if (event.type == SDL_EVENT_QUIT) {
                     running = false;
-                } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
-                    if (renderer->focusedTile() >= 0) {
-                        renderer->setFocusedTile(-1); // first Esc leaves focus, next quits
+                    continue;
+                }
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
+                    // Esc closes the log view first (even if ImGui has keyboard focus),
+                    // then leaves a focused tile, then quits.
+                    if (renderer->logViewVisible()) {
+                        renderer->setLogViewVisible(false);
+                    } else if (renderer->focusedTile() >= 0) {
+                        renderer->setFocusedTile(-1);
                     } else {
                         running = false;
                     }
-                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT) {
+                    continue;
+                }
+                if (imguiUsed) {
+                    continue; // the log view (ImGui) consumed this event
+                }
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT) {
                     if (renderer->focusedTile() >= 0) {
                         renderer->setFocusedTile(-1); // any click returns to the grid
                     } else {
@@ -541,17 +554,26 @@ int main(int argc, char** argv)
                         int windowHeight = 0;
                         SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
                         if (windowWidth > 0 && windowHeight > 0) {
-                            // Match the renderer's grid (cameras + optional diagnostics cell),
-                            // but only the camera tiles are focusable.
-                            const int effective = static_cast<int>(supervisor.cameraCount()) + (options.showOverlay ? 1 : 0);
+                            // Match the renderer's grid (cameras + optional diagnostics cell).
+                            const std::size_t cameraCount = supervisor.cameraCount();
+                            const int effective = static_cast<int>(cameraCount) + (options.showOverlay ? 1 : 0);
                             const gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight);
-                            for (std::size_t t = 0; t < layout.tiles.size() && t < supervisor.cameraCount(); ++t) {
-                                const gig::TileRect& cell = layout.tiles[t];
-                                if (event.button.x >= cell.x && event.button.x < cell.x + cell.width
-                                    && event.button.y >= cell.y && event.button.y < cell.y + cell.height) {
+                            const auto inCell = [&](const gig::TileRect& cell) {
+                                return event.button.x >= cell.x && event.button.x < cell.x + cell.width
+                                    && event.button.y >= cell.y && event.button.y < cell.y + cell.height;
+                            };
+                            bool focusedOne = false;
+                            for (std::size_t t = 0; t < layout.tiles.size() && t < cameraCount; ++t) {
+                                if (inCell(layout.tiles[t])) {
                                     renderer->setFocusedTile(static_cast<int>(t));
+                                    focusedOne = true;
                                     break;
                                 }
+                            }
+                            // The synthetic diagnostics tile toggles the log view.
+                            if (!focusedOne && options.showOverlay && cameraCount < layout.tiles.size()
+                                && inCell(layout.tiles[cameraCount])) {
+                                renderer->setLogViewVisible(!renderer->logViewVisible());
                             }
                         }
                     }

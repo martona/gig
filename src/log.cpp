@@ -49,8 +49,44 @@ void writeLog(LogLevel level, std::string_view message)
         local.tm_sec,
         static_cast<int>(millis.count()));
 
+    std::string line;
+    line.reserve(message.size() + 32);
+    line.append(timestamp);
+    line.append(" [");
+    line.append(levelTag(level));
+    line.append("] ");
+    line.append(message.data(), message.size());
+
     std::lock_guard<std::mutex> lock(logMutex());
-    std::cerr << timestamp << " [" << levelTag(level) << "] " << message << '\n';
+    LogBuffer::instance().push(line);
+    std::cerr << line << '\n';
+}
+
+LogBuffer& LogBuffer::instance()
+{
+    static LogBuffer buffer;
+    return buffer;
+}
+
+void LogBuffer::push(std::string line)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    lines_.push_back(std::move(line));
+    while (lines_.size() > maxLines_) {
+        lines_.pop_front();
+    }
+}
+
+void LogBuffer::snapshot(std::vector<std::string>& out) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    out.assign(lines_.begin(), lines_.end());
+}
+
+void LogBuffer::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    lines_.clear();
 }
 
 } // namespace gig

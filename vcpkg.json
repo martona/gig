@@ -13,6 +13,13 @@
     "boost-json",
     "sdl3",
     {
+      "name": "imgui",
+      "features": [
+        "dx11-binding",
+        "sdl3-binding"
+      ]
+    },
+    {
       "name": "ffmpeg",
       "default-features": false,
       "features": [

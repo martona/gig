@@ -39,6 +39,14 @@ public:
     virtual void setCameraLabels(const std::vector<std::string>& labels) = 0;
     virtual void setDiagnostics(const OverlayStats& stats) = 0;
 
+    // Feed an SDL event to any in-renderer UI (ImGui). Returns true if the UI
+    // consumed it, so the caller should skip its own handling of that event.
+    virtual bool handleEvent(const SDL_Event& event) { (void)event; return false; }
+
+    // The full-window log view overlay (renders the captured log buffer).
+    virtual void setLogViewVisible(bool visible) { (void)visible; }
+    virtual bool logViewVisible() const { return false; }
+
     virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };
 

@@ -16,6 +16,7 @@ find_package(Boost REQUIRED COMPONENTS json)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 
 add_executable(gig
     src/main.cpp
@@ -78,6 +79,7 @@ target_link_libraries(gig PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     SDL3::SDL3
+    imgui::imgui
 )
 
 if(WIN32)

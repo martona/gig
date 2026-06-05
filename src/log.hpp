@@ -1,8 +1,13 @@
 #pragma once
 
+#include <cstddef>
+#include <deque>
+#include <mutex>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace gig {
 
@@ -64,5 +69,24 @@ inline LogLine logDebug() { return LogLine(LogLevel::Debug); }
 inline LogLine logInfo() { return LogLine(LogLevel::Info); }
 inline LogLine logWarning() { return LogLine(LogLevel::Warning); }
 inline LogLine logError() { return LogLine(LogLevel::Error); }
+
+// A bounded, thread-safe ring of recent log lines for the in-app log view. Every
+// writeLog() line is appended here too (already formatted, no trailing newline).
+class LogBuffer {
+public:
+    static LogBuffer& instance();
+
+    void push(std::string line);
+    // Replace `out` with the current lines, oldest first.
+    void snapshot(std::vector<std::string>& out) const;
+    void clear();
+
+private:
+    LogBuffer() = default;
+
+    mutable std::mutex mutex_;
+    std::deque<std::string> lines_;
+    static constexpr std::size_t maxLines_ = 1000;
+};
 
 } // namespace gig
