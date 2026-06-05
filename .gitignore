@@ -1,2 +1,7 @@
 /.vcpkg/
 /build/
+.claude/settings.local.json
+HANDOFF.md
+PLAN.md
+
+*.log
