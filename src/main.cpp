@@ -1,9 +1,11 @@
+#include "app/camera_supervisor.h"
 #include "decode/ffmpeg_decoder.h"
 #include "discovery/frigate_discovery.h"
 #include "log.hpp"
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
 #include "probe/http_probe.h"
+#include "render/grid_layout.h"
 #include "render/video_renderer.h"
 #include "video_frame.h"
 
@@ -35,6 +37,7 @@ struct ProgramOptions {
     std::string url = DefaultUrl;
     std::string streamUrlTemplate;
     bool softwareDecode = false;
+    int pollIntervalSeconds = 5;
     ProbeOptions probe;
     TlsOptions tls;
     bool showHelp = false;
@@ -131,6 +134,8 @@ ProgramOptions parseOptions(int argc, char** argv)
             options.tls.verifyServer = false;
         } else if (arg == "--software" || arg == "--no-hwaccel") {
             options.softwareDecode = true;
+        } else if (arg == "--poll-interval") {
+            options.pollIntervalSeconds = std::stoi(requireValue(i, argc, argv, "--poll-interval"));
         } else if (!arg.starts_with("--")) {
             if (options.command == Command::Probe || options.command == Command::Discover) {
                 options.probe.baseUrl = arg;
@@ -229,27 +234,18 @@ int main(int argc, char** argv)
             throw std::runtime_error("no cameras to display");
         }
 
-        std::mutex frameMutex;
-        std::vector<std::shared_ptr<VideoFrame>> latestFrames(cameras.size());
-        std::atomic<std::uint64_t> decodedFrames = 0;
+        gig::SupervisorConfig supervisorConfig;
+        supervisorConfig.baseUrl = options.probe.baseUrl;
+        supervisorConfig.tls = options.tls;
+        supervisorConfig.softwareDecode = options.softwareDecode;
+        supervisorConfig.pollInterval = std::chrono::seconds(options.pollIntervalSeconds);
 
-        std::vector<std::unique_ptr<FfmpegDecoder>> decoders;
-        decoders.reserve(cameras.size());
-        for (std::size_t i = 0; i < cameras.size(); ++i) {
-            decoders.push_back(std::make_unique<FfmpegDecoder>(
-                cameras[i].streamUrl,
-                options.tls,
-                renderer->d3d11DecodeContext(),
-                [&frameMutex, &latestFrames, &decodedFrames, i](VideoFrame&& frame) {
-                    ++decodedFrames;
-                    auto sharedFrame = std::make_shared<VideoFrame>(std::move(frame));
-                    std::lock_guard lock(frameMutex);
-                    latestFrames[i] = std::move(sharedFrame);
-                },
-                options.softwareDecode));
-            decoders.back()->start();
-        }
-        gig::logInfo() << "started " << decoders.size() << " decoder(s)";
+        gig::CameraSupervisor supervisor(
+            std::move(cameras),
+            supervisorConfig,
+            renderer->d3d11DecodeContext(),
+            sessionCache);
+        supervisor.start();
 
         bool running = true;
         auto lastTitleUpdate = std::chrono::steady_clock::now();
@@ -265,34 +261,55 @@ int main(int argc, char** argv)
                 if (event.type == SDL_EVENT_QUIT) {
                     running = false;
                 } else if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
-                    running = false;
+                    if (renderer->focusedTile() >= 0) {
+                        renderer->setFocusedTile(-1); // first Esc leaves focus, next quits
+                    } else {
+                        running = false;
+                    }
+                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT) {
+                    if (renderer->focusedTile() >= 0) {
+                        renderer->setFocusedTile(-1); // any click returns to the grid
+                    } else {
+                        int windowWidth = 0;
+                        int windowHeight = 0;
+                        SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
+                        if (windowWidth > 0 && windowHeight > 0) {
+                            const gig::GridLayout layout = gig::computeGridLayout(
+                                static_cast<int>(supervisor.cameraCount()), windowWidth, windowHeight);
+                            for (std::size_t t = 0; t < layout.tiles.size(); ++t) {
+                                const gig::TileRect& cell = layout.tiles[t];
+                                if (event.button.x >= cell.x && event.button.x < cell.x + cell.width
+                                    && event.button.y >= cell.y && event.button.y < cell.y + cell.height) {
+                                    renderer->setFocusedTile(static_cast<int>(t));
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 } else if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                     renderer->resize();
                 }
             }
 
-            std::vector<std::shared_ptr<VideoFrame>> frames;
-            {
-                std::lock_guard lock(frameMutex);
-                frames = latestFrames;
-            }
-
+            const std::vector<std::shared_ptr<VideoFrame>> frames = supervisor.snapshotFrames();
             renderer->render(frames);
 
             const auto now = std::chrono::steady_clock::now();
             if (now - lastTitleUpdate > std::chrono::seconds(1)) {
                 lastTitleUpdate = now;
-                std::string title = "Frigate D3D PoC - " + std::to_string(cameras.size())
-                    + " cams - frames " + std::to_string(decodedFrames.load());
+                std::string title = "Frigate D3D PoC - " + std::to_string(supervisor.liveCameraCount())
+                    + "/" + std::to_string(supervisor.cameraCount()) + " live - frames "
+                    + std::to_string(supervisor.totalDecodedFrames());
                 SDL_SetWindowTitle(window.get(), title.c_str());
             }
 
             if (now - lastStatsLog > std::chrono::seconds(5)) {
-                const std::uint64_t total = decodedFrames.load();
+                const std::uint64_t total = supervisor.totalDecodedFrames();
                 const double seconds = std::chrono::duration<double>(now - lastStatsLog).count();
                 const double fps = seconds > 0.0 ? static_cast<double>(total - lastStatsFrames) / seconds : 0.0;
                 gig::logInfo() << "decoded " << total << " frames total ("
-                               << static_cast<int>(fps + 0.5) << "/s across " << cameras.size() << " cams)";
+                               << static_cast<int>(fps + 0.5) << "/s), live "
+                               << supervisor.liveCameraCount() << "/" << supervisor.cameraCount();
                 lastStatsLog = now;
                 lastStatsFrames = total;
             }
@@ -302,8 +319,8 @@ int main(int argc, char** argv)
             std::this_thread::sleep_until(frameStart + frameInterval);
         }
 
-        gig::logInfo() << "shutting down " << decoders.size() << " decoder(s)";
-        decoders.clear();
+        gig::logInfo() << "shutting down";
+        supervisor.stop();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << "\n";

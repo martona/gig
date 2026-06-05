@@ -19,6 +19,10 @@ public:
     // blank (camera not yet live); slot order is the stable camera order.
     virtual void render(const std::vector<std::shared_ptr<VideoFrame>>& frames) = 0;
 
+    // Focus a single tile so it fills the window; -1 returns to the grid.
+    virtual void setFocusedTile(int index) = 0;
+    virtual int focusedTile() const = 0;
+
     virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };
 

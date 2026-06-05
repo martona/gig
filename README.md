@@ -1,13 +1,13 @@
 # Frigate D3D PoC
 
-Tiny Windows proof of concept for opening one Frigate/go2rtc camera stream with FFmpeg and rendering the latest decoded frame through Direct3D 11.
+Windows-native streaming client for Frigate: it discovers every camera from the Frigate API and renders them all in a live Direct3D 11 grid, with click-to-zoom.
 
-This intentionally skips camera discovery, motion/activity handling, and Windows certificate store integration. It is just enough to prove the native pipeline:
+The native pipeline:
 
-1. FFmpeg opens `https://.../api/stream.ts?src=...` with client cert files.
-2. A background thread decodes H.264 through D3D11VA on the renderer's D3D11 device when available, then falls back to other FFmpeg hardware devices or software decode.
-3. SDL owns the window.
-4. A thin D3D11 renderer samples decoded D3D11 NV12 textures directly and presents them letterboxed, with CPU NV12/YUV420P/BGRA paths kept as fallbacks.
+1. Discovery fetches `/api/config` over mTLS (Boost.Beast) and maps each camera to its go2rtc `stream.ts` URL. A shared TLS session cache resumes handshakes across control-plane calls.
+2. One FFmpeg decoder per camera opens `https://.../api/go2rtc/api/stream.ts?src=...` with client cert files. Each decodes H.264 through D3D11VA on the renderer's shared D3D11 device when available, falling back to other FFmpeg hardware devices or software decode (`--software`).
+3. A health supervisor polls go2rtc byte counters and is the authority on liveness: it tears a decoder down when its bytes stop advancing and brings it back when they resume. FFmpeg handles its own transient reconnects in between.
+4. SDL owns the window. A thin D3D11 renderer keeps per-camera GPU state and draws each decoded frame letterboxed into its grid cell (or one cell filling the window in focus mode), sampling D3D11 NV12 textures directly with CPU NV12/YUV420P/BGRA fallbacks.
 
 ## Build
 
@@ -31,21 +31,23 @@ Useful overrides:
 
 ## Run
 
-Example using PEM files:
+Discover every camera and show the grid (pass `--base`, the Frigate root):
 
 ```powershell
 .\build\windows-release\frigate_d3d_poc.exe `
-  --url "https://frigate.lan/security-go2rtc/api/stream.ts?src=frontgate" `
+  --base "https://frigate.lan/security" `
   --ca "C:\certs\myca.pem" `
   --cert "C:\certs\marton@mars11.crt" `
   --key "C:\certs\marton@mars11.key"
 ```
 
-For a quick server-cert bypass while testing:
+Click a tile to zoom it to fill the window; click again (or press Esc) to return to the grid. Esc in the grid quits.
 
-```powershell
-.\build\windows-release\frigate_d3d_poc.exe --insecure --cert C:\certs\client.crt --key C:\certs\client.key
-```
+Flags:
+
+- `--software` (alias `--no-hwaccel`) forces software decode. Use it on machines without a usable GPU (e.g. a VM whose virtual adapter advertises a broken DXVA2 decoder that accepts H.264 but emits "Invalid data").
+- `--poll-interval N` sets the health poll period in seconds (default 5).
+- `--url URL` runs a single camera instead of discovering (the legacy path); `--insecure` skips server-cert verification.
 
 ## Probe
 
@@ -64,7 +66,8 @@ It probes Frigate config, Frigate-proxied go2rtc streams, and raw go2rtc stream 
 
 ## Next Steps
 
+- Verify the shared-device D3D11VA zero-copy path with all cameras on real GPU hardware.
+- On-screen overlays (camera labels, "connecting/offline" state) — needs a text renderer.
+- Justified/aspect-aware layout and a hero+spotters mode beyond the uniform grid.
 - Replace PEM file options with a Windows certificate store backed TLS path.
-- Add Frigate API discovery and websocket camera activity.
 - Add a renderer abstraction for non-Windows backends.
-- Replace the one-camera path with Frigate discovery and a dynamic grid.

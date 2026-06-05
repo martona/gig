@@ -1,0 +1,94 @@
+#pragma once
+
+#include "d3d11_decode_context.h"
+#include "decode/ffmpeg_decoder.h"
+#include "discovery/frigate_discovery.h"
+#include "net/http_client.hpp"
+#include "net/tls_options.h"
+#include "net/tls_session_cache.hpp"
+#include "video_frame.h"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace gig {
+
+struct SupervisorConfig {
+    std::string baseUrl; // Frigate control-plane base for the health poll; empty disables polling
+    TlsOptions tls;
+    bool softwareDecode = false;
+    std::chrono::seconds pollInterval { 5 };
+};
+
+// Owns one decoder per camera and the authoritative liveness signal. A health
+// thread polls go2rtc byte counters every pollInterval and reconciles: a camera
+// whose bytes advance should be running; one that stalls is torn down; one that
+// resumes is brought back. FFmpeg handles its own transient reconnects in
+// between. Layout/order is fixed (stable slots); liveness only changes contents.
+class CameraSupervisor {
+public:
+    CameraSupervisor(
+        std::vector<CameraStream> cameras,
+        SupervisorConfig config,
+        std::shared_ptr<D3D11DecodeContext> decodeContext,
+        std::shared_ptr<TlsSessionCache> sessionCache);
+    ~CameraSupervisor();
+
+    CameraSupervisor(const CameraSupervisor&) = delete;
+    CameraSupervisor& operator=(const CameraSupervisor&) = delete;
+
+    void start();
+    void stop();
+
+    // Latest frame per camera in stable camera order (null = no current frame).
+    std::vector<std::shared_ptr<VideoFrame>> snapshotFrames() const;
+
+    std::size_t cameraCount() const { return slots_.size(); }
+    std::uint64_t totalDecodedFrames() const { return decodedFrames_.load(); }
+    int liveCameraCount() const { return liveCameras_.load(); }
+
+private:
+    enum class Liveness { Unknown, Online, Offline };
+    static const char* livenessName(Liveness liveness);
+
+    struct CameraSlot {
+        CameraStream info;
+        std::unique_ptr<FfmpegDecoder> decoder;
+        std::uint64_t lastByteCount = 0;
+        bool haveByteBaseline = false;
+        Liveness liveness = Liveness::Unknown;
+    };
+
+    void pollLoop();
+    void reconcile();
+    void startDecoder(std::size_t index);
+    void stopDecoder(std::size_t index);
+
+    SupervisorConfig config_;
+    std::shared_ptr<D3D11DecodeContext> decodeContext_;
+    std::shared_ptr<TlsSessionCache> sessionCache_;
+
+    std::vector<CameraSlot> slots_; // lifecycle owned by the poll thread (or start() when not polling)
+
+    mutable std::mutex frameMutex_;
+    std::vector<std::shared_ptr<VideoFrame>> latestFrames_; // guarded by frameMutex_
+
+    std::unique_ptr<HttpClient> healthClient_;
+
+    std::mutex pollMutex_;
+    std::condition_variable pollCv_;
+    std::atomic_bool stopRequested_ { false };
+    std::thread pollThread_;
+
+    std::atomic<std::uint64_t> decodedFrames_ { 0 };
+    std::atomic<int> liveCameras_ { 0 };
+};
+
+} // namespace gig

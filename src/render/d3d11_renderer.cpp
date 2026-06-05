@@ -281,26 +281,10 @@ public:
             context_->RSSetViewports(1, &fullViewport);
             context_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
 
-            const gig::GridLayout layout = gig::computeGridLayout(
-                static_cast<int>(frames.size()),
-                static_cast<int>(backBufferWidth_),
-                static_cast<int>(backBufferHeight_));
-
-            for (std::size_t i = 0; i < frames.size(); ++i) {
-                TileState& tile = tiles_[i];
-                const VideoFrame* frame = frames[i].get();
-                if (frame && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty())) {
-                    uploadFrame(tile, *frame);
-                }
-
-                if (!tile.planeViews[0] || i >= layout.tiles.size()) {
-                    continue;
-                }
-
-                const D3D11_VIEWPORT videoViewport =
-                    computeVideoViewport(layout.tiles[i], tile.textureWidth, tile.textureHeight);
-                context_->RSSetViewports(1, &videoViewport);
-                drawTile(tile);
+            if (focusedTile_ >= 0 && focusedTile_ < static_cast<int>(frames.size())) {
+                renderSingleTile(static_cast<std::size_t>(focusedTile_), frames);
+            } else {
+                renderGrid(frames);
             }
 
             // Non-waiting Present: submits and returns immediately so the shared
@@ -316,6 +300,16 @@ public:
     std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const override
     {
         return decodeContext_;
+    }
+
+    void setFocusedTile(int index) override
+    {
+        focusedTile_ = index;
+    }
+
+    int focusedTile() const override
+    {
+        return focusedTile_;
     }
 
 private:
@@ -795,6 +789,65 @@ private:
         context_->PSSetShaderResources(0, 3, nullResources);
     }
 
+    // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
+    // the back buffer has already been cleared.
+    void renderGrid(const std::vector<std::shared_ptr<VideoFrame>>& frames)
+    {
+        const gig::GridLayout layout = gig::computeGridLayout(
+            static_cast<int>(frames.size()),
+            static_cast<int>(backBufferWidth_),
+            static_cast<int>(backBufferHeight_));
+
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            TileState& tile = tiles_[i];
+            const VideoFrame* frame = frames[i].get();
+            const bool hasFrame = frame
+                && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty());
+            if (hasFrame) {
+                uploadFrame(tile, *frame);
+            } else if (tile.planeViews[0]) {
+                resetFrameTextures(tile); // drop stale GPU state so an idle/offline tile blanks
+            }
+
+            if (!tile.planeViews[0] || i >= layout.tiles.size()) {
+                continue;
+            }
+
+            const D3D11_VIEWPORT videoViewport =
+                computeVideoViewport(layout.tiles[i], tile.textureWidth, tile.textureHeight);
+            context_->RSSetViewports(1, &videoViewport);
+            drawTile(tile);
+        }
+    }
+
+    // Draws a single focused camera letterboxed across the whole window.
+    void renderSingleTile(std::size_t index, const std::vector<std::shared_ptr<VideoFrame>>& frames)
+    {
+        TileState& tile = tiles_[index];
+        const VideoFrame* frame = frames[index].get();
+        const bool hasFrame = frame
+            && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty());
+        if (hasFrame) {
+            uploadFrame(tile, *frame);
+        } else if (tile.planeViews[0]) {
+            resetFrameTextures(tile);
+        }
+
+        if (!tile.planeViews[0]) {
+            return;
+        }
+
+        const gig::TileRect full {
+            0.0f,
+            0.0f,
+            static_cast<float>(backBufferWidth_),
+            static_cast<float>(backBufferHeight_),
+        };
+        const D3D11_VIEWPORT videoViewport = computeVideoViewport(full, tile.textureWidth, tile.textureHeight);
+        context_->RSSetViewports(1, &videoViewport);
+        drawTile(tile);
+    }
+
     SDL_Window* window_ = nullptr;
     HWND hwnd_ = nullptr;
     LONG backBufferWidth_ = 1;
@@ -814,6 +867,7 @@ private:
     ComPtr<ID3D11Buffer> colorMatrixBuffer_;
 
     std::vector<TileState> tiles_;
+    int focusedTile_ = -1;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();
 };
 

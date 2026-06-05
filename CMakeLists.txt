@@ -21,12 +21,16 @@ add_executable(frigate_d3d_poc
     src/main.cpp
     src/log.cpp
     src/log.hpp
+    src/app/camera_supervisor.cpp
+    src/app/camera_supervisor.h
     src/d3d11_decode_context.h
     src/video_frame.h
     src/decode/ffmpeg_decoder.cpp
     src/decode/ffmpeg_decoder.h
     src/discovery/frigate_discovery.cpp
     src/discovery/frigate_discovery.h
+    src/health/stream_health.cpp
+    src/health/stream_health.h
     src/net/tls_options.h
     src/net/tls_session_cache.cpp
     src/net/tls_session_cache.hpp

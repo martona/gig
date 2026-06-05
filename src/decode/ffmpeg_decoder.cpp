@@ -79,6 +79,14 @@ using BufferRefPtr = std::unique_ptr<AVBufferRef, BufferRefDeleter>;
 
 std::once_flag ffmpegNetworkInitOnce;
 
+// FFmpeg polls this during blocking I/O (open/read); returning non-zero aborts
+// promptly so stop() never waits the full rw_timeout to join the worker.
+int interruptCallback(void* opaque)
+{
+    const auto* stopFlag = static_cast<const std::atomic_bool*>(opaque);
+    return (stopFlag && stopFlag->load()) ? 1 : 0;
+}
+
 struct HardwareDecodeState {
     AVPixelFormat pixelFormat = AV_PIX_FMT_NONE;
     AVHWDeviceType deviceType = AV_HWDEVICE_TYPE_NONE;
@@ -568,6 +576,8 @@ void FfmpegDecoder::decodeOnce()
     }
 
     rawFormatContext->flags |= AVFMT_FLAG_NOBUFFER;
+    rawFormatContext->interrupt_callback.callback = &interruptCallback;
+    rawFormatContext->interrupt_callback.opaque = &stopRequested_;
 
     std::cerr << "Opening stream: " << url_ << "\n";
     const int openResult = avformat_open_input(&rawFormatContext, url_.c_str(), nullptr, &options);
