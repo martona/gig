@@ -2,6 +2,7 @@
 #include "decode/ffmpeg_decoder.h"
 #include "discovery/frigate_discovery.h"
 #include "log.hpp"
+#include "net/cookie_jar.hpp"
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
 #include "probe/cert_probe.h"
@@ -279,7 +280,8 @@ int main(int argc, char** argv)
         }
         if (options.command == Command::Discover) {
             auto sessionCache = std::make_shared<gig::TlsSessionCache>();
-            gig::HttpClient client(options.probe.baseUrl, options.tls, sessionCache);
+            auto cookieJar = std::make_shared<gig::CookieJar>();
+            gig::HttpClient client(options.probe.baseUrl, options.tls, sessionCache, cookieJar);
             const std::vector<gig::CameraStream> cameras =
                 gig::discoverCameras(client, options.streamUrlTemplate);
             std::cout << "Discovered " << cameras.size() << " camera(s):\n";
@@ -315,9 +317,10 @@ int main(int argc, char** argv)
         // Resolve the camera set: discover from --base, else fall back to the
         // single --url camera (legacy/manual mode).
         auto sessionCache = std::make_shared<gig::TlsSessionCache>();
+        auto cookieJar = std::make_shared<gig::CookieJar>();
         std::vector<gig::CameraStream> cameras;
         if (!options.probe.baseUrl.empty()) {
-            gig::HttpClient client(options.probe.baseUrl, options.tls, sessionCache);
+            gig::HttpClient client(options.probe.baseUrl, options.tls, sessionCache, cookieJar);
             cameras = gig::discoverCameras(client, options.streamUrlTemplate);
         } else {
             cameras.push_back({ "camera", "", options.url });
@@ -344,7 +347,8 @@ int main(int argc, char** argv)
             std::move(cameras),
             supervisorConfig,
             renderer->d3d11DecodeContext(),
-            sessionCache);
+            sessionCache,
+            cookieJar);
         supervisor.start();
 
         OverlayStats initialStats;

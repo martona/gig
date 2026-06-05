@@ -1,8 +1,11 @@
 #include "decode/ffmpeg_decoder.h"
 
+#include "net/tls_client.hpp"
+
 #include <array>
 #include <cstdarg>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -20,10 +23,12 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavformat/avio.h>
 #include <libavutil/error.h>
 #include <libavutil/log.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
@@ -74,14 +79,27 @@ struct BufferRefDeleter {
     }
 };
 
+struct AvioContextDeleter {
+    void operator()(AVIOContext* context) const
+    {
+        if (context) {
+            // FFmpeg may have reallocated the buffer we passed avio_alloc_context,
+            // so free whatever it currently owns, then the context struct itself.
+            av_freep(&context->buffer);
+            avio_context_free(&context);
+        }
+    }
+};
+
 using FormatContextPtr = std::unique_ptr<AVFormatContext, FormatContextDeleter>;
 using CodecContextPtr = std::unique_ptr<AVCodecContext, CodecContextDeleter>;
 using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
 using FramePtr = std::unique_ptr<AVFrame, FrameDeleter>;
 using SwsContextPtr = std::unique_ptr<SwsContext, SwsContextDeleter>;
 using BufferRefPtr = std::unique_ptr<AVBufferRef, BufferRefDeleter>;
+using AvioContextPtr = std::unique_ptr<AVIOContext, AvioContextDeleter>;
 
-std::once_flag ffmpegNetworkInitOnce;
+std::once_flag ffmpegLogInitOnce;
 
 // FFmpeg polls this during blocking I/O (open/read); returning non-zero aborts
 // promptly so stop() never waits the full rw_timeout to join the worker.
@@ -89,6 +107,19 @@ int interruptCallback(void* opaque)
 {
     const auto* stopFlag = static_cast<const std::atomic_bool*>(opaque);
     return (stopFlag && stopFlag->load()) ? 1 : 0;
+}
+
+// AVIO read callback: pull decrypted bytes from our MediaStream. FFmpeg wants a
+// positive byte count, AVERROR_EOF at a clean end, or another negative AVERROR on
+// error/abort -- never 0.
+int readPacket(void* opaque, std::uint8_t* buf, int size)
+{
+    auto* stream = static_cast<gig::MediaStream*>(opaque);
+    const int result = stream->read(buf, size);
+    if (result > 0) {
+        return result;
+    }
+    return (result == 0) ? AVERROR_EOF : AVERROR_EXIT;
 }
 
 // The H.264 decoder spews recoverable-error spam ("non-existing PPS", "no
@@ -154,13 +185,6 @@ void throwIfFailed(int code, const char* action)
 {
     if (code < 0) {
         throw std::runtime_error(std::string(action) + ": " + ffmpegError(code));
-    }
-}
-
-void setOption(AVDictionary** options, const char* key, const std::string& value)
-{
-    if (!value.empty()) {
-        av_dict_set(options, key, value.c_str(), 0);
     }
 }
 
@@ -544,15 +568,17 @@ CodecContextPtr openCodecContext(
 
 FfmpegDecoder::FfmpegDecoder(
     std::string url,
-    TlsOptions tlsOptions,
+    std::shared_ptr<gig::TlsClient> tlsClient,
     std::shared_ptr<D3D11DecodeContext> d3d11Context,
     FrameCallback frameCallback,
-    bool softwareOnly)
+    bool softwareOnly,
+    std::chrono::milliseconds startupDelay)
     : url_(std::move(url))
-    , tlsOptions_(std::move(tlsOptions))
+    , tlsClient_(std::move(tlsClient))
     , d3d11Context_(std::move(d3d11Context))
     , frameCallback_(std::move(frameCallback))
     , softwareOnly_(softwareOnly)
+    , startupDelay_(startupDelay)
 {
 }
 
@@ -568,8 +594,10 @@ void FfmpegDecoder::start()
     }
 
     stopRequested_ = false;
-    std::call_once(ffmpegNetworkInitOnce, [] {
-        avformat_network_init();
+    std::call_once(ffmpegLogInitOnce, [] {
+        // No avformat_network_init(): we no longer use any FFmpeg network
+        // protocol -- bytes arrive through our custom AVIO. Just install the log
+        // filter that drops the recoverable-decode-error spam.
         av_log_set_callback(ffmpegLogCallback);
     });
 
@@ -580,7 +608,21 @@ void FfmpegDecoder::start()
 
 void FfmpegDecoder::stop()
 {
-    stopRequested_ = true;
+    {
+        // Flip the flag under startupMutex_ so a worker waiting out its startup
+        // stagger can't miss the wake (no lost notify).
+        std::lock_guard<std::mutex> lock(startupMutex_);
+        stopRequested_ = true;
+    }
+    startupCv_.notify_all();
+    {
+        // Wake an in-flight MediaStream read so the worker doesn't block until the
+        // read timeout; the interrupt_callback covers FFmpeg's own blocking.
+        std::lock_guard<std::mutex> lock(streamMutex_);
+        if (activeStream_) {
+            activeStream_->cancel();
+        }
+    }
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -588,6 +630,16 @@ void FfmpegDecoder::stop()
 
 void FfmpegDecoder::run()
 {
+    if (startupDelay_.count() > 0) {
+        // Stagger the initial connect so earlier cameras' TLS handshakes seed the
+        // shared session cache before this one connects -- more resumption now,
+        // and fewer client-cert signings under Phase 1. Applies once per decoder
+        // lifetime; transient in-loop reconnects below are not delayed.
+        // Interruptible: stop() flips stopRequested_ and notifies startupCv_.
+        std::unique_lock<std::mutex> lock(startupMutex_);
+        startupCv_.wait_for(lock, startupDelay_, [this] { return stopRequested_.load(); });
+    }
+
     while (!stopRequested_) {
         try {
             decodeOnce();
@@ -603,32 +655,68 @@ void FfmpegDecoder::run()
 
 void FfmpegDecoder::decodeOnce()
 {
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "rw_timeout", std::to_string(tlsOptions_.rwTimeoutUs).c_str(), 0);
-    av_dict_set(&options, "tls_verify", tlsOptions_.verifyServer ? "1" : "0", 0);
-    setOption(&options, "ca_file", tlsOptions_.caFile);
-    setOption(&options, "cert_file", tlsOptions_.certFile);
-    setOption(&options, "key_file", tlsOptions_.keyFile);
+    // We terminate TLS ourselves; FFmpeg only ever sees decrypted MPEG-TS bytes
+    // pulled from this connection through the readPacket AVIO callback below.
+    std::unique_ptr<gig::MediaStream> stream = tlsClient_->open(url_, stopRequested_);
+
+    // Publish the stream so stop() can cancel an in-flight read. The guard clears
+    // the pointer before the stream is destroyed. The locals below are declared so
+    // destruction runs format -> avio -> guard -> stream: FFmpeg stops reading
+    // before the AVIO and socket go away, and activeStream_ is cleared first.
+    {
+        std::lock_guard<std::mutex> lock(streamMutex_);
+        activeStream_ = stream.get();
+    }
+    struct ActiveStreamGuard {
+        FfmpegDecoder* decoder;
+        ~ActiveStreamGuard()
+        {
+            std::lock_guard<std::mutex> lock(decoder->streamMutex_);
+            decoder->activeStream_ = nullptr;
+        }
+    } activeStreamGuard{ this };
+
+    constexpr int ioBufferSize = 64 * 1024;
+    auto* ioBuffer = static_cast<unsigned char*>(av_malloc(ioBufferSize));
+    if (!ioBuffer) {
+        throw std::runtime_error("Could not allocate AVIO buffer.");
+    }
+    AVIOContext* rawAvioContext = avio_alloc_context(
+        ioBuffer, ioBufferSize, /*write_flag=*/0, stream.get(), &readPacket, nullptr, nullptr);
+    if (!rawAvioContext) {
+        av_free(ioBuffer);
+        throw std::runtime_error("Could not allocate AVIO context.");
+    }
+    rawAvioContext->seekable = 0;
+    AvioContextPtr avioContext(rawAvioContext);
+
+    const AVInputFormat* inputFormat = av_find_input_format("mpegts");
+    if (!inputFormat) {
+        throw std::runtime_error("FFmpeg is missing the mpegts demuxer.");
+    }
 
     AVFormatContext* rawFormatContext = avformat_alloc_context();
     if (!rawFormatContext) {
-        av_dict_free(&options);
         throw std::runtime_error("Could not allocate AVFormatContext.");
     }
-
-    rawFormatContext->flags |= AVFMT_FLAG_NOBUFFER;
+    rawFormatContext->pb = avioContext.get();
+    rawFormatContext->flags |= AVFMT_FLAG_NOBUFFER | AVFMT_FLAG_CUSTOM_IO;
     rawFormatContext->interrupt_callback.callback = &interruptCallback;
     rawFormatContext->interrupt_callback.opaque = &stopRequested_;
+    FormatContextPtr formatContext(rawFormatContext);
 
+    // Force the mpegts demuxer (the stream is non-seekable, so it must not be
+    // probed by seeking). On failure avformat_open_input frees the context and
+    // NULLs our pointer but leaves pb untouched (AVFMT_FLAG_CUSTOM_IO), so the
+    // AVIO + stream still unwind via RAII.
     std::cerr << "Opening stream: " << url_ << "\n";
-    const int openResult = avformat_open_input(&rawFormatContext, url_.c_str(), nullptr, &options);
-    av_dict_free(&options);
+    AVFormatContext* openTarget = formatContext.release();
+    const int openResult = avformat_open_input(&openTarget, nullptr, inputFormat, nullptr);
+    formatContext.reset(openTarget);
     if (openResult < 0) {
-        avformat_close_input(&rawFormatContext);
         throw std::runtime_error(std::string("avformat_open_input: ") + ffmpegError(openResult));
     }
 
-    FormatContextPtr formatContext(rawFormatContext);
     throwIfFailed(avformat_find_stream_info(formatContext.get(), nullptr), "avformat_find_stream_info");
 
     const int videoStreamIndex = av_find_best_stream(formatContext.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);

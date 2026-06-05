@@ -25,6 +25,9 @@ struct SupervisorConfig {
     TlsOptions tls;
     bool softwareDecode = false;
     std::chrono::seconds pollInterval { 5 };
+    // Per-camera spread on initial connect so earlier handshakes seed the shared
+    // TLS session cache before later cameras connect (more resumption).
+    std::chrono::milliseconds startupStagger { 50 };
 };
 
 // Owns one decoder per camera and the authoritative liveness signal. A health
@@ -38,7 +41,8 @@ public:
         std::vector<CameraStream> cameras,
         SupervisorConfig config,
         std::shared_ptr<D3D11DecodeContext> decodeContext,
-        std::shared_ptr<TlsSessionCache> sessionCache);
+        std::shared_ptr<TlsSessionCache> sessionCache,
+        std::shared_ptr<CookieJar> cookieJar);
     ~CameraSupervisor();
 
     CameraSupervisor(const CameraSupervisor&) = delete;
@@ -76,6 +80,8 @@ private:
     SupervisorConfig config_;
     std::shared_ptr<D3D11DecodeContext> decodeContext_;
     std::shared_ptr<TlsSessionCache> sessionCache_;
+    std::shared_ptr<CookieJar> cookieJar_;
+    std::shared_ptr<TlsClient> videoTls_; // one shared TLS holder for all video connections
 
     std::vector<CameraSlot> slots_; // lifecycle owned by the poll thread (or start() when not polling)
 

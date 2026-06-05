@@ -2,6 +2,7 @@
 
 #include "health/stream_health.h"
 #include "log.hpp"
+#include "net/tls_client.hpp"
 
 #include <utility>
 
@@ -21,12 +22,19 @@ CameraSupervisor::CameraSupervisor(
     std::vector<CameraStream> cameras,
     SupervisorConfig config,
     std::shared_ptr<D3D11DecodeContext> decodeContext,
-    std::shared_ptr<TlsSessionCache> sessionCache)
+    std::shared_ptr<TlsSessionCache> sessionCache,
+    std::shared_ptr<CookieJar> cookieJar)
     : config_(std::move(config))
     , decodeContext_(std::move(decodeContext))
     , sessionCache_(std::move(sessionCache))
+    , cookieJar_(std::move(cookieJar))
     , latestFrames_(cameras.size())
 {
+    // One TLS holder for every video connection: a single client-cert load and
+    // cross-connection session resumption, sharing the control plane's session
+    // cache + cookie jar. A bad PEM path throws here, failing fast at startup.
+    videoTls_ = std::make_shared<TlsClient>(config_.tls, sessionCache_, cookieJar_);
+
     slots_.reserve(cameras.size());
     for (CameraStream& camera : cameras) {
         CameraSlot slot;
@@ -57,7 +65,7 @@ void CameraSupervisor::start()
     if (healthTls.rwTimeoutUs <= 0 || healthTls.rwTimeoutUs > 3'000'000) {
         healthTls.rwTimeoutUs = 3'000'000;
     }
-    healthClient_ = std::make_unique<HttpClient>(config_.baseUrl, healthTls, sessionCache_);
+    healthClient_ = std::make_unique<HttpClient>(config_.baseUrl, healthTls, sessionCache_, cookieJar_);
 
     stopRequested_ = false;
     pollThread_ = std::thread([this] { pollLoop(); });
@@ -186,7 +194,7 @@ void CameraSupervisor::startDecoder(std::size_t index)
 
     slot.decoder = std::make_unique<FfmpegDecoder>(
         slot.info.streamUrl,
-        config_.tls,
+        videoTls_,
         decodeContext_,
         [this, index](VideoFrame&& frame) {
             decodedFrames_.fetch_add(1, std::memory_order_relaxed);
@@ -194,7 +202,8 @@ void CameraSupervisor::startDecoder(std::size_t index)
             std::lock_guard<std::mutex> lock(frameMutex_);
             latestFrames_[index] = std::move(shared);
         },
-        config_.softwareDecode);
+        config_.softwareDecode,
+        config_.startupStagger * static_cast<int>(index));
     slot.decoder->start();
 }
 

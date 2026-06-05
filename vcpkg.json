@@ -20,7 +20,6 @@
         "avformat",
         "amf",
         "nvcodec",
-        "openssl",
         "qsv",
         "swscale"
       ]

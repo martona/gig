@@ -31,12 +31,18 @@ add_executable(gig
     src/discovery/frigate_discovery.h
     src/health/stream_health.cpp
     src/health/stream_health.h
+    src/net/cookie_jar.cpp
+    src/net/cookie_jar.hpp
+    src/net/http_client.cpp
+    src/net/http_client.hpp
+    src/net/tls_client.cpp
+    src/net/tls_client.hpp
+    src/net/tls_context.cpp
+    src/net/tls_context.hpp
     src/net/tls_options.h
     src/net/tls_session_cache.cpp
     src/net/tls_session_cache.hpp
     src/net/url.h
-    src/net/http_client.cpp
-    src/net/http_client.hpp
     src/net/win_cert_store.cpp
     src/net/win_cert_store.h
     src/probe/cert_probe.cpp

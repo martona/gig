@@ -1,15 +1,22 @@
 #pragma once
 
 #include "d3d11_decode_context.h"
-#include "net/tls_options.h"
 #include "video_frame.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+
+namespace gig {
+class TlsClient;
+class MediaStream;
+}
 
 class FfmpegDecoder {
 public:
@@ -17,10 +24,11 @@ public:
 
     FfmpegDecoder(
         std::string url,
-        TlsOptions tlsOptions,
+        std::shared_ptr<gig::TlsClient> tlsClient,
         std::shared_ptr<D3D11DecodeContext> d3d11Context,
         FrameCallback frameCallback,
-        bool softwareOnly = false);
+        bool softwareOnly = false,
+        std::chrono::milliseconds startupDelay = std::chrono::milliseconds(0));
     ~FfmpegDecoder();
 
     FfmpegDecoder(const FfmpegDecoder&) = delete;
@@ -34,11 +42,21 @@ private:
     void decodeOnce();
 
     std::string url_;
-    TlsOptions tlsOptions_;
+    std::shared_ptr<gig::TlsClient> tlsClient_;
     std::shared_ptr<D3D11DecodeContext> d3d11Context_;
     FrameCallback frameCallback_;
     bool softwareOnly_ = false;
+    std::chrono::milliseconds startupDelay_ { 0 };
     std::atomic_bool stopRequested_ = false;
     std::thread worker_;
     std::uint64_t frameIndex_ = 0;
+
+    // The connection FFmpeg is currently reading from, so stop() can cancel an
+    // in-flight read promptly. Guarded by streamMutex_.
+    std::mutex streamMutex_;
+    gig::MediaStream* activeStream_ = nullptr;
+
+    // Interruptible wait for the initial-connect stagger; stop() wakes it.
+    std::mutex startupMutex_;
+    std::condition_variable startupCv_;
 };

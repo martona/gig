@@ -9,6 +9,8 @@
 
 namespace gig {
 
+class CookieJar;
+
 struct HttpResponse {
     bool ok = false;
     unsigned status = 0;
@@ -29,7 +31,11 @@ struct HttpResponse {
 // HttpClient and share the TlsSessionCache (which is internally locked).
 class HttpClient {
 public:
-    HttpClient(std::string baseUrl, TlsOptions tls, std::shared_ptr<TlsSessionCache> sessionCache);
+    HttpClient(
+        std::string baseUrl,
+        TlsOptions tls,
+        std::shared_ptr<TlsSessionCache> sessionCache,
+        std::shared_ptr<CookieJar> cookieJar);
     ~HttpClient();
 
     HttpClient(const HttpClient&) = delete;
