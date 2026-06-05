@@ -37,6 +37,10 @@ add_executable(gig
     src/net/url.h
     src/net/http_client.cpp
     src/net/http_client.hpp
+    src/net/win_cert_store.cpp
+    src/net/win_cert_store.h
+    src/probe/cert_probe.cpp
+    src/probe/cert_probe.h
     src/probe/http_probe.cpp
     src/probe/http_probe.h
     src/render/d3d11_renderer.cpp
@@ -82,6 +86,9 @@ if(WIN32)
         dxgi
         d3dcompiler
         gdi32
+        crypt32
+        cryptui
+        ncrypt
     )
 endif()
 

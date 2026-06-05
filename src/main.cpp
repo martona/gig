@@ -4,6 +4,7 @@
 #include "log.hpp"
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
+#include "probe/cert_probe.h"
 #include "probe/http_probe.h"
 #include "render/grid_layout.h"
 #include "render/video_renderer.h"
@@ -105,6 +106,7 @@ enum class Command {
     Run,
     Probe,
     Discover,
+    CertStore,
 };
 
 struct ProgramOptions {
@@ -114,6 +116,7 @@ struct ProgramOptions {
     bool softwareDecode = false;
     int pollIntervalSeconds = 5;
     bool showOverlay = true;
+    gig::ClientCertMode certMode = gig::ClientCertMode::Cng;
     ProbeOptions probe;
     TlsOptions tls;
     bool showHelp = false;
@@ -125,6 +128,7 @@ void printUsage()
         << "gig [--base URL | --url URL] [--software] [--no-overlay] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
         << "gig probe --base URL [--src STREAM] [--stream-check] [--endpoint PATH]\n"
         << "gig discover --base URL [--stream-url TEMPLATE] [--ca CA] [--cert C] [--key K]\n"
+        << "gig certstore --base URL [--server-only|--capi]   (Windows cert store; default = CNG client-cert bridge)\n"
         << "\n"
         << "If the viewer --url is omitted, this default is used:\n"
         << "  " << DefaultUrl << "\n";
@@ -172,6 +176,9 @@ ProgramOptions parseOptions(int argc, char** argv)
     } else if (argc > 1 && std::string(argv[1]) == "discover") {
         options.command = Command::Discover;
         firstOption = 2;
+    } else if (argc > 1 && std::string(argv[1]) == "certstore") {
+        options.command = Command::CertStore;
+        firstOption = 2;
     }
 
     for (int i = firstOption; i < argc; ++i) {
@@ -212,6 +219,10 @@ ProgramOptions parseOptions(int argc, char** argv)
             options.softwareDecode = true;
         } else if (arg == "--no-overlay") {
             options.showOverlay = false;
+        } else if (arg == "--server-only") {
+            options.certMode = gig::ClientCertMode::None;
+        } else if (arg == "--capi") {
+            options.certMode = gig::ClientCertMode::Capi;
         } else if (arg == "--poll-interval") {
             options.pollIntervalSeconds = std::stoi(requireValue(i, argc, argv, "--poll-interval"));
         } else if (!arg.starts_with("--")) {
@@ -226,7 +237,8 @@ ProgramOptions parseOptions(int argc, char** argv)
     }
 
     options.probe.tls = options.tls;
-    if (options.command == Command::Probe || options.command == Command::Discover) {
+    if (options.command == Command::Probe || options.command == Command::Discover
+        || options.command == Command::CertStore) {
         if (options.probe.baseUrl.empty()) {
             options.probe.baseUrl = baseUrlFromStreamUrl(options.url);
         } else {
@@ -276,6 +288,9 @@ int main(int argc, char** argv)
                           << "  " << camera.streamUrl << "\n";
             }
             return cameras.empty() ? 2 : 0;
+        }
+        if (options.command == Command::CertStore) {
+            return gig::runCertProbe(options.probe.baseUrl, options.certMode);
         }
 
         SdlLifetime sdl;
