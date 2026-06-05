@@ -71,6 +71,36 @@ double sampleProcessCpuPercent()
 double sampleProcessCpuPercent() { return 0.0; }
 #endif
 
+struct ResizeWatchContext {
+    VideoRenderer* renderer = nullptr;
+    gig::CameraSupervisor* supervisor = nullptr;
+};
+
+// Runs synchronously while SDL pumps messages -- including inside Windows' modal
+// move/resize loop, where the normal main loop is blocked. Re-rendering here
+// keeps the grid reflowing live as the window is dragged, instead of only when
+// the drag ends.
+bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
+{
+    auto* context = static_cast<ResizeWatchContext*>(userdata);
+    if (!context || !context->renderer || !context->supervisor) {
+        return true;
+    }
+    switch (event->type) {
+    case SDL_EVENT_WINDOW_RESIZED:
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        context->renderer->resize();
+        context->renderer->render(context->supervisor->snapshotFrames());
+        break;
+    case SDL_EVENT_WINDOW_EXPOSED:
+        context->renderer->render(context->supervisor->snapshotFrames());
+        break;
+    default:
+        break;
+    }
+    return true;
+}
+
 enum class Command {
     Run,
     Probe,
@@ -306,6 +336,10 @@ int main(int argc, char** argv)
         initialStats.showDiagnostics = options.showOverlay;
         renderer->setDiagnostics(initialStats);
 
+        // Keep the grid reflowing while the window is actively resized.
+        ResizeWatchContext resizeContext { renderer.get(), &supervisor };
+        SDL_AddEventWatch(liveResizeWatch, &resizeContext);
+
         bool running = true;
         auto lastTitleUpdate = std::chrono::steady_clock::now();
         auto lastStatsLog = lastTitleUpdate;
@@ -400,6 +434,7 @@ int main(int argc, char** argv)
             std::this_thread::sleep_until(frameStart + frameInterval);
         }
 
+        SDL_RemoveEventWatch(liveResizeWatch, &resizeContext);
         gig::logInfo() << "shutting down";
         supervisor.stop();
         return 0;
