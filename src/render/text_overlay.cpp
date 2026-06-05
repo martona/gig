@@ -80,6 +80,23 @@ bool TextOverlay::initialize(ID3D11Device* device, int pixelHeight)
     return true;
 }
 
+bool TextOverlay::rebakeAtlas(int pixelHeight)
+{
+    if (!device_) {
+        return false;
+    }
+    // bakeAtlas() writes into atlas_/atlasView_ via GetAddressOf (no release), so
+    // drop the old atlas first to avoid leaking it.
+    atlas_.Reset();
+    atlasView_.Reset();
+    if (!bakeAtlas(device_, pixelHeight)) {
+        ready_ = false;
+        return false;
+    }
+    logInfo() << "text overlay re-baked: cell " << cellWidth_ << "x" << cellHeight_;
+    return true;
+}
+
 bool TextOverlay::bakeAtlas(ID3D11Device* device, int pixelHeight)
 {
     HFONT font = CreateFontW(

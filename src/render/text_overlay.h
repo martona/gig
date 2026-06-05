@@ -26,6 +26,10 @@ public:
     bool initialize(ID3D11Device* device, int pixelHeight = 32);
     bool ready() const { return ready_; }
 
+    // Re-bake the glyph atlas at a new pixel height (e.g. on a DPI change). Reuses
+    // the device + pipeline from initialize(). Returns false on failure.
+    bool rebakeAtlas(int pixelHeight);
+
     void begin(int backBufferWidth, int backBufferHeight);
     void rect(float x, float y, float w, float h, OverlayColor color);
     // Draw `str` with its top-left at (x, y); returns the advance width in pixels.

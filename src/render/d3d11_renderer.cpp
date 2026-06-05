@@ -44,6 +44,11 @@ constexpr std::array<Vertex, 4> QuadVertices = {
     Vertex { 1.0f, -1.0f, 1.0f, 1.0f },
 };
 
+// Logical (DPI-independent) base font height in pixels; multiplied by the window's
+// display scale at init. ~16 at 100%, ~32 at 200% (the hand-tuned look). Used for
+// both the overlay atlas and the ImGui log font -- bump this one knob to taste.
+constexpr float kBaseFontPx = 16.0f;
+
 const char* VertexShaderSource = R"(
 struct VSIn {
     float2 position : POSITION;
@@ -194,6 +199,12 @@ public:
 
         readClientSize();
 
+        dpiScale_ = SDL_GetWindowDisplayScale(window_);
+        if (!(dpiScale_ > 0.0f)) {
+            dpiScale_ = 1.0f;
+        }
+        gig::logInfo() << "display scale: " << dpiScale_;
+
         DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
         swapChainDesc.BufferCount = 2;
         swapChainDesc.BufferDesc.Width = static_cast<UINT>(backBufferWidth_);
@@ -235,14 +246,16 @@ public:
         if (!createRenderTarget() || !createPipeline()) {
             return false;
         }
-        if (!overlay_.initialize(device_.Get())) {
+        const int overlayFontPx = std::max(8, static_cast<int>(kBaseFontPx * dpiScale_ + 0.5f));
+        if (!overlay_.initialize(device_.Get(), overlayFontPx)) {
             gig::logWarning() << "Text overlay unavailable; labels and diagnostics disabled.";
         }
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr; // don't write/read an imgui.ini
-        ImGui::StyleColorsDark();
+        loadImguiFont();
+        applyImguiStyle();
         if (ImGui_ImplSDL3_InitForD3D(window_) && ImGui_ImplDX11_Init(device_.Get(), context_.Get())) {
             imguiReady_ = true;
         } else {
@@ -298,6 +311,11 @@ public:
 
         {
             auto d3dLock = lockD3D11();
+
+            if (dpiDirty_) {
+                dpiDirty_ = false;
+                applyDpiScale();
+            }
 
             if (tiles_.size() != frames.size()) {
                 tiles_.resize(frames.size());
@@ -384,6 +402,9 @@ public:
 
     bool handleEvent(const SDL_Event& event) override
     {
+        if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
+            dpiDirty_ = true; // re-baked in render() under the D3D lock
+        }
         if (!imguiReady_) {
             return false;
         }
@@ -1001,6 +1022,50 @@ private:
         overlay_.text(x, y, scale, body, line);
     }
 
+    void loadImguiFont()
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        io.Fonts->Clear();
+        // Prefer crisp monospace Consolas; fall back to the built-in bitmap font.
+        if (io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", kBaseFontPx * dpiScale_) == nullptr) {
+            ImFontConfig fontConfig;
+            fontConfig.SizePixels = 13.0f * dpiScale_;
+            io.Fonts->AddFontDefault(&fontConfig);
+        }
+    }
+
+    void applyImguiStyle()
+    {
+        // Reset to a fresh style first so ScaleAllSizes never compounds across
+        // repeated DPI changes.
+        ImGui::GetStyle() = ImGuiStyle();
+        ImGui::StyleColorsDark();
+        ImGui::GetStyle().ScaleAllSizes(dpiScale_);
+    }
+
+    // Re-bake the overlay atlas + ImGui font/style for the window's current display
+    // scale (SDL reported a DPI change, e.g. the window moved to another monitor).
+    // Called from render() under the D3D lock.
+    void applyDpiScale()
+    {
+        float scale = SDL_GetWindowDisplayScale(window_);
+        if (!(scale > 0.0f)) {
+            scale = 1.0f;
+        }
+        if (scale == dpiScale_) {
+            return;
+        }
+        dpiScale_ = scale;
+        gig::logInfo() << "display scale changed: " << dpiScale_;
+
+        overlay_.rebakeAtlas(std::max(8, static_cast<int>(kBaseFontPx * dpiScale_ + 0.5f)));
+        if (imguiReady_) {
+            loadImguiFont();
+            ImGui_ImplDX11_InvalidateDeviceObjects(); // font texture rebuilt on next NewFrame
+            applyImguiStyle();
+        }
+    }
+
     // Run one ImGui frame into the bound back buffer (called after the tiles +
     // overlay, before Present). The full cycle runs every frame so ImGui's
     // WantCapture flags stay correct even when the log view is hidden.
@@ -1087,6 +1152,8 @@ private:
     bool imguiReady_ = false;
     bool logViewVisible_ = false;
     std::vector<std::string> logScratch_;
+    float dpiScale_ = 1.0f;
+    bool dpiDirty_ = false;
 };
 
 } // namespace

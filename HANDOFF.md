@@ -66,6 +66,11 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
   `d3d11_renderer` also hosts **Dear ImGui** (DX11 + SDL3 backends): a full-window **log view**
   rendered before Present, toggled by clicking the diagnostics tile (Esc / X to close). Events go
   through `VideoRenderer::handleEvent` so ImGui's WantCapture suppresses tile-clicks while it's up.
+  **DPI-aware (dynamic):** `dpiScale_ = SDL_GetWindowDisplayScale`; the overlay atlas bakes at
+  `kBaseFontPx(16) * scale` and the ImGui font (Consolas) loads at the same — 16px logical (=32px
+  at 200%, matching the old hand-tuned size). On `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` (monitor
+  move / scale change) `applyDpiScale()` re-bakes the atlas (`TextOverlay::rebakeAtlas`) + rebuilds
+  the ImGui font/style, run in `render()` under the D3D lock. Tune `kBaseFontPx` to taste.
 - `src/log.*` — logging + **`LogBuffer`** (thread-safe 1000-line ring). `writeLog` tees every line
   to it + stderr; the decoder's `std::cerr` and ffmpeg's `av_log` are routed through `gig` logging,
   so the in-app log view shows everything.
