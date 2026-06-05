@@ -41,12 +41,13 @@ Discover every camera and show the grid (pass `--base`, the Frigate root):
   --key "C:\certs\marton@mars11.key"
 ```
 
-Click a tile to zoom it to fill the window; click again (or press Esc) to return to the grid. Esc in the grid quits.
+Each tile is labelled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU. Click a tile to zoom it to fill the window; click again (or press Esc) to return to the grid. Esc in the grid quits.
 
 Flags:
 
 - `--software` (alias `--no-hwaccel`) forces software decode. Decode already auto-falls-back to software when the renderer is on a software adapter (WARP / Basic Render Driver) or D3D11VA won't open, so this is only an explicit override.
 - `--poll-interval N` sets the health poll period in seconds (default 5).
+- `--no-overlay` hides the on-screen HUD (labels + diagnostics tile); it is on by default.
 - `--url URL` runs a single camera instead of discovering (the legacy path); `--insecure` skips server-cert verification.
 
 ## Probe

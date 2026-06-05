@@ -3,10 +3,22 @@
 #include "d3d11_decode_context.h"
 #include "video_frame.h"
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
+
+struct OverlayStats {
+    bool showDiagnostics = true;
+    int camerasOnline = 0;
+    int camerasOffline = 0;
+    double fps = 0.0;
+    std::uint64_t framesTotal = 0;
+    int kbps = 0;
+    double cpuPercent = 0.0;
+};
 
 class VideoRenderer {
 public:
@@ -22,6 +34,10 @@ public:
     // Focus a single tile so it fills the window; -1 returns to the grid.
     virtual void setFocusedTile(int index) = 0;
     virtual int focusedTile() const = 0;
+
+    // Per-camera labels (stable camera order) and live diagnostics for the HUD.
+    virtual void setCameraLabels(const std::vector<std::string>& labels) = 0;
+    virtual void setDiagnostics(const OverlayStats& stats) = 0;
 
     virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };

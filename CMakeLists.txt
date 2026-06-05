@@ -42,6 +42,8 @@ add_executable(frigate_d3d_poc
     src/render/d3d11_renderer.cpp
     src/render/grid_layout.cpp
     src/render/grid_layout.h
+    src/render/text_overlay.cpp
+    src/render/text_overlay.h
     src/render/video_renderer.h
 )
 
@@ -76,6 +78,7 @@ if(WIN32)
         d3d11
         dxgi
         d3dcompiler
+        gdi32
     )
 endif()
 

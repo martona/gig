@@ -158,6 +158,20 @@ void CameraSupervisor::reconcile()
         }
     }
     liveCameras_.store(online, std::memory_order_relaxed);
+
+    // Aggregate ingest bandwidth from the same byte counters. Skip the cycle on
+    // a counter reset (go2rtc restart) so it never reports a huge negative blip.
+    std::uint64_t totalBytes = 0;
+    for (const auto& entry : bytes.bytesByStream) {
+        totalBytes += entry.second;
+    }
+    if (haveBandwidthBaseline_ && totalBytes >= lastTotalBytes_) {
+        const double seconds = config_.pollInterval.count() > 0 ? static_cast<double>(config_.pollInterval.count()) : 5.0;
+        const double kbps = static_cast<double>(totalBytes - lastTotalBytes_) * 8.0 / 1000.0 / seconds;
+        ingestKbps_.store(static_cast<int>(kbps + 0.5), std::memory_order_relaxed);
+    }
+    lastTotalBytes_ = totalBytes;
+    haveBandwidthBaseline_ = true;
 }
 
 void CameraSupervisor::startDecoder(std::size_t index)

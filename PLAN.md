@@ -96,7 +96,10 @@ Renderer/decoder changes:
 - [x] M3 grid renderer + N decoders (software path verified: 10 cams, ~245 frames/s aggregate, 0 errors)
 - [x] M4 health supervisor (verified: all cams unknown->online via byte-delta, started/reconciled, 0 churn)
 - [x] M5 click-to-zoom (click a tile to fill the window; click or Esc returns to the grid; Esc in grid quits)
+- [x] HUD: per-camera labels + a synthetic diagnostics tile (cams good/bad, fps, ingest kbps, cpu%).
+      GDI-baked monospace font atlas + alpha-blended overlay pass; `--no-overlay` toggles it (placeholder
+      for a future settings dialog). kbps = supervisor ingest byte-delta; cpu% = GetProcessTimes normalized.
 
-All five milestones build and run clean in `--software` mode. Still to verify on real hardware: the
-shared-device D3D11VA zero-copy path (run without `--software` on a GPU box), the on-screen grid
-appearance, and the click-to-zoom interaction (both need a human at the window).
+All milestones build and run clean in `--software` mode; stats verified sane (~33 Mbps ingest, ~1 core).
+Still needs a human at the window: the on-screen grid appearance, label/HUD legibility, and the
+click-to-zoom interaction -- plus the shared-device D3D11VA zero-copy path on a GPU box.

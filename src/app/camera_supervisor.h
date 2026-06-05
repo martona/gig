@@ -53,6 +53,8 @@ public:
     std::size_t cameraCount() const { return slots_.size(); }
     std::uint64_t totalDecodedFrames() const { return decodedFrames_.load(); }
     int liveCameraCount() const { return liveCameras_.load(); }
+    // Aggregate go2rtc ingest bandwidth (camera->go2rtc) across all streams.
+    int ingestKbps() const { return ingestKbps_.load(); }
 
 private:
     enum class Liveness { Unknown, Online, Offline };
@@ -89,6 +91,9 @@ private:
 
     std::atomic<std::uint64_t> decodedFrames_ { 0 };
     std::atomic<int> liveCameras_ { 0 };
+    std::atomic<int> ingestKbps_ { 0 };
+    std::uint64_t lastTotalBytes_ = 0;   // poll-thread only
+    bool haveBandwidthBaseline_ = false; // poll-thread only
 };
 
 } // namespace gig

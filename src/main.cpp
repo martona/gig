@@ -22,9 +22,54 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 constexpr const char* DefaultUrl = "https://frigate.lan/security-go2rtc/api/stream.ts?src=frontgate";
+
+#ifdef _WIN32
+// Process CPU usage since the previous call, normalized so 100% == all cores busy.
+double sampleProcessCpuPercent()
+{
+    static unsigned long long lastProc = 0;
+    static unsigned long long lastWall = 0;
+    static const unsigned cores = [] {
+        const unsigned count = std::thread::hardware_concurrency();
+        return count == 0 ? 1u : count;
+    }();
+
+    FILETIME creation, exit, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) {
+        return 0.0;
+    }
+    ULARGE_INTEGER kernelTime, userTime;
+    kernelTime.LowPart = kernel.dwLowDateTime;
+    kernelTime.HighPart = kernel.dwHighDateTime;
+    userTime.LowPart = user.dwLowDateTime;
+    userTime.HighPart = user.dwHighDateTime;
+    const unsigned long long proc = kernelTime.QuadPart + userTime.QuadPart;
+
+    FILETIME nowFileTime;
+    GetSystemTimeAsFileTime(&nowFileTime);
+    ULARGE_INTEGER wallTime;
+    wallTime.LowPart = nowFileTime.dwLowDateTime;
+    wallTime.HighPart = nowFileTime.dwHighDateTime;
+    const unsigned long long wall = wallTime.QuadPart;
+
+    double percent = 0.0;
+    if (lastWall != 0 && wall > lastWall) {
+        percent = static_cast<double>(proc - lastProc) / static_cast<double>(wall - lastWall) / cores * 100.0;
+    }
+    lastProc = proc;
+    lastWall = wall;
+    return percent;
+}
+#else
+double sampleProcessCpuPercent() { return 0.0; }
+#endif
 
 enum class Command {
     Run,
@@ -38,6 +83,7 @@ struct ProgramOptions {
     std::string streamUrlTemplate;
     bool softwareDecode = false;
     int pollIntervalSeconds = 5;
+    bool showOverlay = true;
     ProbeOptions probe;
     TlsOptions tls;
     bool showHelp = false;
@@ -46,7 +92,7 @@ struct ProgramOptions {
 void printUsage()
 {
     std::cout
-        << "frigate_d3d_poc [--base URL | --url URL] [--software] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
+        << "frigate_d3d_poc [--base URL | --url URL] [--software] [--no-overlay] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
         << "frigate_d3d_poc probe --base URL [--src STREAM] [--stream-check] [--endpoint PATH]\n"
         << "frigate_d3d_poc discover --base URL [--stream-url TEMPLATE] [--ca CA] [--cert C] [--key K]\n"
         << "\n"
@@ -134,6 +180,8 @@ ProgramOptions parseOptions(int argc, char** argv)
             options.tls.verifyServer = false;
         } else if (arg == "--software" || arg == "--no-hwaccel") {
             options.softwareDecode = true;
+        } else if (arg == "--no-overlay") {
+            options.showOverlay = false;
         } else if (arg == "--poll-interval") {
             options.pollIntervalSeconds = std::stoi(requireValue(i, argc, argv, "--poll-interval"));
         } else if (!arg.starts_with("--")) {
@@ -234,6 +282,13 @@ int main(int argc, char** argv)
             throw std::runtime_error("no cameras to display");
         }
 
+        std::vector<std::string> cameraLabels;
+        cameraLabels.reserve(cameras.size());
+        for (const gig::CameraStream& camera : cameras) {
+            cameraLabels.push_back(camera.streamName.empty() ? camera.cameraName : camera.streamName);
+        }
+        renderer->setCameraLabels(cameraLabels);
+
         gig::SupervisorConfig supervisorConfig;
         supervisorConfig.baseUrl = options.probe.baseUrl;
         supervisorConfig.tls = options.tls;
@@ -247,10 +302,16 @@ int main(int argc, char** argv)
             sessionCache);
         supervisor.start();
 
+        OverlayStats initialStats;
+        initialStats.showDiagnostics = options.showOverlay;
+        renderer->setDiagnostics(initialStats);
+
         bool running = true;
         auto lastTitleUpdate = std::chrono::steady_clock::now();
         auto lastStatsLog = lastTitleUpdate;
         std::uint64_t lastStatsFrames = 0;
+        std::uint64_t lastTitleFrames = 0;
+        double lastCpuPercent = 0.0;
         constexpr auto frameInterval = std::chrono::milliseconds(16);
 
         while (running) {
@@ -274,9 +335,11 @@ int main(int argc, char** argv)
                         int windowHeight = 0;
                         SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
                         if (windowWidth > 0 && windowHeight > 0) {
-                            const gig::GridLayout layout = gig::computeGridLayout(
-                                static_cast<int>(supervisor.cameraCount()), windowWidth, windowHeight);
-                            for (std::size_t t = 0; t < layout.tiles.size(); ++t) {
+                            // Match the renderer's grid (cameras + optional diagnostics cell),
+                            // but only the camera tiles are focusable.
+                            const int effective = static_cast<int>(supervisor.cameraCount()) + (options.showOverlay ? 1 : 0);
+                            const gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight);
+                            for (std::size_t t = 0; t < layout.tiles.size() && t < supervisor.cameraCount(); ++t) {
                                 const gig::TileRect& cell = layout.tiles[t];
                                 if (event.button.x >= cell.x && event.button.x < cell.x + cell.width
                                     && event.button.y >= cell.y && event.button.y < cell.y + cell.height) {
@@ -296,10 +359,26 @@ int main(int argc, char** argv)
 
             const auto now = std::chrono::steady_clock::now();
             if (now - lastTitleUpdate > std::chrono::seconds(1)) {
+                const double elapsed = std::chrono::duration<double>(now - lastTitleUpdate).count();
                 lastTitleUpdate = now;
-                std::string title = "Frigate D3D PoC - " + std::to_string(supervisor.liveCameraCount())
+                const std::uint64_t total = supervisor.totalDecodedFrames();
+                const double fps = elapsed > 0.0 ? static_cast<double>(total - lastTitleFrames) / elapsed : 0.0;
+                lastTitleFrames = total;
+
+                OverlayStats stats;
+                stats.showDiagnostics = options.showOverlay;
+                stats.camerasOnline = supervisor.liveCameraCount();
+                stats.camerasOffline = static_cast<int>(supervisor.cameraCount()) - supervisor.liveCameraCount();
+                stats.fps = fps;
+                stats.framesTotal = total;
+                stats.kbps = supervisor.ingestKbps();
+                stats.cpuPercent = sampleProcessCpuPercent();
+                renderer->setDiagnostics(stats);
+                lastCpuPercent = stats.cpuPercent;
+
+                std::string title = "Frigate D3D PoC - " + std::to_string(stats.camerasOnline)
                     + "/" + std::to_string(supervisor.cameraCount()) + " live - frames "
-                    + std::to_string(supervisor.totalDecodedFrames());
+                    + std::to_string(total);
                 SDL_SetWindowTitle(window.get(), title.c_str());
             }
 
@@ -309,7 +388,9 @@ int main(int argc, char** argv)
                 const double fps = seconds > 0.0 ? static_cast<double>(total - lastStatsFrames) / seconds : 0.0;
                 gig::logInfo() << "decoded " << total << " frames total ("
                                << static_cast<int>(fps + 0.5) << "/s), live "
-                               << supervisor.liveCameraCount() << "/" << supervisor.cameraCount();
+                               << supervisor.liveCameraCount() << "/" << supervisor.cameraCount()
+                               << ", ingest " << supervisor.ingestKbps() << " kbps, cpu "
+                               << static_cast<int>(lastCpuPercent + 0.5) << "%";
                 lastStatsLog = now;
                 lastStatsFrames = total;
             }

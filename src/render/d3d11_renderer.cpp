@@ -1,15 +1,18 @@
 #include "render/grid_layout.h"
+#include "render/text_overlay.h"
 #include "render/video_renderer.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <d3d11.h>
@@ -223,7 +226,13 @@ public:
         }
 
         decodeContext_->device = device_.Get();
-        return createRenderTarget() && createPipeline();
+        if (!createRenderTarget() || !createPipeline()) {
+            return false;
+        }
+        if (!overlay_.initialize(device_.Get())) {
+            std::cerr << "Text overlay unavailable; labels and diagnostics disabled.\n";
+        }
+        return true;
     }
 
     void resize() override
@@ -283,8 +292,31 @@ public:
 
             if (focusedTile_ >= 0 && focusedTile_ < static_cast<int>(frames.size())) {
                 renderSingleTile(static_cast<std::size_t>(focusedTile_), frames);
+                context_->RSSetViewports(1, &fullViewport);
+                overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
+                drawTileLabel(
+                    gig::TileRect { 0.0f, 0.0f, static_cast<float>(backBufferWidth_), static_cast<float>(backBufferHeight_) },
+                    labelFor(static_cast<std::size_t>(focusedTile_)),
+                    2.0f);
+                overlay_.flush(context_.Get());
             } else {
-                renderGrid(frames);
+                // Reserve one extra cell for the synthetic diagnostics tile.
+                const bool showDiagnostics = overlayStats_.showDiagnostics;
+                const int effectiveCount = static_cast<int>(frames.size()) + (showDiagnostics ? 1 : 0);
+                const gig::GridLayout layout = gig::computeGridLayout(
+                    effectiveCount,
+                    static_cast<int>(backBufferWidth_),
+                    static_cast<int>(backBufferHeight_));
+                renderGridTiles(frames, layout);
+                context_->RSSetViewports(1, &fullViewport);
+                overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
+                for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
+                    drawTileLabel(layout.tiles[i], labelFor(i), 1.0f);
+                }
+                if (showDiagnostics && frames.size() < layout.tiles.size()) {
+                    drawDiagnosticsTile(layout.tiles[frames.size()]);
+                }
+                overlay_.flush(context_.Get());
             }
 
             // Non-waiting Present: submits and returns immediately so the shared
@@ -310,6 +342,16 @@ public:
     int focusedTile() const override
     {
         return focusedTile_;
+    }
+
+    void setCameraLabels(const std::vector<std::string>& labels) override
+    {
+        cameraLabels_ = labels;
+    }
+
+    void setDiagnostics(const OverlayStats& stats) override
+    {
+        overlayStats_ = stats;
     }
 
 private:
@@ -791,13 +833,8 @@ private:
 
     // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
     // the back buffer has already been cleared.
-    void renderGrid(const std::vector<std::shared_ptr<VideoFrame>>& frames)
+    void renderGridTiles(const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::GridLayout& layout)
     {
-        const gig::GridLayout layout = gig::computeGridLayout(
-            static_cast<int>(frames.size()),
-            static_cast<int>(backBufferWidth_),
-            static_cast<int>(backBufferHeight_));
-
         for (std::size_t i = 0; i < frames.size(); ++i) {
             TileState& tile = tiles_[i];
             const VideoFrame* frame = frames[i].get();
@@ -848,6 +885,69 @@ private:
         drawTile(tile);
     }
 
+    std::string labelFor(std::size_t index) const
+    {
+        return index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
+    }
+
+    void drawTileLabel(const gig::TileRect& cell, const std::string& label, float scale)
+    {
+        if (label.empty() || !overlay_.ready() || cell.width <= 0.0f || cell.height <= 0.0f) {
+            return;
+        }
+        const float pad = 4.0f;
+        const float glyphWidth = overlay_.glyphWidth(scale);
+        if (glyphWidth <= 0.0f || cell.width <= 2.0f * pad) {
+            return;
+        }
+        const std::size_t maxChars = static_cast<std::size_t>((cell.width - 2.0f * pad) / glyphWidth);
+        if (maxChars == 0) {
+            return;
+        }
+        const std::string shown = label.size() > maxChars ? label.substr(0, maxChars) : label;
+        const float stripWidth = std::min(cell.width, overlay_.textWidth(shown, scale) + 2.0f * pad);
+        const float stripHeight = overlay_.lineHeight(scale) + 2.0f * pad;
+        overlay_.rect(cell.x, cell.y, stripWidth, stripHeight, gig::OverlayColor { 0.0f, 0.0f, 0.0f, 0.55f });
+        overlay_.text(cell.x + pad, cell.y + pad, scale, gig::OverlayColor { 0.9f, 0.95f, 1.0f, 1.0f }, shown);
+    }
+
+    void drawDiagnosticsTile(const gig::TileRect& cell)
+    {
+        if (!overlay_.ready() || cell.width <= 0.0f || cell.height <= 0.0f) {
+            return;
+        }
+
+        overlay_.rect(cell.x, cell.y, cell.width, cell.height, gig::OverlayColor { 0.04f, 0.05f, 0.07f, 0.92f });
+
+        const float pad = 8.0f;
+        // Scale text down so the widest line fits the cell.
+        constexpr int widestLineChars = 30;
+        float scale = (cell.width - 2.0f * pad) / (static_cast<float>(widestLineChars) * overlay_.glyphWidth(1.0f));
+        scale = std::clamp(scale, 0.35f, 1.0f);
+        const float lineHeight = overlay_.lineHeight(scale) + 2.0f;
+        const float x = cell.x + pad;
+        float y = cell.y + pad;
+
+        const gig::OverlayColor heading { 0.65f, 0.78f, 1.0f, 1.0f };
+        const gig::OverlayColor body { 0.85f, 0.9f, 1.0f, 1.0f };
+
+        char line[128] = {};
+        overlay_.text(x, y, scale, heading, "diagnostics");
+        y += lineHeight * 1.4f;
+        std::snprintf(line, sizeof(line), "cams good: %d  bad: %d", overlayStats_.camerasOnline, overlayStats_.camerasOffline);
+        overlay_.text(x, y, scale, body, line);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "frames: %d/s, %llu total",
+            static_cast<int>(overlayStats_.fps + 0.5), static_cast<unsigned long long>(overlayStats_.framesTotal));
+        overlay_.text(x, y, scale, body, line);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "bandwidth: %d kbps", overlayStats_.kbps);
+        overlay_.text(x, y, scale, body, line);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "cpu: %.2f%%", overlayStats_.cpuPercent);
+        overlay_.text(x, y, scale, body, line);
+    }
+
     SDL_Window* window_ = nullptr;
     HWND hwnd_ = nullptr;
     LONG backBufferWidth_ = 1;
@@ -868,6 +968,9 @@ private:
 
     std::vector<TileState> tiles_;
     int focusedTile_ = -1;
+    gig::TextOverlay overlay_;
+    std::vector<std::string> cameraLabels_;
+    OverlayStats overlayStats_;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();
 };
 
