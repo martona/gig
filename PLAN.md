@@ -79,12 +79,15 @@ Renderer/decoder changes:
 
 ## Decode: hardware + software
 
-- Default path tries shared-device D3D11VA (zero-copy), then other FFmpeg HW devices, then software.
-- `--software` (alias `--no-hwaccel`) forces software decode, skipping all HW devices. Needed on
-  GPU-less dev VMs, where the virtual adapter advertises a DXVA2 decoder that accepts H.264 but emits
-  garbage ("Invalid data found when processing input").
+- Hardware decode is shared-device D3D11VA only (zero-copy) -- D3D11VA is vendor-agnostic and covers
+  every real GPU. No DXVA2/QSV/CUDA grab-bag: those add a sysmem round-trip, and on GPU-less VMs DXVA2
+  "opens" successfully then decodes garbage ("Invalid data found when processing input").
+- If the renderer is on a software adapter (WARP / Basic Render Driver -- e.g. this dev VM, confirmed via
+  `DXGI_ADAPTER_FLAG_SOFTWARE`) or D3D11VA won't open, decode falls through cleanly to software. No flag
+  needed; the binary auto-selects correctly on both a GPU box and this VM.
+- `--software` (alias `--no-hwaccel`) forces software decode explicitly.
 - Decode loop tolerates `AVERROR_INVALIDDATA` on send/receive (skip the packet, keep the stream) instead
-  of tearing down and reconnecting — fixes the mid-GOP-join error storm at startup.
+  of tearing down and reconnecting -- fixes the mid-GOP-join error storm at startup.
 
 ## Progress
 

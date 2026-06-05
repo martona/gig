@@ -45,7 +45,7 @@ Click a tile to zoom it to fill the window; click again (or press Esc) to return
 
 Flags:
 
-- `--software` (alias `--no-hwaccel`) forces software decode. Use it on machines without a usable GPU (e.g. a VM whose virtual adapter advertises a broken DXVA2 decoder that accepts H.264 but emits "Invalid data").
+- `--software` (alias `--no-hwaccel`) forces software decode. Decode already auto-falls-back to software when the renderer is on a software adapter (WARP / Basic Render Driver) or D3D11VA won't open, so this is only an explicit override.
 - `--poll-interval N` sets the health poll period in seconds (default 5).
 - `--url URL` runs a single camera instead of discovering (the legacy path); `--insecure` skips server-cert verification.
 

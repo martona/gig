@@ -13,6 +13,8 @@
 #include <utility>
 
 #include <d3d11.h>
+#include <dxgi.h>
+#include <wrl/client.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -153,6 +155,34 @@ bool codecSupportsD3D11(const AVCodec* decoder)
             return true;
         }
     }
+}
+
+// True if the renderer's D3D11 device is a software adapter (WARP / Basic Render
+// Driver). Such adapters don't really do video decode, so we skip hardware and
+// go straight to software -- the same guard the hitsc pikvm backend uses.
+bool d3d11DeviceIsSoftwareAdapter(ID3D11Device* device)
+{
+    if (!device) {
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))) {
+        return false;
+    }
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(&adapter))) {
+        return false;
+    }
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter1;
+    if (FAILED(adapter.As(&adapter1))) {
+        return false;
+    }
+    DXGI_ADAPTER_DESC1 desc = {};
+    if (FAILED(adapter1->GetDesc1(&desc))) {
+        return false;
+    }
+    return (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
 }
 
 void copyPlane(
@@ -397,7 +427,13 @@ CodecContextPtr openCodecContext(
     const std::shared_ptr<D3D11DecodeContext>& d3d11Context,
     bool softwareOnly)
 {
-    if (!softwareOnly && d3d11Context && d3d11Context->device && d3d11Context->lock && codecSupportsD3D11(decoder)) {
+    const bool softwareAdapter = d3d11Context && d3d11Context->device
+        && d3d11DeviceIsSoftwareAdapter(d3d11Context->device);
+    if (softwareAdapter && !softwareOnly) {
+        std::cerr << "Renderer is on a software D3D11 adapter; skipping hardware decode.\n";
+    }
+
+    if (!softwareOnly && !softwareAdapter && d3d11Context && d3d11Context->device && d3d11Context->lock && codecSupportsD3D11(decoder)) {
         try {
             BufferRefPtr candidateDevice = createD3D11DeviceContext(d3d11Context);
             CodecContextPtr candidate(avcodec_alloc_context3(decoder));
@@ -431,57 +467,12 @@ CodecContextPtr openCodecContext(
         }
     }
 
-    // Skip all hardware decoders entirely when software-only is requested.
-    if (!softwareOnly) for (int i = 0;; ++i) {
-        const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
-        if (!config) {
-            break;
-        }
-
-        if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
-            || config->device_type == AV_HWDEVICE_TYPE_NONE
-            || config->device_type == AV_HWDEVICE_TYPE_D3D11VA
-            || config->pix_fmt == AV_PIX_FMT_NONE) {
-            continue;
-        }
-
-        AVBufferRef* rawDevice = nullptr;
-        const int createDeviceResult = av_hwdevice_ctx_create(&rawDevice, config->device_type, nullptr, nullptr, 0);
-        if (createDeviceResult < 0) {
-            continue;
-        }
-
-        BufferRefPtr candidateDevice(rawDevice);
-        CodecContextPtr candidate(avcodec_alloc_context3(decoder));
-        if (!candidate) {
-            throw std::runtime_error("Could not allocate AVCodecContext.");
-        }
-
-        throwIfFailed(avcodec_parameters_to_context(candidate.get(), videoStream->codecpar), "avcodec_parameters_to_context");
-        candidate->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        candidate->thread_count = 1;
-        candidate->opaque = &hardwareState;
-        candidate->get_format = chooseHardwarePixelFormat;
-        candidate->hw_device_ctx = av_buffer_ref(candidateDevice.get());
-        if (!candidate->hw_device_ctx) {
-            throw std::runtime_error("Could not reference hardware device context.");
-        }
-
-        hardwareState.pixelFormat = config->pix_fmt;
-        hardwareState.deviceType = config->device_type;
-
-        const int openResult = avcodec_open2(candidate.get(), decoder, nullptr);
-        if (openResult >= 0) {
-            std::cerr << "Hardware decode: " << av_hwdevice_get_type_name(config->device_type)
-                      << " (" << av_get_pix_fmt_name(config->pix_fmt) << ")\n";
-            hardwareDevice = std::move(candidateDevice);
-            return candidate;
-        }
-
-        std::cerr << "Hardware decode candidate failed: "
-                  << av_hwdevice_get_type_name(config->device_type)
-                  << " (" << ffmpegError(openResult) << ")\n";
-    }
+    // Deliberately no other-hardware fallback. On Windows the shared-device
+    // D3D11VA path above is the only zero-copy option, and D3D11VA already
+    // covers every real GPU (it is vendor-agnostic). The standalone-device
+    // alternatives (DXVA2, QSV, CUDA, ...) only add a system-memory round-trip
+    // -- and on GPU-less VMs DXVA2 in particular *opens* successfully then
+    // decodes garbage, which is worse than an honest fall-through to software.
 
     hardwareState.pixelFormat = AV_PIX_FMT_NONE;
     hardwareState.deviceType = AV_HWDEVICE_TYPE_NONE;
