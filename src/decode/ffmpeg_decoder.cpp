@@ -1,6 +1,7 @@
 #include "decode/ffmpeg_decoder.h"
 
 #include <array>
+#include <cstdarg>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
+#include <libavutil/log.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/pixdesc.h>
@@ -87,6 +89,53 @@ int interruptCallback(void* opaque)
 {
     const auto* stopFlag = static_cast<const std::atomic_bool*>(opaque);
     return (stopFlag && stopFlag->load()) ? 1 : 0;
+}
+
+// The H.264 decoder spews recoverable-error spam ("non-existing PPS", "no
+// frame!", concealment, ...) when fed live MPEG-TS whose slices reference a
+// keyframe/parameter set it does not have yet -- and these go2rtc streams do it
+// continuously, not just at startup. We already handle the underlying condition
+// via return codes + the health supervisor, so drop these by message pattern
+// while letting every other FFmpeg message (protocol, demux, genuine errors)
+// reach stderr. Extend the list if a new decoder complaint shows up.
+bool isSpuriousDecodeMessage(const char* fmt)
+{
+    if (!fmt) {
+        return false;
+    }
+    static const char* const patterns[] = {
+        "non-existing PPS",
+        "non-existing SPS",
+        "no frame!",
+        "decode_slice_header error",
+        "Reference picture missing",
+        "mmco",
+        "number of reference frames",
+        "illegal memory management",
+        "error while decoding MB",
+        "concealing",
+        "missing picture in access unit",
+        "Invalid NAL unit size",
+        "Error splitting the input into NAL units",
+        "out of range intra chroma pred mode",
+        "left block unavailable",
+        "top block unavailable",
+        "corrupted",
+    };
+    for (const char* pattern : patterns) {
+        if (std::strstr(fmt, pattern) != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ffmpegLogCallback(void* avcl, int level, const char* fmt, va_list args)
+{
+    if (level >= AV_LOG_ERROR && isSpuriousDecodeMessage(fmt)) {
+        return;
+    }
+    av_log_default_callback(avcl, level, fmt, args);
 }
 
 struct HardwareDecodeState {
@@ -521,6 +570,7 @@ void FfmpegDecoder::start()
     stopRequested_ = false;
     std::call_once(ffmpegNetworkInitOnce, [] {
         avformat_network_init();
+        av_log_set_callback(ffmpegLogCallback);
     });
 
     worker_ = std::thread([this] {
