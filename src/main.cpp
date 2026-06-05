@@ -16,7 +16,10 @@
 #include <SDL3/SDL_main.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -134,6 +137,8 @@ void printUsage()
         << "\n"
         << "  With no --ca/--cert/--key, the Windows certificate store is used (store CA + CNG client\n"
         << "  cert); this pops a Windows consent prompt on first use.\n"
+        << "  Defaults can be set in gig.ini next to the exe (keys: base, url, stream-url, ca, cert,\n"
+        << "  key, software, overlay, insecure, poll-interval, rw-timeout-us); flags override it.\n"
         << "\n"
         << "If the viewer --url is omitted, this default is used:\n"
         << "  " << DefaultUrl << "\n";
@@ -170,6 +175,130 @@ std::string baseUrlFromStreamUrl(std::string url)
     return url;
 }
 
+// Directory containing the running executable (so gig.ini sits next to it).
+std::filesystem::path exeDirectory()
+{
+#ifdef _WIN32
+    wchar_t buffer[MAX_PATH];
+    const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        return {};
+    }
+    return std::filesystem::path(buffer, buffer + length).parent_path();
+#else
+    return {};
+#endif
+}
+
+std::string trimWhitespace(const std::string& value)
+{
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string stripQuotes(std::string value)
+{
+    if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') && value.back() == value.front()) {
+        value = value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+bool iniTruthy(std::string value)
+{
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+// Apply one gig.ini key=value. Returns false for an unrecognized key. Throws
+// (caught by the caller) on a malformed numeric value.
+bool applyIniSetting(ProgramOptions& options, const std::string& key, const std::string& value)
+{
+    if (key == "base") {
+        options.probe.baseUrl = value;
+    } else if (key == "url") {
+        options.url = value;
+    } else if (key == "stream-url" || key == "stream_url") {
+        options.streamUrlTemplate = value;
+    } else if (key == "ca") {
+        options.tls.caFile = value;
+    } else if (key == "cert") {
+        options.tls.certFile = value;
+    } else if (key == "key") {
+        options.tls.keyFile = value;
+    } else if (key == "software") {
+        options.softwareDecode = iniTruthy(value);
+    } else if (key == "overlay") {
+        options.showOverlay = iniTruthy(value);
+    } else if (key == "insecure") {
+        options.tls.verifyServer = !iniTruthy(value);
+    } else if (key == "poll-interval" || key == "poll_interval") {
+        options.pollIntervalSeconds = std::stoi(value);
+    } else if (key == "rw-timeout-us" || key == "rw_timeout_us") {
+        options.tls.rwTimeoutUs = std::stoll(value);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Layer settings from gig.ini (next to the exe) onto `options`. These are
+// defaults; command-line flags parsed afterward override them. Missing file is
+// silently ignored; bad lines warn but don't abort.
+void applyIniConfig(ProgramOptions& options)
+{
+    const std::filesystem::path dir = exeDirectory();
+    if (dir.empty()) {
+        return;
+    }
+    const std::filesystem::path path = dir / "gig.ini";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        return;
+    }
+
+    std::ifstream file(path);
+    if (!file) {
+        return;
+    }
+
+    int applied = 0;
+    int lineNumber = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        ++lineNumber;
+        const std::string trimmed = trimWhitespace(line);
+        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';' || trimmed.front() == '[') {
+            continue;
+        }
+        const std::size_t equals = trimmed.find('=');
+        if (equals == std::string::npos) {
+            continue;
+        }
+        std::string key = trimWhitespace(trimmed.substr(0, equals));
+        for (char& ch : key) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        const std::string value = stripQuotes(trimWhitespace(trimmed.substr(equals + 1)));
+        try {
+            if (applyIniSetting(options, key, value)) {
+                ++applied;
+            } else {
+                gig::logWarning() << "gig.ini: ignoring unknown key '" << key << "' (line " << lineNumber << ")";
+            }
+        } catch (const std::exception& error) {
+            gig::logWarning() << "gig.ini: bad value for '" << key << "' (line " << lineNumber << "): " << error.what();
+        }
+    }
+    gig::logInfo() << "gig.ini: applied " << applied << " setting(s) from " << path.string();
+}
+
 ProgramOptions parseOptions(int argc, char** argv)
 {
     ProgramOptions options;
@@ -185,6 +314,9 @@ ProgramOptions parseOptions(int argc, char** argv)
         options.command = Command::CertStore;
         firstOption = 2;
     }
+
+    // gig.ini (next to the exe) provides defaults; the flags below override them.
+    applyIniConfig(options);
 
     for (int i = firstOption; i < argc; ++i) {
         const std::string arg = argv[i];

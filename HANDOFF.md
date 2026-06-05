@@ -30,7 +30,9 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
 - `src/main.cpp` — CLI (`run` default / `probe` / `discover` / `certstore`; note
   there is **no** `run` token — Run is the default command), run loop, supervisor
   wiring, live-resize `SDL_AddEventWatch`, `GetProcessTimes` cpu sampler. Creates
-  the one shared `TlsSessionCache` + `CookieJar`.
+  the one shared `TlsSessionCache` + `CookieJar`. Reads **`gig.ini`** next to the exe
+  (`applyIniConfig`) as defaults before CLI parse — flags override. `gig.ini.example`
+  in the repo documents the keys.
 - `src/app/camera_supervisor.*` — owns decoder lifecycle from the health poll; owns
   the one app-lifetime `TlsClient` (built from `config_.tls` + shared cache + jar)
   and the `startupStagger` (default 50ms/camera).
@@ -172,6 +174,10 @@ probe). What landed:
 
 ## Paths / facts
 
+- Config: `gig.ini` next to the exe (keys: base, url, stream-url, ca, cert, key,
+  software, overlay, insecure, poll-interval, rw-timeout-us). With no ca/cert/key →
+  Windows store. Template: `gig.ini.example` (tracked); the live one lives in the
+  gitignored `build/` so it isn't committed.
 - Frigate base: `https://frigate.lan/security` (host `frigate.lan:443`). 10 cameras.
 - PEM (CurrentUser): CA `C:\Users\Marton\Desktop\winuty\gig\myca.pem`,
   client `...\marton@mars11.crt` / `.key` (RSA).
