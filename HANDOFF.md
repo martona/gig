@@ -6,9 +6,10 @@ networking) and Phase 1 (Windows store + CNG client cert) are done and verified
 against the user's Frigate. `PLAN.md` has the grid-milestone history.
 
 **Default auth is now the Windows store** (store trust roots + a CurrentUser\MY
-client cert via the CNG bridge) — implicit whenever no `--ca/--cert/--key` PEM args
-are given; pops the Windows cert picker + one consent prompt on first use. PEM is the
-explicit fallback. No `--winstore` flag — it's derived from the absence of PEM args.
+client cert via the CNG bridge) — used whenever no `ca`/`cert`/`key` is set in gig.ini;
+pops the Windows cert picker + one consent prompt on first use. PEM is the explicit
+fallback (set those keys). **The app is GUI-only: all configuration is via `gig.ini`
+next to the exe — there are no command-line options or subcommands.**
 
 ## What the app is
 
@@ -27,12 +28,12 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
 
 ## Module map
 
-- `src/main.cpp` — CLI (`run` default / `probe` / `discover` / `certstore`; note
-  there is **no** `run` token — Run is the default command), run loop, supervisor
-  wiring, live-resize `SDL_AddEventWatch`, `GetProcessTimes` cpu sampler. Creates
-  the one shared `TlsSessionCache` + `CookieJar`. Reads **`gig.ini`** next to the exe
-  (`applyIniConfig`) as defaults before CLI parse — flags override. `gig.ini.example`
-  in the repo documents the keys.
+- `src/main.cpp` — GUI-only entry: loads **`gig.ini`** next to the exe (`loadConfig` /
+  `applyIniConfig`), the **sole config — no command-line options or subcommands**. Run loop,
+  supervisor wiring, live-resize `SDL_AddEventWatch`, `GetProcessTimes` cpu sampler. Creates
+  the one shared `TlsSessionCache` + `CookieJar`. Built as a **GUI-subsystem** app (no console
+  window; `add_executable(... WIN32)`, SDL's `SDL_main.h` supplies `WinMain`). Fatal startup
+  errors surface via `MessageBoxA` + the log. `gig.ini.example` documents the keys.
 - `src/app/camera_supervisor.*` — owns decoder lifecycle from the health poll; owns
   the one app-lifetime `TlsClient` (built from `config_.tls` + shared cache + jar)
   and the `startupStagger` (default 50ms/camera).
@@ -60,12 +61,11 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
   + `setConsentParentWindow` (owns the picker/consent/key-access dialogs to the app
   window so it can't be closed mid-prompt — else shutdown's join deadlocks against the
   thread stuck in the prompt). `main.cpp` feeds it the SDL HWND.
-- `src/probe/cert_probe.*` — the `certstore` probe; its CNG path calls `cng_tls`.
-- `src/probe/http_probe.*` — the `probe` command (self-contained Beast, own anon-namespace TLS).
 - `src/render/*` — D3D11 per-tile grid renderer, `grid_layout`, `text_overlay` (GDI font-atlas HUD).
   `d3d11_renderer` also hosts **Dear ImGui** (DX11 + SDL3 backends): a full-window **log view**
-  rendered before Present, toggled by clicking the diagnostics tile (Esc / X to close). Events go
-  through `VideoRenderer::handleEvent` so ImGui's WantCapture suppresses tile-clicks while it's up.
+  rendered before Present, toggled by clicking the diagnostics tile (Esc / X to close; Copy-to-
+  clipboard + Clear buttons). Events go through `VideoRenderer::handleEvent` so ImGui's WantCapture
+  suppresses tile-clicks while it's up.
   **DPI-aware (dynamic):** `dpiScale_ = SDL_GetWindowDisplayScale`; the overlay atlas bakes at
   `kBaseFontPx(16) * scale` and the ImGui font (Consolas) loads at the same — 16px logical (=32px
   at 200%, matching the old hand-tuned size). On `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` (monitor
@@ -86,7 +86,7 @@ There is **one TLS stack**: our Boost.Beast + OpenSSL. Both planes go through
    and we dropped `avformat_network_init()` — FFmpeg uses zero protocols now.
 
 Auth: **Windows store by default** (store trust roots + a CurrentUser\MY client cert
-via the CNG bridge), or PEM when `--ca/--cert/--key` are given. Control plane and video
+via the CNG bridge), or PEM when `ca`/`cert`/`key` are set in gig.ini. Control plane and video
 each build their own `ssl::context` (both via `configureSslContext`) but share the one
 `TlsSessionCache`, `CookieJar`, and — via `cng_tls`'s process-wide cache — the one
 selected `WinClientCert`, so the picker + consent fire once.
@@ -98,11 +98,10 @@ Findings (all verified against the user's Frigate):
 - **The OpenSSL `capi` ENGINE is DEAD on 3.x** — it loads + selects the cert, but signing fails `error:0A080006 ... function not supported`. Do **not** pursue it.
 - **The working client-cert path is our custom CNG bridge** — proven end-to-end with the Windows consent prompt firing:
   - `src/net/win_cert_store.*`: cert picker (`CryptUIDlgSelectCertificateFromStore`, CurrentUser\MY) + `NCryptSignHash` signers — `cngSignPkcs1` (RSA) and `cngSignEcdsa` (EC). Walled off from OpenSSL (wincrypt/openssl headers collide), exposes plain types only.
-  - `cert_probe.cpp`: builds an OpenSSL `EVP_PKEY` whose sign is delegated to the bridge — `RSA_METHOD` for RSA, `EC_KEY_METHOD` for EC — and auto-detects via `EVP_PKEY_base_id`.
+  - `cng_tls.cpp` (`useWindowsStoreClientCert`): builds an OpenSSL `EVP_PKEY` whose sign is delegated to the bridge — `RSA_METHOD` for RSA, `EC_KEY_METHOD` for EC — auto-detected via `EVP_PKEY_base_id`.
   - **RSA** ⇒ proven, but pinned to **TLS 1.2 + PKCS#1** (legacy `RSA_METHOD` only gets the bare digest on the PKCS#1 path; TLS 1.3's RSA-PSS would need a full OpenSSL 3.x *provider* — a someday item).
   - **EC** ⇒ proven on **TLS 1.3** (ECDSA has no padding, so no version pin).
-- Probe: `gig certstore --base URL [--server-only | --capi]` (default = CNG bridge).
-- Libs added for this: `crypt32 cryptui ncrypt` (in `CMakeLists.txt`).
+- Libs for this: `crypt32 cryptui ncrypt` (in `CMakeLists.txt`).
 
 ## Phase 2 — DONE ✅ (terminate TLS ourselves, feed FFmpeg via custom AVIO)
 
@@ -143,22 +142,18 @@ port options. Separate, bigger effort; not done.
 
 ## Phase 1 — DONE ✅ (Windows store + CNG client cert, default)
 
-Built + verified against the user's Frigate (full grid on store certs + the `certstore`
-probe). What landed:
-- `cng_tls.*` — the OpenSSL↔CNG bridge relocated out of `cert_probe.cpp`, exposing
-  `useWindowsStoreClientCert(SSL_CTX*)`: selects the cert **once** via a process-wide
-  cached `WinClientCert` (one picker + one consent across both SSL contexts), builds the
-  bridge `EVP_PKEY` (RSA `RSA_METHOD` / EC `EC_KEY_METHOD` → `NCryptSignHash`), pins RSA
-  to TLS 1.2 + PKCS#1, leaves EC on TLS 1.3.
-- `tls_context.cpp` (`configureSslContext`, the single chokepoint): when
-  `useWindowsStore`, server CA via `SSL_CTX_load_verify_store("org.openssl.winstore://")`
-  + `useWindowsStoreClientCert`; else PEM.
-- `tls_options.h`: `useWindowsStore` is **derived, not a flag** — set in `main.cpp` when
-  no `--ca/--cert/--key` is given. (There is intentionally no `--winstore`.)
-- `cert_probe.cpp`: de-duped — its CNG path now calls `cng_tls` (single source of truth).
-- Verified: `certstore --server-only` validates the server cert via the store over TLS
-  1.3 (`verify result: 0 (ok)`); the full grid runs on the store cert with one consent
-  (session resumption + the startup stagger keep it to one).
+Built + verified against the user's Frigate (full grid on store certs). What landed:
+- `cng_tls.*` — the OpenSSL↔CNG bridge, exposing `useWindowsStoreClientCert(SSL_CTX*)`:
+  selects the cert **once** via a process-wide cached `WinClientCert` (one picker + one
+  consent across both SSL contexts), builds the bridge `EVP_PKEY` (RSA `RSA_METHOD` / EC
+  `EC_KEY_METHOD` → `NCryptSignHash`), pins RSA to TLS 1.2 + PKCS#1, leaves EC on TLS 1.3.
+- `tls_context.cpp` (`configureSslContext`, the single chokepoint): when `useWindowsStore`,
+  server CA via `SSL_CTX_load_verify_store("org.openssl.winstore://")` + `useWindowsStoreClientCert`;
+  else PEM.
+- `tls_options.h`: `useWindowsStore` is **derived** — set in `main.cpp` when gig.ini has no
+  `ca`/`cert`/`key`.
+- Verified: the full grid runs on the store cert with one consent (server cert validated via
+  the store over TLS 1.3; session resumption + the startup stagger keep it to one prompt).
 
 ## Possible future work (not started)
 
@@ -173,15 +168,19 @@ probe). What landed:
 
 ## Operational constraints for the next Claude
 
-- **Cannot run unattended:** the app or `discover` with **no PEM args** (the default →
-  Windows store → cert picker + consent prompt), and `certstore` (default CNG). Hand to
-  the user.
-- **Can run solo:** builds, **PEM grid runs / `discover`** (explicit `--ca/--cert/--key`
-  → no consent), `certstore --server-only`, `probe`.
+- **Cannot run unattended:** the app with no `ca`/`cert`/`key` in gig.ini (the default →
+  Windows store → cert picker + consent prompt). Hand store-cert runs to the user.
+- **Can run solo:** builds, and PEM grid runs — drop a `gig.ini` with `ca`/`cert`/`key`
+  next to the exe (no consent). There are no CLI subcommands.
 - **This dev VM has no usable GPU** (D3D adapter is software/WARP) — HW decode
-  auto-falls-back to software; use `--software` or rely on the fallback. The user
-  validates HW decode on a separate GPU box.
-- GUI headless-check pattern: `Start-Process gig.exe -ArgumentList ... -RedirectStandardError $log -PassThru`; `Start-Sleep N`; then `$p.CloseMainWindow()` (WM_CLOSE → SDL_EVENT_QUIT → graceful shutdown, exercises the stop/cancel path) or `Stop-Process` (hard kill). Grep the log for `live N/10`, `frames total`, `Decoder error`, `video tls handshake ... reused=`.
+  auto-falls-back to software; set `software = true` in gig.ini or rely on the fallback.
+  The user validates HW decode on a separate GPU box.
+- GUI headless-check pattern: write a PEM `gig.ini` next to the exe, then
+  `Start-Process gig.exe -RedirectStandardError $log -PassThru -WorkingDirectory <exe dir>`;
+  `Start-Sleep N`; then `$p.CloseMainWindow()` (WM_CLOSE → SDL_EVENT_QUIT → graceful shutdown,
+  exercises the stop/cancel path) or `Stop-Process` (hard kill). Grep the log for `live N/10`,
+  `frames total`, `Decoder error`, `video tls handshake ... reused=`. (Logs go to the in-app
+  log view and to stderr if redirected; the exe is GUI-subsystem so there's no console.)
 
 ## Paths / facts
 

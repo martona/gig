@@ -18,7 +18,7 @@ find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 
-add_executable(gig
+add_executable(gig WIN32
     src/main.cpp
     src/log.cpp
     src/log.hpp
@@ -48,10 +48,6 @@ add_executable(gig
     src/net/url.h
     src/net/win_cert_store.cpp
     src/net/win_cert_store.h
-    src/probe/cert_probe.cpp
-    src/probe/cert_probe.h
-    src/probe/http_probe.cpp
-    src/probe/http_probe.h
     src/render/d3d11_renderer.cpp
     src/render/grid_layout.cpp
     src/render/grid_layout.h

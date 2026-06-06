@@ -1095,14 +1095,23 @@ private:
         const ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove
             | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings;
         if (ImGui::Begin("Log", &open, flags)) {
+            gig::LogBuffer::instance().snapshot(logScratch_);
+
+            if (ImGui::Button("Copy")) {
+                std::string joined;
+                for (const std::string& entry : logScratch_) {
+                    joined += entry;
+                    joined.push_back('\n');
+                }
+                ImGui::SetClipboardText(joined.c_str()); // routed to the OS clipboard via SDL
+            }
+            ImGui::SameLine();
             if (ImGui::Button("Clear")) {
                 gig::LogBuffer::instance().clear();
             }
             ImGui::SameLine();
             ImGui::TextDisabled("wheel / drag scrollbar to scroll, Esc or X to close");
             ImGui::Separator();
-
-            gig::LogBuffer::instance().snapshot(logScratch_);
 
             ImGui::BeginChild("log_scroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
             ImGuiListClipper clipper;

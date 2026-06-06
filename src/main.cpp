@@ -6,8 +6,6 @@
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
 #include "net/win_cert_store.h"
-#include "probe/cert_probe.h"
-#include "probe/http_probe.h"
 #include "render/grid_layout.h"
 #include "render/video_renderer.h"
 #include "video_frame.h"
@@ -15,14 +13,11 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
-#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -107,73 +102,15 @@ bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
     return true;
 }
 
-enum class Command {
-    Run,
-    Probe,
-    Discover,
-    CertStore,
-};
-
 struct ProgramOptions {
-    Command command = Command::Run;
-    std::string url = DefaultUrl;
+    std::string baseUrl;          // Frigate control-plane base; enables multi-camera discovery
+    std::string url = DefaultUrl; // single stream, used only when baseUrl is empty
     std::string streamUrlTemplate;
     bool softwareDecode = false;
     int pollIntervalSeconds = 5;
     bool showOverlay = true;
-    gig::ClientCertMode certMode = gig::ClientCertMode::Cng;
-    ProbeOptions probe;
     TlsOptions tls;
-    bool showHelp = false;
 };
-
-void printUsage()
-{
-    std::cout
-        << "gig [--base URL | --url URL] [--software] [--no-overlay] [--ca CA.pem] [--cert client.crt] [--key client.key] [--insecure]\n"
-        << "gig probe --base URL [--src STREAM] [--stream-check] [--endpoint PATH]\n"
-        << "gig discover --base URL [--stream-url TEMPLATE] [--ca CA] [--cert C] [--key K]\n"
-        << "gig certstore --base URL [--server-only|--capi]   (Windows cert store; default = CNG client-cert bridge)\n"
-        << "\n"
-        << "  With no --ca/--cert/--key, the Windows certificate store is used (store CA + CNG client\n"
-        << "  cert); this pops a Windows consent prompt on first use.\n"
-        << "  Defaults can be set in gig.ini next to the exe (keys: base, url, stream-url, ca, cert,\n"
-        << "  key, software, overlay, insecure, poll-interval, rw-timeout-us); flags override it.\n"
-        << "\n"
-        << "If the viewer --url is omitted, this default is used:\n"
-        << "  " << DefaultUrl << "\n";
-}
-
-std::string requireValue(int& index, int argc, char** argv, const char* option)
-{
-    if (index + 1 >= argc) {
-        throw std::runtime_error(std::string(option) + " requires a value.");
-    }
-
-    ++index;
-    return argv[index];
-}
-
-std::string baseUrlFromStreamUrl(std::string url)
-{
-    const std::size_t query = url.find('?');
-    if (query != std::string::npos) {
-        url.erase(query);
-    }
-
-    const std::string apiMarker = "/api/";
-    const std::size_t api = url.find(apiMarker);
-    if (api != std::string::npos) {
-        url.erase(api);
-    } else if (url.ends_with("/api")) {
-        url.erase(url.size() - 4);
-    }
-
-    while (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    return url;
-}
 
 // Directory containing the running executable (so gig.ini sits next to it).
 std::filesystem::path exeDirectory()
@@ -221,7 +158,7 @@ bool iniTruthy(std::string value)
 bool applyIniSetting(ProgramOptions& options, const std::string& key, const std::string& value)
 {
     if (key == "base") {
-        options.probe.baseUrl = value;
+        options.baseUrl = value;
     } else if (key == "url") {
         options.url = value;
     } else if (key == "stream-url" || key == "stream_url") {
@@ -248,9 +185,9 @@ bool applyIniSetting(ProgramOptions& options, const std::string& key, const std:
     return true;
 }
 
-// Layer settings from gig.ini (next to the exe) onto `options`. These are
-// defaults; command-line flags parsed afterward override them. Missing file is
-// silently ignored; bad lines warn but don't abort.
+// Load settings from gig.ini (next to the exe) into `options` -- the only
+// configuration source. A missing file is silently ignored; bad lines warn but
+// don't abort.
 void applyIniConfig(ProgramOptions& options)
 {
     const std::filesystem::path dir = exeDirectory();
@@ -299,95 +236,16 @@ void applyIniConfig(ProgramOptions& options)
     gig::logInfo() << "gig.ini: applied " << applied << " setting(s) from " << path.string();
 }
 
-ProgramOptions parseOptions(int argc, char** argv)
+ProgramOptions loadConfig()
 {
     ProgramOptions options;
-
-    int firstOption = 1;
-    if (argc > 1 && std::string(argv[1]) == "probe") {
-        options.command = Command::Probe;
-        firstOption = 2;
-    } else if (argc > 1 && std::string(argv[1]) == "discover") {
-        options.command = Command::Discover;
-        firstOption = 2;
-    } else if (argc > 1 && std::string(argv[1]) == "certstore") {
-        options.command = Command::CertStore;
-        firstOption = 2;
-    }
-
-    // gig.ini (next to the exe) provides defaults; the flags below override them.
     applyIniConfig(options);
-
-    for (int i = firstOption; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "--help" || arg == "-h") {
-            options.showHelp = true;
-        } else if (arg == "--url") {
-            options.url = requireValue(i, argc, argv, "--url");
-            if (options.command == Command::Probe) {
-                options.probe.baseUrl = options.url;
-            }
-        } else if (arg == "--base") {
-            options.probe.baseUrl = requireValue(i, argc, argv, "--base");
-        } else if (arg == "--stream-url") {
-            options.streamUrlTemplate = requireValue(i, argc, argv, "--stream-url");
-        } else if (arg == "--src") {
-            options.probe.streamName = requireValue(i, argc, argv, "--src");
-        } else if (arg == "--max-bytes") {
-            const std::string value = requireValue(i, argc, argv, "--max-bytes");
-            options.probe.maxBytes = static_cast<std::size_t>(std::stoull(value));
-        } else if (arg == "--dump") {
-            options.probe.dumpBody = true;
-        } else if (arg == "--stream-check") {
-            options.probe.checkStreams = true;
-        } else if (arg == "--endpoint") {
-            options.probe.extraEndpoints.push_back(requireValue(i, argc, argv, "--endpoint"));
-        } else if (arg == "--ca") {
-            options.tls.caFile = requireValue(i, argc, argv, "--ca");
-        } else if (arg == "--cert") {
-            options.tls.certFile = requireValue(i, argc, argv, "--cert");
-        } else if (arg == "--key") {
-            options.tls.keyFile = requireValue(i, argc, argv, "--key");
-        } else if (arg == "--rw-timeout-us") {
-            options.tls.rwTimeoutUs = std::stoll(requireValue(i, argc, argv, "--rw-timeout-us"));
-        } else if (arg == "--insecure") {
-            options.tls.verifyServer = false;
-        } else if (arg == "--software" || arg == "--no-hwaccel") {
-            options.softwareDecode = true;
-        } else if (arg == "--no-overlay") {
-            options.showOverlay = false;
-        } else if (arg == "--server-only") {
-            options.certMode = gig::ClientCertMode::None;
-        } else if (arg == "--capi") {
-            options.certMode = gig::ClientCertMode::Capi;
-        } else if (arg == "--poll-interval") {
-            options.pollIntervalSeconds = std::stoi(requireValue(i, argc, argv, "--poll-interval"));
-        } else if (!arg.starts_with("--")) {
-            if (options.command == Command::Probe || options.command == Command::Discover) {
-                options.probe.baseUrl = arg;
-            } else {
-                options.url = arg;
-            }
-        } else {
-            throw std::runtime_error("Unknown option: " + arg);
-        }
-    }
 
     // The Windows certificate store is implicit when no PEM material is given:
     // store trust roots for server verification + a CurrentUser\MY client cert.
     options.tls.useWindowsStore = options.tls.caFile.empty()
         && options.tls.certFile.empty()
         && options.tls.keyFile.empty();
-
-    options.probe.tls = options.tls;
-    if (options.command == Command::Probe || options.command == Command::Discover
-        || options.command == Command::CertStore) {
-        if (options.probe.baseUrl.empty()) {
-            options.probe.baseUrl = baseUrlFromStreamUrl(options.url);
-        } else {
-            options.probe.baseUrl = baseUrlFromStreamUrl(options.probe.baseUrl);
-        }
-    }
 
     return options;
 }
@@ -411,31 +269,10 @@ public:
 
 int main(int argc, char** argv)
 {
+    (void)argc;
+    (void)argv; // GUI app; all configuration comes from gig.ini
     try {
-        ProgramOptions options = parseOptions(argc, argv);
-        if (options.showHelp) {
-            printUsage();
-            return 0;
-        }
-        if (options.command == Command::Probe) {
-            return runProbe(options.probe);
-        }
-        if (options.command == Command::Discover) {
-            auto sessionCache = std::make_shared<gig::TlsSessionCache>();
-            auto cookieJar = std::make_shared<gig::CookieJar>();
-            gig::HttpClient client(options.probe.baseUrl, options.tls, sessionCache, cookieJar);
-            const std::vector<gig::CameraStream> cameras =
-                gig::discoverCameras(client, options.streamUrlTemplate);
-            std::cout << "Discovered " << cameras.size() << " camera(s):\n";
-            for (const gig::CameraStream& camera : cameras) {
-                std::cout << "  " << camera.cameraName << "  -> " << camera.streamName
-                          << "  " << camera.streamUrl << "\n";
-            }
-            return cameras.empty() ? 2 : 0;
-        }
-        if (options.command == Command::CertStore) {
-            return gig::runCertProbe(options.probe.baseUrl, options.certMode);
-        }
+        const ProgramOptions options = loadConfig();
 
         SdlLifetime sdl;
 
@@ -472,12 +309,12 @@ int main(int argc, char** argv)
         auto sessionCache = std::make_shared<gig::TlsSessionCache>();
         auto cookieJar = std::make_shared<gig::CookieJar>();
         std::vector<gig::CameraStream> cameras;
-        if (!options.probe.baseUrl.empty()) {
-            gig::HttpClient client(options.probe.baseUrl, options.tls, sessionCache, cookieJar);
+        if (!options.baseUrl.empty()) {
+            gig::HttpClient client(options.baseUrl, options.tls, sessionCache, cookieJar);
             cameras = gig::discoverCameras(client, options.streamUrlTemplate);
         } else {
             cameras.push_back({ "camera", "", options.url });
-            gig::logInfo() << "no --base given; single camera " << options.url;
+            gig::logInfo() << "no base configured; single camera " << options.url;
         }
         if (cameras.empty()) {
             throw std::runtime_error("no cameras to display");
@@ -491,7 +328,7 @@ int main(int argc, char** argv)
         renderer->setCameraLabels(cameraLabels);
 
         gig::SupervisorConfig supervisorConfig;
-        supervisorConfig.baseUrl = options.probe.baseUrl;
+        supervisorConfig.baseUrl = options.baseUrl;
         supervisorConfig.tls = options.tls;
         supervisorConfig.softwareDecode = options.softwareDecode;
         supervisorConfig.pollInterval = std::chrono::seconds(options.pollIntervalSeconds);
@@ -633,7 +470,10 @@ int main(int argc, char** argv)
         supervisor.stop();
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << error.what() << "\n";
+        gig::logError() << "fatal: " << error.what();
+#ifdef _WIN32
+        MessageBoxA(nullptr, error.what(), "gig", MB_ICONERROR | MB_OK);
+#endif
         return 1;
     }
 }

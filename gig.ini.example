@@ -1,12 +1,12 @@
-# gig.ini -- copy this next to gig.exe (as "gig.ini") and edit.
-# All keys are optional; command-line flags override these. Lines starting with
-# '#' or ';' are comments. '[section]' headers are allowed but ignored.
+# gig.ini -- copy this next to gig.exe (as "gig.ini") and edit. This is the only
+# way to configure gig (there are no command-line options). All keys are optional.
+# Lines starting with '#' or ';' are comments. '[section]' headers are ignored.
 
-# Frigate control-plane base URL (enables multi-camera discovery).
-base = https://frigate.lan/security
+# Frigate control-plane base URL
+base = https://frigate.lan/
 
 # Single stream URL instead of discovery (used only when base is empty).
-# url = https://frigate.lan/security/api/go2rtc/api/stream.ts?src=frontgate
+# url = https://frigate.lan/api/go2rtc/api/stream.ts?src=frontgate
 
 # Override the discovered per-camera stream URL template.
 # stream-url = {base}/api/go2rtc/api/stream.ts?src={name}
@@ -14,9 +14,9 @@ base = https://frigate.lan/security
 # --- TLS auth ---
 # With NO ca/cert/key set, the Windows certificate store is used (store CA + CNG
 # client cert; pops a consent prompt). Set these to use PEM files instead.
-# ca   = C:\Users\Marton\Desktop\winuty\gig\myca.pem
-# cert = C:\Users\Marton\Desktop\winuty\gig\marton@mars11.crt
-# key  = C:\Users\Marton\Desktop\winuty\gig\marton@mars11.key
+# ca   = myca.pem
+# cert = marton@mars11.crt
+# key  = marton@mars11.key
 
 # Skip server-certificate verification (testing only).
 # insecure = false
