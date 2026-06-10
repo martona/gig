@@ -63,12 +63,11 @@ void configureSslContext(ssl::context& context, const TlsOptions& tls)
     }
 
     if (tls.useWindowsStore) {
-        // Client cert from CurrentUser\MY via the CNG signing bridge. Pops the
-        // Windows consent prompt on first use; the selection is cached process-wide
-        // so every context shares one picker + one consent.
-        if (!useWindowsStoreClientCert(context.native_handle())) {
-            throw std::runtime_error("no usable Windows store client certificate was selected");
-        }
+        // Client cert handling is lazy/handshake-driven: the CurrentUser\MY
+        // picker and CNG consent appear only if a server actually requests a
+        // certificate, and the selection is cached process-wide. Servers that
+        // never ask (e.g. Frigate's own nginx) stay prompt-free.
+        installWindowsStoreClientCertCallback(context.native_handle());
         return;
     }
 

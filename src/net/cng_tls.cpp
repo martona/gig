@@ -198,26 +198,32 @@ EVP_PKEY* buildCngEcKey(const WinClientCert& cert, X509* leaf)
 
 // Pick the client cert once and hold it (and its live CNG key handle) for the
 // process lifetime, so a single picker + consent covers every SSL_CTX. The handle
-// is released only at process exit, after all SSL_CTXs are gone.
+// is released only at process exit, after all SSL_CTXs are gone. Function-local
+// static: racing first callers (e.g. two video threads hitting mTLS handshakes
+// at once) serialize on the init, so the picker still shows exactly once.
 const WinClientCert& sharedStoreCert()
 {
     static WinClientCert cert = selectClientCertFromStore();
     return cert;
 }
 
-} // namespace
-
-bool useWindowsStoreClientCert(SSL_CTX* ctx)
+// Fires only when a server's handshake actually requests a client certificate
+// (SSL_CTX_set_client_cert_cb). Returning 0 declines the request: the server
+// then either continues without client auth or rejects the handshake -- either
+// way, servers that never ask never trigger the picker.
+int clientCertCallback(SSL* ssl, X509** x509Out, EVP_PKEY** pkeyOut)
 {
-    const WinClientCert& cert = sharedStoreCert();
+    const WinClientCert& cert = sharedStoreCert(); // first call pops picker + consent
     if (!cert.valid()) {
-        return false;
+        logWarning() << "server requested a client cert, but none was selected; declining";
+        return 0;
     }
 
     const unsigned char* der = cert.certDer.data();
     X509* leaf = d2i_X509(nullptr, &der, static_cast<long>(cert.certDer.size()));
     if (!leaf) {
-        return false;
+        logWarning() << "server requested a client cert, but the selected store cert failed to parse; declining";
+        return 0;
     }
 
     int keyType = 0;
@@ -228,32 +234,45 @@ bool useWindowsStoreClientCert(SSL_CTX* ctx)
     }
 
     EVP_PKEY* pkey = nullptr;
-    bool pinPkcs1 = false;
+    bool rsaPkcs1 = false;
     if (keyType == EVP_PKEY_RSA) {
+        if (SSL_version(ssl) >= TLS1_3_VERSION) {
+            // Can't pin the version from inside the handshake; the eager path
+            // used to cap the whole context at TLS 1.2 for RSA store certs.
+            logError() << "server requested a client cert on a TLS 1.3 connection, but the selected "
+                       << "store cert is RSA and the CNG bridge signs PKCS#1 only (TLS 1.3 needs "
+                       << "RSA-PSS); declining -- use an EC store cert or PEM cert/key";
+            X509_free(leaf);
+            return 0;
+        }
+        // Keep our CertificateVerify on PKCS#1: TLS 1.2 could otherwise pick
+        // RSA-PSS via the sig-algs extension, which the bridge can't sign.
+        SSL_set1_sigalgs_list(ssl, "RSA+SHA256:RSA+SHA384:RSA+SHA512");
         pkey = buildCngRsaKey(cert, leaf);
-        pinPkcs1 = true;
+        rsaPkcs1 = true;
     } else if (keyType == EVP_PKEY_EC) {
         pkey = buildCngEcKey(cert, leaf);
     }
 
-    const bool ok = pkey
-        && SSL_CTX_use_certificate(ctx, leaf) == 1
-        && SSL_CTX_use_PrivateKey(ctx, pkey) == 1;
-    if (ok && pinPkcs1) {
-        // The legacy RSA bridge only does PKCS#1, so pin TLS 1.2 + PKCS#1 sig algs.
-        SSL_CTX_set_max_proto_version(ctx, TLS1_2_VERSION);
-        SSL_CTX_set1_sigalgs_list(ctx, "RSA+SHA256:RSA+SHA384:RSA+SHA512");
-    }
-    if (ok) {
-        logInfo() << "windows store client cert: " << subjectOf(leaf)
-                  << (pinPkcs1 ? " (RSA, pinned TLS 1.2 + PKCS#1)" : " (EC, TLS 1.3)");
+    if (!pkey) {
+        logWarning() << "server requested a client cert, but the CNG key bridge could not be built"
+                     << " (unsupported key type?); declining";
+        X509_free(leaf);
+        return 0;
     }
 
-    if (pkey) {
-        EVP_PKEY_free(pkey); // the context holds its own reference
-    }
-    X509_free(leaf); // the context holds its own reference
-    return ok;
+    logInfo() << "windows store client cert (server requested): " << subjectOf(leaf)
+              << (rsaPkcs1 ? " (RSA, PKCS#1)" : " (EC)");
+    *x509Out = leaf; // OpenSSL takes ownership of both references
+    *pkeyOut = pkey;
+    return 1;
+}
+
+} // namespace
+
+void installWindowsStoreClientCertCallback(SSL_CTX* ctx)
+{
+    SSL_CTX_set_client_cert_cb(ctx, clientCertCallback);
 }
 
 } // namespace gig

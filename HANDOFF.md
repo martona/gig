@@ -5,15 +5,16 @@ is COMPLETE** — both Phase 2 (we terminate all TLS ourselves; FFmpeg does no
 networking) and Phase 1 (Windows store + CNG client cert) are done and verified
 against the user's Frigate. `PLAN.md` has the grid-milestone history.
 
-**Default auth is now the Windows store** (store trust roots + a CurrentUser\MY
-client cert via the CNG bridge) — used whenever no `ca`/`cert`/`key` is set in gig.ini;
-pops the Windows cert picker + one consent prompt on first use. PEM is the explicit
-fallback (set those keys). **Native Frigate user/password login is also in**
+**Default TLS is the Windows store** (store trust roots; client cert via the CNG bridge
+offered **lazily** — picker + consent appear only if a server's handshake actually
+requests a certificate) — used whenever no `ca`/`cert`/`key` is set in gig.ini. PEM is
+the explicit fallback (set those keys). **Native Frigate user/password login is in**
 (`user`/`password` in gig.ini → POST `{base}/api/login` → `frigate_token` cookie in the
-shared jar, re-login every `login-refresh` s) — independent of the TLS client-cert layer;
-the user is migrating to it because the cert picker can't be pinned. **The app is
-GUI-only: all configuration is via `gig.ini` next to the exe — there are no
-command-line options or subcommands.**
+shared jar, re-login every `login-refresh` s) and is now the **primary auth**: the user
+runs naked Frigate (its own nginx, `https://frigate.lan:9971/`) — the mTLS proxy is being
+retired because the cert picker couldn't be pinned. **The app is GUI-only: all
+configuration is via `gig.ini` next to the exe — there are no command-line options or
+subcommands.**
 
 ## What the app is
 
@@ -62,10 +63,14 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
 - `src/net/tls_context.*` — **`configureSslContext`** — the single place every TLS
   consumer (control plane + video) is configured: winstore CA + CNG client cert when no
   PEM args, else PEM.
-- `src/net/cng_tls.*` — **`useWindowsStoreClientCert(SSL_CTX*)`**: the OpenSSL↔CNG
-  signing bridge (RSA `RSA_METHOD` / EC `EC_KEY_METHOD` → `NCryptSignHash`) + a
-  process-wide cached `WinClientCert` (one picker + one consent). RSA pins TLS 1.2 +
-  PKCS#1; EC is TLS 1.3.
+- `src/net/cng_tls.*` — **`installWindowsStoreClientCertCallback(SSL_CTX*)`**: **lazy**
+  client cert via `SSL_CTX_set_client_cert_cb` — fires only when a server requests a
+  cert; the first fire pops the picker + consent (process-wide cached `WinClientCert`,
+  magic-static so racing threads still get one picker). Bridge: RSA `RSA_METHOD` / EC
+  `EC_KEY_METHOD` → `NCryptSignHash`. EC signs on any TLS version; RSA is PKCS#1-only —
+  works when ≤TLS 1.2 was negotiated (per-SSL sigalgs pin inside the callback), declines
+  with a clear error on a TLS 1.3 connection (the old eager RSA→TLS 1.2 *context* pin is
+  gone — can't pin pre-handshake from a lazy callback).
 - `src/net/cookie_jar.*` — thread-safe cookie jar shared by control plane + video;
   populated by `FrigateAuth` under login auth (empty under pure mTLS).
 - `src/net/tls_session_cache.*` — TLS resumption pool (ported from `../hitsc`), shared
@@ -107,12 +112,12 @@ selected `WinClientCert`, so the picker + consent fire once.
 On top of (and independent of) the TLS layer: **native Frigate user/password login**
 (`user`/`password` + `base` in gig.ini → `FrigateAuth`). Login happens in `main()` before
 discovery (failure is fatal, like other startup misconfig); the refresh thread starts after
-the supervisor. The client cert remains handshake-driven — offered only if the server
-requests one — so both auth layers can coexist (mTLS proxy in front, Frigate JWT behind).
-**The no-picker recipe** for a server that doesn't want client certs: set `ca` alone (PEM
-trust, no client cert, no prompts) + `user`/`password`. Caveat: in winstore mode the picker
-still fires at startup even against a cert-less server, because the CNG bridge must know the
-key type before the handshake (the RSA→TLS1.2 pin) — see the provider note in future work.
+the supervisor. Client-cert selection is **fully handshake-driven** (lazy callback in
+`cng_tls`): winstore mode is prompt-free against servers that never request a cert — no
+workaround needed — and both auth layers can still coexist (an mTLS proxy in front would
+trigger the picker once, Frigate JWT rides on top). The one capability lost vs. the old
+eager path: a winstore **RSA** cert can no longer satisfy an mTLS server that negotiated
+TLS 1.3 (clean decline + error log; EC store certs and PEM cert/key are unaffected).
 
 ## TLS / cert R&D — DONE and PROVEN (read before touching TLS for Phase 1)
 
@@ -121,7 +126,7 @@ Findings (all verified against the user's Frigate):
 - **The OpenSSL `capi` ENGINE is DEAD on 3.x** — it loads + selects the cert, but signing fails `error:0A080006 ... function not supported`. Do **not** pursue it.
 - **The working client-cert path is our custom CNG bridge** — proven end-to-end with the Windows consent prompt firing:
   - `src/net/win_cert_store.*`: cert picker (`CryptUIDlgSelectCertificateFromStore`, CurrentUser\MY) + `NCryptSignHash` signers — `cngSignPkcs1` (RSA) and `cngSignEcdsa` (EC). Walled off from OpenSSL (wincrypt/openssl headers collide), exposes plain types only.
-  - `cng_tls.cpp` (`useWindowsStoreClientCert`): builds an OpenSSL `EVP_PKEY` whose sign is delegated to the bridge — `RSA_METHOD` for RSA, `EC_KEY_METHOD` for EC — auto-detected via `EVP_PKEY_base_id`.
+  - `cng_tls.cpp` (now `installWindowsStoreClientCertCallback` — lazy since June 2026): builds an OpenSSL `EVP_PKEY` whose sign is delegated to the bridge — `RSA_METHOD` for RSA, `EC_KEY_METHOD` for EC — auto-detected via `EVP_PKEY_base_id`.
   - **RSA** ⇒ proven, but pinned to **TLS 1.2 + PKCS#1** (legacy `RSA_METHOD` only gets the bare digest on the PKCS#1 path; TLS 1.3's RSA-PSS would need a full OpenSSL 3.x *provider* — a someday item).
   - **EC** ⇒ proven on **TLS 1.3** (ECDSA has no padding, so no version pin).
 - Libs for this: `crypt32 cryptui ncrypt` (in `CMakeLists.txt`).
@@ -191,21 +196,23 @@ Built + verified against the user's Frigate (full grid on store certs). What lan
   the size note above). To actually cut size, trim FFmpeg's own surface via custom vcpkg
   port options — disable its network/protocol layer (we use zero FFmpeg protocols) and
   the demuxers/codecs we don't need (only h264/h265 + mpegts + swscale).
-- **TLS 1.3 for RSA store certs / lazy client-cert selection:** both need a full OpenSSL
-  3.x *provider* (RSA-PSS), replacing the legacy `RSA_METHOD` bridge (EC already does
-  TLS 1.3). "Lazy" = pop the picker only when the server's handshake actually requests a
-  cert; impossible today because the bridge must know the key type up front to pin
-  RSA→TLS 1.2. **Likely never happens** — the user is switching to the native login auth
-  (now implemented) precisely because the cert picker can't be pinned/remembered, making
-  the mTLS path legacy. Kept here for reference per the user's request.
+- **TLS 1.3 for RSA store certs:** needs a full OpenSSL 3.x *provider* (RSA-PSS),
+  replacing the legacy `RSA_METHOD` bridge. Lazy client-cert selection itself is DONE
+  (`SSL_CTX_set_client_cert_cb` in `cng_tls`); the only remaining gap is a winstore
+  **RSA** cert against an mTLS server that negotiated TLS 1.3, which now declines with
+  an error (EC store certs and PEM already do TLS 1.3). **Likely never happens** — the
+  user switched to native login auth precisely because the cert picker can't be
+  pinned/remembered, making winstore mTLS legacy. Kept here for reference per the
+  user's request.
 
 ## Operational constraints for the next Claude
 
-- **Cannot run unattended:** the app with no `ca`/`cert`/`key` in gig.ini (the default →
-  Windows store → cert picker + consent prompt). Hand store-cert runs to the user.
-  Login-auth runs against the user's Frigate need real credentials — hand those to the
-  user too (a deliberate bogus-creds run does work headless: login fails → fatal log
-  line before the error MessageBox; kill the process after grepping the log).
+- **Winstore mode now runs unattended** against servers that don't request a client cert
+  (lazy selection) — e.g. naked Frigate at `:9971`. Only an mTLS server (one that sends
+  CertificateRequest) pops the picker/consent; hand those runs to the user. The login
+  credentials live in the user's gitignored `build/windows-release/gig.ini` — never
+  commit, copy, or log them; running the exe against that live config is the full
+  end-to-end test.
 - **Can run solo:** builds, and PEM grid runs — drop a `gig.ini` with `ca`/`cert`/`key`
   next to the exe (no consent). There are no CLI subcommands.
 - **This dev VM has no usable GPU** (D3D adapter is software/WARP) — HW decode
@@ -225,13 +232,12 @@ Built + verified against the user's Frigate (full grid on store certs). What lan
   rw-timeout-us). With no ca/cert/key → Windows store. user/password requires base
   (warned + ignored otherwise). Template: `gig.ini.example` (tracked); the live one
   lives in the gitignored `build/` so it isn't committed.
-- Frigate base: `https://frigate.lan/security` (host `frigate.lan:443`). 10 cameras.
-- Login-endpoint reality (verified June 2026): through the nginx proxy,
-  `{base}/api/login` never reaches Frigate — nginx intercepts it with a 302 to its own
-  `/basic-auth` page (`post()` reports exactly this). Frigate's direct authenticated port
-  `frigate.lan:8971` is NOT reachable from this dev VM. A successful-login run therefore
-  needs the user: real creds + a reachable endpoint (direct port exposed, or the proxy
-  passing `/api/login` through).
+- Frigate base: **`https://frigate.lan:9971/`** — naked Frigate, its own built-in nginx,
+  auth enabled; this is the live `base` (creds in the gitignored build gig.ini). 10 cameras.
+- The old mTLS-proxy base `https://frigate.lan/security` is being retired. Through it,
+  `{base}/api/login` never reached Frigate — that nginx intercepts with a 302 to its own
+  `/basic-auth` page (observed June 2026; `post()` reports exactly this). Frigate's default
+  `:8971` port is filtered from this VM; `:9971` is the exposed one.
 - PEM (CurrentUser): CA `C:\Users\Marton\Desktop\winuty\gig\myca.pem`,
   client `...\marton@mars11.crt` / `.key` (RSA).
 - Windows store: CA in Trusted Root; client certs `marton@mars11` (RSA) and

@@ -12,8 +12,10 @@ base = https://frigate.lan/
 # stream-url = {base}/api/go2rtc/api/stream.ts?src={name}
 
 # --- TLS auth ---
-# With NO ca/cert/key set, the Windows certificate store is used (store CA + CNG
-# client cert; pops a consent prompt). Set these to use PEM files instead.
+# With NO ca/cert/key set, the Windows certificate store is used: store trust
+# roots verify the server, and a client certificate is offered ONLY if the
+# server's handshake requests one (the cert picker + consent appear just then,
+# once per run). Set these to use PEM files instead.
 # ca   = myca.pem
 # cert = marton@mars11.crt
 # key  = marton@mars11.key
@@ -22,8 +24,8 @@ base = https://frigate.lan/
 # With user+password set, gig POSTs {base}/api/login at startup, carries the
 # returned frigate_token cookie on every request (API + video), and re-logs-in
 # every login-refresh seconds to keep the token fresh. Requires 'base'.
-# Independent of TLS auth above. To run plain TLS with NO client certificate
-# (and no cert picker/consent prompts), set 'ca' alone alongside user/password.
+# Independent of TLS auth above; a server that never asks for a client cert
+# never triggers the cert picker.
 # user = viewer
 # password = secret
 # login-refresh = 600

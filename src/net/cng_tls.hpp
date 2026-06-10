@@ -4,16 +4,18 @@
 
 namespace gig {
 
-// Select a client certificate from the Windows store (CurrentUser\MY) and wire it
-// into `ctx` via our CNG signing bridge -- the private key never leaves the store;
-// signing is delegated to NCryptSignHash. RSA keys are pinned to TLS 1.2 + PKCS#1
-// (the legacy RSA_METHOD path only gets the bare digest); EC keys work on TLS 1.3.
+// Install a lazy client-certificate callback on `ctx`: the Windows store picker
+// (CurrentUser\MY) and CNG consent prompt appear only if a server's handshake
+// actually requests a client certificate -- connections to servers that never
+// ask stay prompt-free. The chosen cert (with its live CNG key handle) is
+// cached for the process lifetime, so one picker + consent covers every
+// connection and SSL_CTX.
 //
-// The picker is shown once and the chosen cert (with its live CNG key handle) is
-// cached for the process lifetime, so a single picker + consent covers every
-// SSL_CTX. The first signing use pops the Windows consent prompt. Returns false if
-// no usable certificate was selected (e.g. the user cancelled, or an unsupported
-// key type).
-bool useWindowsStoreClientCert(SSL_CTX* ctx);
+// Signing is delegated to NCryptSignHash via the CNG bridge; the private key
+// never leaves the store. EC certs work on any TLS version. RSA certs only
+// work when the connection negotiated <= TLS 1.2 (the legacy RSA_METHOD bridge
+// is PKCS#1-only and TLS 1.3 mandates RSA-PSS) -- on a TLS 1.3 connection an
+// RSA pick logs an error and the certificate request is declined.
+void installWindowsStoreClientCertCallback(SSL_CTX* ctx);
 
 } // namespace gig
