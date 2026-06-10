@@ -46,9 +46,28 @@ void applyTimeout(Stream& stream, std::int64_t rwTimeoutUs)
     beast::get_lowest_layer(stream).expires_after(micros);
 }
 
+// Run exactly one async op to completion, bounded by the rw timeout. Beast's
+// tcp_stream timer only fires for ASYNC operations (sync calls silently ignore
+// expires_after), so every I/O step goes through here -- this is what makes
+// rwTimeoutUs real. Same idiom as MediaStream::runOne in tls_client.cpp.
+template <typename Stream, typename Initiate>
+boost::system::error_code runStep(
+    asio::io_context& io, Stream& stream, std::int64_t rwTimeoutUs, Initiate&& initiate)
+{
+    applyTimeout(stream, rwTimeoutUs);
+    boost::system::error_code result;
+    initiate([&result](boost::system::error_code ec) { result = ec; });
+    io.restart();
+    io.run();
+    beast::get_lowest_layer(stream).expires_never();
+    return result;
+}
+
 template <typename Stream>
 void readResponse(
+    asio::io_context& io,
     Stream& stream,
+    std::int64_t rwTimeoutUs,
     beast::flat_buffer& buffer,
     std::size_t maxBytes,
     CookieJar& cookies,
@@ -58,8 +77,12 @@ void readResponse(
     http::response_parser<http::dynamic_body> parser;
     parser.body_limit(static_cast<std::uint64_t>(maxBytes));
 
-    boost::system::error_code ec;
-    http::read_header(stream, buffer, parser, ec);
+    boost::system::error_code ec = runStep(io, stream, rwTimeoutUs, [&](auto&& complete) {
+        http::async_read_header(
+            stream, buffer, parser,
+            [c = std::forward<decltype(complete)>(complete)](
+                boost::system::error_code e, std::size_t) mutable { c(e); });
+    });
     if (ec) {
         result.error = ec.message();
         return;
@@ -70,7 +93,12 @@ void readResponse(
             result.truncated = true;
             break;
         }
-        http::read_some(stream, buffer, parser, ec);
+        ec = runStep(io, stream, rwTimeoutUs, [&](auto&& complete) {
+            http::async_read_some(
+                stream, buffer, parser,
+                [c = std::forward<decltype(complete)>(complete)](
+                    boost::system::error_code e, std::size_t) mutable { c(e); });
+        });
         if (ec == http::error::need_buffer) {
             continue;
         }
@@ -155,6 +183,7 @@ struct HttpClient::Impl {
             request.prepare_payload();
 
             beast::flat_buffer buffer;
+            boost::system::error_code ec;
             if (parsed.scheme == "https") {
                 beast::ssl_stream<beast::tcp_stream> stream(io, tlsContext);
                 if (!SSL_set_tlsext_host_name(stream.native_handle(), parsed.host.c_str())) {
@@ -164,33 +193,78 @@ struct HttpClient::Impl {
                     offerCachedSession(stream.native_handle(), *sessionCache);
                 }
 
-                applyTimeout(stream, tls.rwTimeoutUs);
-                beast::get_lowest_layer(stream).connect(endpoints);
-                applyTimeout(stream, tls.rwTimeoutUs);
-                stream.handshake(ssl::stream_base::client);
+                ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                    beast::get_lowest_layer(stream).async_connect(
+                        endpoints,
+                        [c = std::forward<decltype(complete)>(complete)](
+                            boost::system::error_code e, const tcp::endpoint&) mutable { c(e); });
+                });
+                if (ec) {
+                    result.error = "connect " + parsed.host + ": " + ec.message();
+                    return result;
+                }
+
+                ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                    stream.async_handshake(
+                        ssl::stream_base::client,
+                        [c = std::forward<decltype(complete)>(complete)](
+                            boost::system::error_code e) mutable { c(e); });
+                });
+                if (ec) {
+                    result.error = "tls handshake " + parsed.host + ": " + ec.message();
+                    return result;
+                }
                 if (sessionCache) {
                     logDebug() << "tls handshake host=" << parsed.host
                                << " reused=" << (sessionWasReused(stream.native_handle()) ? "yes" : "no")
                                << " cached=" << sessionCache->size();
                 }
 
-                applyTimeout(stream, tls.rwTimeoutUs);
-                http::write(stream, request);
-                applyTimeout(stream, tls.rwTimeoutUs);
-                readResponse(stream, buffer, maxBytes, *cookieJar, origin, result);
+                ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                    http::async_write(
+                        stream, request,
+                        [c = std::forward<decltype(complete)>(complete)](
+                            boost::system::error_code e, std::size_t) mutable { c(e); });
+                });
+                if (ec) {
+                    result.error = "write request " + parsed.host + ": " + ec.message();
+                    return result;
+                }
 
-                boost::system::error_code shutdownEc;
-                stream.shutdown(shutdownEc);
+                readResponse(io, stream, tls.rwTimeoutUs, buffer, maxBytes, *cookieJar, origin, result);
+
+                runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                    stream.async_shutdown(
+                        [c = std::forward<decltype(complete)>(complete)](
+                            boost::system::error_code e) mutable { c(e); });
+                }); // best effort; bounded so a peer that never closes can't stall us
                 return result;
             }
 
             beast::tcp_stream stream(io);
-            applyTimeout(stream, tls.rwTimeoutUs);
-            stream.connect(endpoints);
-            applyTimeout(stream, tls.rwTimeoutUs);
-            http::write(stream, request);
-            applyTimeout(stream, tls.rwTimeoutUs);
-            readResponse(stream, buffer, maxBytes, *cookieJar, origin, result);
+            ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                stream.async_connect(
+                    endpoints,
+                    [c = std::forward<decltype(complete)>(complete)](
+                        boost::system::error_code e, const tcp::endpoint&) mutable { c(e); });
+            });
+            if (ec) {
+                result.error = "connect " + parsed.host + ": " + ec.message();
+                return result;
+            }
+
+            ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                http::async_write(
+                    stream, request,
+                    [c = std::forward<decltype(complete)>(complete)](
+                        boost::system::error_code e, std::size_t) mutable { c(e); });
+            });
+            if (ec) {
+                result.error = "write request " + parsed.host + ": " + ec.message();
+                return result;
+            }
+
+            readResponse(io, stream, tls.rwTimeoutUs, buffer, maxBytes, *cookieJar, origin, result);
 
             boost::system::error_code shutdownEc;
             stream.socket().shutdown(tcp::socket::shutdown_both, shutdownEc);
