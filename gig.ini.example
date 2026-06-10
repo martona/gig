@@ -18,6 +18,16 @@ base = https://frigate.lan/
 # cert = marton@mars11.crt
 # key  = marton@mars11.key
 
+# --- Frigate username/password auth ---
+# With user+password set, gig POSTs {base}/api/login at startup, carries the
+# returned frigate_token cookie on every request (API + video), and re-logs-in
+# every login-refresh seconds to keep the token fresh. Requires 'base'.
+# Independent of TLS auth above. To run plain TLS with NO client certificate
+# (and no cert picker/consent prompts), set 'ca' alone alongside user/password.
+# user = viewer
+# password = secret
+# login-refresh = 600
+
 # Skip server-certificate verification (testing only).
 # insecure = false
 

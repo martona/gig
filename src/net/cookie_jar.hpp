@@ -22,6 +22,9 @@ public:
     // Build a Cookie request-header value for origin, or empty if none are stored.
     std::string headerFor(const std::string& origin) const;
 
+    // True if a cookie with this name is stored for origin.
+    bool contains(const std::string& origin, const std::string& name) const;
+
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::map<std::string, std::string>> cookies_;

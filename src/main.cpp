@@ -3,6 +3,7 @@
 #include "discovery/frigate_discovery.h"
 #include "log.hpp"
 #include "net/cookie_jar.hpp"
+#include "net/frigate_auth.hpp"
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
 #include "net/win_cert_store.h"
@@ -106,6 +107,9 @@ struct ProgramOptions {
     std::string baseUrl;          // Frigate control-plane base; enables multi-camera discovery
     std::string url = DefaultUrl; // single stream, used only when baseUrl is empty
     std::string streamUrlTemplate;
+    std::string user;             // Frigate username/password login; needs both + baseUrl
+    std::string password;
+    int loginRefreshSeconds = 600;
     bool softwareDecode = false;
     int pollIntervalSeconds = 5;
     bool showOverlay = true;
@@ -163,6 +167,12 @@ bool applyIniSetting(ProgramOptions& options, const std::string& key, const std:
         options.url = value;
     } else if (key == "stream-url" || key == "stream_url") {
         options.streamUrlTemplate = value;
+    } else if (key == "user") {
+        options.user = value;
+    } else if (key == "password") {
+        options.password = value;
+    } else if (key == "login-refresh" || key == "login_refresh") {
+        options.loginRefreshSeconds = std::stoi(value);
     } else if (key == "ca") {
         options.tls.caFile = value;
     } else if (key == "cert") {
@@ -247,6 +257,22 @@ ProgramOptions loadConfig()
         && options.tls.certFile.empty()
         && options.tls.keyFile.empty();
 
+    // Frigate login needs both credential halves and a base URL to POST to.
+    if (options.user.empty() != options.password.empty()) {
+        gig::logWarning() << "gig.ini: 'user' and 'password' must both be set; ignoring login auth";
+        options.user.clear();
+        options.password.clear();
+    }
+    if (!options.user.empty() && options.baseUrl.empty()) {
+        gig::logWarning() << "gig.ini: user/password needs 'base' for the login endpoint; ignoring login auth";
+        options.user.clear();
+        options.password.clear();
+    }
+    if (!options.user.empty() && options.loginRefreshSeconds < 10) {
+        gig::logWarning() << "gig.ini: login-refresh below 10s; clamping to 10";
+        options.loginRefreshSeconds = 10;
+    }
+
     return options;
 }
 
@@ -308,6 +334,22 @@ int main(int argc, char** argv)
         // single --url camera (legacy/manual mode).
         auto sessionCache = std::make_shared<gig::TlsSessionCache>();
         auto cookieJar = std::make_shared<gig::CookieJar>();
+
+        // Native Frigate login: populate the shared cookie jar before the
+        // first API call so discovery already carries the frigate_token.
+        // Failure is fatal, like any other startup misconfiguration.
+        std::unique_ptr<gig::FrigateAuth> auth;
+        if (!options.user.empty()) {
+            gig::FrigateAuthConfig authConfig;
+            authConfig.baseUrl = options.baseUrl;
+            authConfig.user = options.user;
+            authConfig.password = options.password;
+            authConfig.refreshInterval = std::chrono::seconds(options.loginRefreshSeconds);
+            authConfig.tls = options.tls;
+            auth = std::make_unique<gig::FrigateAuth>(authConfig, sessionCache, cookieJar);
+            auth->loginOrThrow();
+        }
+
         std::vector<gig::CameraStream> cameras;
         if (!options.baseUrl.empty()) {
             gig::HttpClient client(options.baseUrl, options.tls, sessionCache, cookieJar);
@@ -340,6 +382,9 @@ int main(int argc, char** argv)
             sessionCache,
             cookieJar);
         supervisor.start();
+        if (auth) {
+            auth->startAutoRefresh();
+        }
 
         OverlayStats initialStats;
         initialStats.showDiagnostics = options.showOverlay;
@@ -467,6 +512,9 @@ int main(int argc, char** argv)
 
         SDL_RemoveEventWatch(liveResizeWatch, &resizeContext);
         gig::logInfo() << "shutting down";
+        if (auth) {
+            auth->stop();
+        }
         supervisor.stop();
         return 0;
     } catch (const std::exception& error) {

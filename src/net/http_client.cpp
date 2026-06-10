@@ -123,7 +123,12 @@ struct HttpClient::Impl {
         }
     }
 
-    HopResult fetchOnce(const std::string& url, std::size_t maxBytes)
+    HopResult fetchOnce(
+        const std::string& url,
+        std::size_t maxBytes,
+        http::verb method = http::verb::get,
+        const std::string& contentType = {},
+        const std::string& body = {})
     {
         HopResult result;
         result.finalUrl = url;
@@ -135,14 +140,19 @@ struct HttpClient::Impl {
             tcp::resolver resolver(io);
             const auto endpoints = resolver.resolve(parsed.host, parsed.port);
 
-            http::request<http::empty_body> request { http::verb::get, parsed.target, 11 };
+            http::request<http::string_body> request { method, parsed.target, 11 };
             request.set(http::field::host, hostHeader(parsed));
             request.set(http::field::user_agent, "frigate-d3d-poc");
             request.set(http::field::accept, "*/*");
+            if (!contentType.empty()) {
+                request.set(http::field::content_type, contentType);
+            }
             const std::string cookieValue = cookieJar->headerFor(origin);
             if (!cookieValue.empty()) {
                 request.set(http::field::cookie, cookieValue);
             }
+            request.body() = body;
+            request.prepare_payload();
 
             beast::flat_buffer buffer;
             if (parsed.scheme == "https") {
@@ -240,6 +250,43 @@ struct HttpClient::Impl {
         return out;
     }
 
+    HttpResponse post(
+        const std::string& pathOrUrl,
+        const std::string& contentType,
+        const std::string& body,
+        std::size_t maxBytes)
+    {
+        const std::string url = pathOrUrl.find("://") != std::string::npos
+            ? pathOrUrl
+            : joinUrl(baseUrl, pathOrUrl);
+
+        HopResult hop = fetchOnce(url, maxBytes, http::verb::post, contentType, body);
+
+        HttpResponse out;
+        out.ok = hop.ok;
+        out.status = hop.status;
+        out.reason = hop.reason;
+        out.body = std::move(hop.body);
+        out.truncated = hop.truncated;
+        out.finalUrl = hop.finalUrl;
+        out.error = hop.error;
+        if (hop.status == 0) {
+            out.ok = false;
+            if (out.error.empty()) {
+                out.error = "request failed";
+            }
+        } else if (isRedirectStatus(hop.status)) {
+            // Following would replay toward a target the endpoint should not
+            // have; surface the misconfiguration instead.
+            out.ok = false;
+            out.error = std::to_string(hop.status) + " " + hop.reason + " redirect to "
+                + (hop.redirectLocation.empty() ? "<missing Location>" : hop.redirectLocation);
+        } else if (!out.ok && out.error.empty()) {
+            out.error = std::to_string(hop.status) + " " + hop.reason;
+        }
+        return out;
+    }
+
     std::string baseUrl;
     TlsOptions tls;
     std::shared_ptr<TlsSessionCache> sessionCache;
@@ -262,6 +309,15 @@ HttpClient::~HttpClient() = default;
 HttpResponse HttpClient::get(const std::string& pathOrUrl, std::size_t maxBytes)
 {
     return impl_->get(pathOrUrl, maxBytes);
+}
+
+HttpResponse HttpClient::post(
+    const std::string& pathOrUrl,
+    const std::string& contentType,
+    const std::string& body,
+    std::size_t maxBytes)
+{
+    return impl_->post(pathOrUrl, contentType, body, maxBytes);
 }
 
 const std::string& HttpClient::baseUrl() const

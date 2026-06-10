@@ -36,6 +36,8 @@ add_executable(gig WIN32
     src/net/cng_tls.hpp
     src/net/cookie_jar.cpp
     src/net/cookie_jar.hpp
+    src/net/frigate_auth.cpp
+    src/net/frigate_auth.hpp
     src/net/http_client.cpp
     src/net/http_client.hpp
     src/net/tls_client.cpp

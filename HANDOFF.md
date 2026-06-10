@@ -8,8 +8,12 @@ against the user's Frigate. `PLAN.md` has the grid-milestone history.
 **Default auth is now the Windows store** (store trust roots + a CurrentUser\MY
 client cert via the CNG bridge) — used whenever no `ca`/`cert`/`key` is set in gig.ini;
 pops the Windows cert picker + one consent prompt on first use. PEM is the explicit
-fallback (set those keys). **The app is GUI-only: all configuration is via `gig.ini`
-next to the exe — there are no command-line options or subcommands.**
+fallback (set those keys). **Native Frigate user/password login is also in**
+(`user`/`password` in gig.ini → POST `{base}/api/login` → `frigate_token` cookie in the
+shared jar, re-login every `login-refresh` s) — independent of the TLS client-cert layer;
+the user is migrating to it because the cert picker can't be pinned. **The app is
+GUI-only: all configuration is via `gig.ini` next to the exe — there are no
+command-line options or subcommands.**
 
 ## What the app is
 
@@ -42,7 +46,16 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
   startup-stagger wait (CV) + event-driven read cancel on stop.
 - `src/discovery/frigate_discovery.*` — `/api/config` → cameras + stream URLs.
 - `src/health/stream_health.*` — bulk `/api/go2rtc/api/streams` byte-delta.
-- `src/net/http_client.*` — Boost.Beast mTLS client (control plane: discovery + health).
+- `src/net/http_client.*` — Boost.Beast mTLS client (control plane: discovery + health +
+  login). `get()` follows redirects; `post()` deliberately doesn't (a redirected POST =
+  misconfigured endpoint, reported as an error).
+- `src/net/frigate_auth.*` — **`FrigateAuth`**: native Frigate login. `login()` POSTs
+  `{base}/api/login` (`boost::json` body, so credential escaping is correct); the
+  `frigate_token` Set-Cookie lands in the shared jar via the normal response path, then
+  flows on every control-plane and video request automatically. Own refresh thread
+  (pollLoop-style CV stop): re-login every `refreshInterval` (default 600s), failed
+  refresh retries in 30s (old token stays valid meanwhile). Never logs the password.
+  Owns its own short-timeout (3s) HttpClient per the one-client-per-worker rule.
 - `src/net/tls_client.*` — **`TlsClient`** (the app-lifetime TLS holder: one shared
   `ssl::context`) + **`MediaStream`** (streaming HTTPS GET, de-chunked `buffer_body`,
   the custom-AVIO byte source).
@@ -53,8 +66,8 @@ unless asked. End commit messages with the `Co-Authored-By: Claude ...` line.
   signing bridge (RSA `RSA_METHOD` / EC `EC_KEY_METHOD` → `NCryptSignHash`) + a
   process-wide cached `WinClientCert` (one picker + one consent). RSA pins TLS 1.2 +
   PKCS#1; EC is TLS 1.3.
-- `src/net/cookie_jar.*` — thread-safe cookie jar shared by control plane + video
-  (seam for dropping mTLS → native Frigate auth later; empty under mTLS today).
+- `src/net/cookie_jar.*` — thread-safe cookie jar shared by control plane + video;
+  populated by `FrigateAuth` under login auth (empty under pure mTLS).
 - `src/net/tls_session_cache.*` — TLS resumption pool (ported from `../hitsc`), shared
   across control plane + all video connections.
 - `src/net/win_cert_store.*` — Win32/CNG cert picker + RSA & EC signers (used by `cng_tls`)
@@ -90,6 +103,16 @@ via the CNG bridge), or PEM when `ca`/`cert`/`key` are set in gig.ini. Control p
 each build their own `ssl::context` (both via `configureSslContext`) but share the one
 `TlsSessionCache`, `CookieJar`, and — via `cng_tls`'s process-wide cache — the one
 selected `WinClientCert`, so the picker + consent fire once.
+
+On top of (and independent of) the TLS layer: **native Frigate user/password login**
+(`user`/`password` + `base` in gig.ini → `FrigateAuth`). Login happens in `main()` before
+discovery (failure is fatal, like other startup misconfig); the refresh thread starts after
+the supervisor. The client cert remains handshake-driven — offered only if the server
+requests one — so both auth layers can coexist (mTLS proxy in front, Frigate JWT behind).
+**The no-picker recipe** for a server that doesn't want client certs: set `ca` alone (PEM
+trust, no client cert, no prompts) + `user`/`password`. Caveat: in winstore mode the picker
+still fires at startup even against a cert-less server, because the CNG bridge must know the
+key type before the handshake (the RSA→TLS1.2 pin) — see the provider note in future work.
 
 ## TLS / cert R&D — DONE and PROVEN (read before touching TLS for Phase 1)
 
@@ -157,19 +180,32 @@ Built + verified against the user's Frigate (full grid on store certs). What lan
 
 ## Possible future work (not started)
 
+- **Control-plane timeouts are fictional:** `http_client.cpp` (and thus the health +
+  login clients) uses sync Beast ops, and `expires_after` only arms *async* operations —
+  so `rw-timeout-us` does not actually bound connect/read there. Observed: a connect to a
+  filtered port (frigate.lan:8971) hangs to the OS TCP timeout (~20s+), sailing past the
+  3s clamp. The video path (`tls_client.cpp`) is async and really does time out. Fix =
+  convert HttpClient to the MediaStream async + `io.run()` pattern. Consequence today: a
+  hung login/health call can delay startup or the stop()-join by the OS timeout.
 - **Shrink the exe for real:** the Phase-2 `openssl`-feature drop did NOT shrink it (see
   the size note above). To actually cut size, trim FFmpeg's own surface via custom vcpkg
   port options — disable its network/protocol layer (we use zero FFmpeg protocols) and
   the demuxers/codecs we don't need (only h264/h265 + mpegts + swscale).
-- **Native Frigate auth:** the shared `CookieJar` is the seam — add a login flow that
-  populates it, then mTLS becomes optional.
-- **TLS 1.3 for RSA store certs:** would need a full OpenSSL 3.x *provider* (RSA-PSS),
-  replacing the legacy `RSA_METHOD` bridge. EC already does TLS 1.3.
+- **TLS 1.3 for RSA store certs / lazy client-cert selection:** both need a full OpenSSL
+  3.x *provider* (RSA-PSS), replacing the legacy `RSA_METHOD` bridge (EC already does
+  TLS 1.3). "Lazy" = pop the picker only when the server's handshake actually requests a
+  cert; impossible today because the bridge must know the key type up front to pin
+  RSA→TLS 1.2. **Likely never happens** — the user is switching to the native login auth
+  (now implemented) precisely because the cert picker can't be pinned/remembered, making
+  the mTLS path legacy. Kept here for reference per the user's request.
 
 ## Operational constraints for the next Claude
 
 - **Cannot run unattended:** the app with no `ca`/`cert`/`key` in gig.ini (the default →
   Windows store → cert picker + consent prompt). Hand store-cert runs to the user.
+  Login-auth runs against the user's Frigate need real credentials — hand those to the
+  user too (a deliberate bogus-creds run does work headless: login fails → fatal log
+  line before the error MessageBox; kill the process after grepping the log).
 - **Can run solo:** builds, and PEM grid runs — drop a `gig.ini` with `ca`/`cert`/`key`
   next to the exe (no consent). There are no CLI subcommands.
 - **This dev VM has no usable GPU** (D3D adapter is software/WARP) — HW decode
@@ -185,10 +221,17 @@ Built + verified against the user's Frigate (full grid on store certs). What lan
 ## Paths / facts
 
 - Config: `gig.ini` next to the exe (keys: base, url, stream-url, ca, cert, key,
-  software, overlay, insecure, poll-interval, rw-timeout-us). With no ca/cert/key →
-  Windows store. Template: `gig.ini.example` (tracked); the live one lives in the
-  gitignored `build/` so it isn't committed.
+  user, password, login-refresh, software, overlay, insecure, poll-interval,
+  rw-timeout-us). With no ca/cert/key → Windows store. user/password requires base
+  (warned + ignored otherwise). Template: `gig.ini.example` (tracked); the live one
+  lives in the gitignored `build/` so it isn't committed.
 - Frigate base: `https://frigate.lan/security` (host `frigate.lan:443`). 10 cameras.
+- Login-endpoint reality (verified June 2026): through the nginx proxy,
+  `{base}/api/login` never reaches Frigate — nginx intercepts it with a 302 to its own
+  `/basic-auth` page (`post()` reports exactly this). Frigate's direct authenticated port
+  `frigate.lan:8971` is NOT reachable from this dev VM. A successful-login run therefore
+  needs the user: real creds + a reachable endpoint (direct port exposed, or the proxy
+  passing `/api/login` through).
 - PEM (CurrentUser): CA `C:\Users\Marton\Desktop\winuty\gig\myca.pem`,
   client `...\marton@mars11.crt` / `.key` (RSA).
 - Windows store: CA in Trusted Root; client certs `marton@mars11` (RSA) and

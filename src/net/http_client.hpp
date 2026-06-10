@@ -45,6 +45,16 @@ public:
     // redirects and persisting cookies across calls.
     HttpResponse get(const std::string& pathOrUrl, std::size_t maxBytes = 4 * 1024 * 1024);
 
+    // POST a body to a path relative to the base URL (or an absolute URL).
+    // Response cookies land in the jar. Redirects are NOT followed: a
+    // redirected POST means a misconfigured endpoint and is reported as an
+    // error rather than replayed.
+    HttpResponse post(
+        const std::string& pathOrUrl,
+        const std::string& contentType,
+        const std::string& body,
+        std::size_t maxBytes = 1024 * 1024);
+
     const std::string& baseUrl() const;
 
 private:

@@ -39,6 +39,13 @@ void CookieJar::storeFromResponse(const std::string& origin, std::string_view he
     cookies_[origin][std::string(name)] = std::string(value);
 }
 
+bool CookieJar::contains(const std::string& origin, const std::string& name) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = cookies_.find(origin);
+    return found != cookies_.end() && found->second.count(name) != 0;
+}
+
 std::string CookieJar::headerFor(const std::string& origin) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
