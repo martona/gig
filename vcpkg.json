@@ -25,9 +25,6 @@
       "features": [
         "avcodec",
         "avformat",
-        "amf",
-        "nvcodec",
-        "qsv",
         "swscale"
       ]
     }

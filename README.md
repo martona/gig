@@ -11,7 +11,7 @@ The native pipeline:
 
 ## Build
 
-The Windows build script uses vcpkg manifest mode, CMake, Ninja, and the static triplet by default. It creates an isolated private vcpkg checkout under `build\vcpkg`, installs packages under `build\vcpkg-installed`, and keeps the vcpkg binary cache/downloads under `build`.
+The Windows build script uses vcpkg manifest mode, CMake, Ninja, and the static triplet by default. It creates an isolated private vcpkg checkout under `build\vcpkg`, installs packages under `build\vcpkg-installed`, and keeps the vcpkg binary cache/downloads under `build`. FFmpeg is built from a trimmed overlay port ([`vcpkg-ports/ffmpeg`](vcpkg-ports/ffmpeg/portfile.cmake)) that compiles only the surface gig uses — h264/hevc decoders + parsers, the mpegts demuxer, and the D3D11VA hwaccels — which roughly halves the exe.
 
 ```powershell
 .\scripts\build_windows.ps1
@@ -54,7 +54,5 @@ Two independent layers; mix them as your setup requires:
 
 ## Next Steps
 
-- Verify the shared-device D3D11VA zero-copy path with all cameras on real GPU hardware.
 - Justified/aspect-aware layout and a hero+spotters mode beyond the uniform grid.
-- Shrink the exe by trimming FFmpeg's unused surface (its network/protocol layer and unneeded demuxers/codecs).
 - A renderer abstraction for non-Windows backends.
