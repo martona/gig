@@ -4,6 +4,12 @@
 // loads icon resource 1 for the window/taskbar.
 1 ICON "gig.ico"
 
+// Application manifest (Common Controls v6 for umbra theming + supportedOS).
+// The linker's auto-generated manifest is disabled (/MANIFEST:NO in CMake) so
+// this is the sole manifest. RT_MANIFEST id 1 is the default process manifest;
+// it doesn't collide with the icon (different resource type).
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "gig.manifest"
+
 VS_VERSION_INFO VERSIONINFO
     FILEVERSION 0,1,0,0
     PRODUCTVERSION 0,1,0,0

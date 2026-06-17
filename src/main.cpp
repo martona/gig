@@ -24,11 +24,24 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <umbra.h>
 #endif
 
 namespace {
 
 #ifdef _WIN32
+// UTF-8 -> UTF-16 for the wide-string Win32/umbra APIs (e.g. DarkMessageBox).
+std::wstring widen(const std::string& text)
+{
+    if (text.empty()) {
+        return {};
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), needed);
+    return wide;
+}
+
 // Process CPU usage since the previous call, normalized so 100% == all cores busy.
 double sampleProcessCpuPercent()
 {
@@ -181,6 +194,11 @@ int main(int argc, char** argv)
     (void)argc;
     (void)argv; // GUI app; all configuration comes from the settings store
     try {
+#ifdef _WIN32
+        // Before any window: dark title bar + dark common dialogs/message boxes
+        // (so even a fatal config error below shows a dark box).
+        umbra::initDarkMode();
+#endif
         auto settings = gig::openSettingsStore();
         if (!settings->getInt("schema-version")) {
             settings->setInt("schema-version", 1); // first run: stamp for future migrations
@@ -209,6 +227,9 @@ int main(int argc, char** argv)
         if (const SDL_PropertiesID windowProps = SDL_GetWindowProperties(window.get())) {
             void* hwnd = SDL_GetPointerProperty(windowProps, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
             gig::setConsentParentWindow(hwnd);
+            if (hwnd) {
+                umbra::setDarkWndNotifySafe(static_cast<HWND>(hwnd)); // dark title bar + ctl-color
+            }
         }
 #endif
 
@@ -413,7 +434,7 @@ int main(int argc, char** argv)
     } catch (const std::exception& error) {
         gig::logError() << "fatal: " << error.what();
 #ifdef _WIN32
-        MessageBoxA(nullptr, error.what(), "gig", MB_ICONERROR | MB_OK);
+        umbra::DarkMessageBox(nullptr, widen(error.what()).c_str(), L"gig", MB_ICONERROR | MB_OK);
 #endif
         return 1;
     }

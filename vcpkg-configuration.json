@@ -1,5 +1,15 @@
 {
   "overlay-ports": [
     "./vcpkg-ports"
+  ],
+  "registries": [
+    {
+      "kind": "git",
+      "repository": "https://github.com/martona/WM_UMBRA",
+      "baseline": "206822a27974256728404cf612ebc8ac72d1f9e5",
+      "packages": [
+        "umbra"
+      ]
+    }
   ]
 }

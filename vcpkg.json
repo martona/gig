@@ -11,6 +11,7 @@
     },
     "boost-beast",
     "boost-json",
+    "umbra",
     "sdl3",
     {
       "name": "imgui",

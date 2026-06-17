@@ -17,6 +17,7 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(umbra CONFIG REQUIRED)
 
 add_executable(gig WIN32
     src/main.cpp
@@ -92,6 +93,7 @@ if(WIN32)
     )
 
     target_link_libraries(gig PRIVATE
+        umbra::umbra
         d3d11
         dxgi
         d3dcompiler
@@ -99,7 +101,15 @@ if(WIN32)
         crypt32
         cryptui
         ncrypt
+        uxtheme
+        dwmapi
+        comctl32
     )
+
+    # We embed our own application manifest via resources/gig.rc (Common Controls
+    # v6 for umbra). Stop the linker generating a competing default manifest --
+    # otherwise two RT_MANIFEST id 1 resources collide.
+    target_link_options(gig PRIVATE /MANIFEST:NO)
 endif()
 
 if(MSVC)

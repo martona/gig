@@ -97,7 +97,19 @@ scope means the value is readable only by this Windows user (fine; matches inten
 
 ---
 
-## M2 — umbra (WM_UMBRA) via git registry + Win32 dark mode
+## M2 — umbra (WM_UMBRA) via git registry + Win32 dark mode ✅ DONE (June 2026)
+
+**Landed:** umbra git registry in `vcpkg-configuration.json` (baseline `206822a…`,
+resolved umbra 1.1.3) + `"umbra"` dep; `find_package(umbra)` + `umbra::umbra` linked
+with `uxtheme dwmapi comctl32`. App manifest added (`resources/gig.manifest`, Common
+Controls v6 + supportedOS, **silent on DPI** so SDL keeps owning it) embedded via
+`gig.rc` `RT_MANIFEST` + `target_link_options(/MANIFEST:NO)`. `main.cpp`:
+`umbra::initDarkMode()` first thing in `try` (before any window, so fatal boxes are
+dark too), `umbra::setDarkWndNotifySafe(hwnd)` on the SDL window. Verified no-regression:
+manifest embeds (comctl6 string in exe), DPI still `scale: 2`, 10/10 live, 0.19s clean
+shutdown (umbra's subclass coexists with SDL). **Dark appearance itself is visual — user
+confirms.** **Not wired:** `WM_SETTINGCHANGE` live re-theme (SDL owns the message loop) —
+startup theme only; live light/dark flip needs an `SDL_SetWindowsMessageHook`, deferred.
 
 **Goal:** dark title bar + dark native common dialogs/message boxes.
 
@@ -136,7 +148,12 @@ HWND (the one we already grab for `setConsentParentWindow`,
 
 ---
 
-## M3 — MessageBox → umbra dark message box
+## M3 — MessageBox → umbra dark message box ✅ DONE (June 2026)
+
+**Landed:** the single `MessageBoxA` (fatal handler) → `umbra::DarkMessageBox(nullptr,
+widen(error.what()).c_str(), L"gig", …)` with a UTF-8→UTF-16 `widen()` helper in
+`main.cpp`. Null parent (window may not exist at fatal time) is fine — `initDarkMode()`
+ran first. CryptUI cert picker/consent dialogs are untouched (not MessageBox).
 
 **Goal:** the one fatal dialog renders dark.
 
