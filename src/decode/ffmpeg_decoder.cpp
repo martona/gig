@@ -668,7 +668,12 @@ void FfmpegDecoder::run()
         }
 
         if (!stopRequested_) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            // Interruptible reconnect backoff: stop() flips stopRequested_ and
+            // notifies startupCv_, so shutdown stays prompt even while a failing
+            // stream is between retries. A plain sleep_for here made the worker
+            // block the join for the full 2s (e.g. a down camera, or a bad URL).
+            std::unique_lock<std::mutex> lock(startupMutex_);
+            startupCv_.wait_for(lock, std::chrono::seconds(2), [this] { return stopRequested_.load(); });
         }
     }
 }

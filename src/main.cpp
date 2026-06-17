@@ -241,9 +241,15 @@ int main(int argc, char** argv)
         if (!options.baseUrl.empty()) {
             gig::HttpClient client(options.baseUrl, options.tls, sessionCache, cookieJar);
             cameras = gig::discoverCameras(client, options.streamUrlTemplate);
-        } else {
+        } else if (!options.url.empty()) {
             cameras.push_back({ "camera", "", options.url });
             gig::logInfo() << "no base configured; single camera " << options.url;
+        } else {
+            // Nothing configured -- fail fast with a clear message instead of
+            // spinning a doomed empty-URL decoder. (M5's settings dialog will
+            // replace this with an open-the-dialog-on-first-run prompt.)
+            throw std::runtime_error(
+                "no Frigate connection configured -- set 'base' (or 'url') under HKCU\\Software\\gig");
         }
         if (cameras.empty()) {
             throw std::runtime_error("no cameras to display");
