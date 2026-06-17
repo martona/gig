@@ -48,9 +48,6 @@ public:
     // transport error) in *error.
     bool login(std::string* error = nullptr);
 
-    // Startup variant: throws with a check-your-gig.ini message on failure.
-    void loginOrThrow();
-
     void startAutoRefresh();
     void stop();
 

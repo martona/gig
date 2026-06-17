@@ -166,7 +166,23 @@ picker/consent dialogs are *not* MessageBox; they're untouched here.)
 
 ---
 
-## M4 — App session extraction + live reconfigure
+## M4 — App session extraction + live reconfigure ✅ DONE (June 2026)
+
+**Landed:** `src/app/app_session.{h,cpp}` — `AppSession` owns auth + supervisor +
+the camera set behind `applyConfig(AppConfig)` = stop → login → discover → build
+supervisor → start. It **never throws** for login/discovery/config errors (returns
+`ApplyResult{ok,error}`, leaving a clean stopped session) so a live reconfigure can
+fail without taking the app down. `main()` is now thin: `StartupConfig` = `AppConfig
+session` + UI-only `showOverlay`; it builds one `AppSession`, calls `applyConfig`
+once (a startup failure is still fatal — no dialog yet), pushes `cameraLabels()` to
+the renderer, and the run loop reads `session.*` pass-throughs. **F5 = live reconnect**
+(re-login, re-discover, rebuild — verified: 2nd login + rediscover + all 10 decoders
+restart + relive, no app restart; the running frame-delta is reset so the rebuilt
+supervisor's 0-counter doesn't underflow the fps). Renderer rebind is just
+`setCameraLabels` (it already resizes `tiles_` per-frame). `FrigateAuth::loginOrThrow`
+removed (AppSession uses `login()`). Verified: startup 10/10, F5 reconnect clean,
+steady-state 10/10 ~241fps, 0.21s shutdown. The fatal box is `umbra::DarkMessageBox`;
+the reconnect-failed box is owned to the window via `mainHwnd`.
 
 **Goal:** make login→discover→supervisor a thing that can be torn down and rebuilt
 on command, so the config dialog applies without a restart. **This is the hidden

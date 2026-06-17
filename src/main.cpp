@@ -1,10 +1,6 @@
-#include "app/camera_supervisor.h"
-#include "decode/ffmpeg_decoder.h"
-#include "discovery/frigate_discovery.h"
+#include "app/app_session.h"
 #include "log.hpp"
 #include "net/cookie_jar.hpp"
-#include "net/frigate_auth.hpp"
-#include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
 #include "net/win_cert_store.h"
 #include "platform/settings_store.hpp"
@@ -84,7 +80,7 @@ double sampleProcessCpuPercent() { return 0.0; }
 
 struct ResizeWatchContext {
     VideoRenderer* renderer = nullptr;
-    gig::CameraSupervisor* supervisor = nullptr;
+    gig::AppSession* session = nullptr;
 };
 
 // Runs synchronously while SDL pumps messages -- including inside Windows' modal
@@ -94,17 +90,17 @@ struct ResizeWatchContext {
 bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
 {
     auto* context = static_cast<ResizeWatchContext*>(userdata);
-    if (!context || !context->renderer || !context->supervisor) {
+    if (!context || !context->renderer || !context->session) {
         return true;
     }
     switch (event->type) {
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         context->renderer->resize();
-        context->renderer->render(context->supervisor->snapshotFrames());
+        context->renderer->render(context->session->snapshotFrames());
         break;
     case SDL_EVENT_WINDOW_EXPOSED:
-        context->renderer->render(context->supervisor->snapshotFrames());
+        context->renderer->render(context->session->snapshotFrames());
         break;
     default:
         break;
@@ -112,64 +108,58 @@ bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
     return true;
 }
 
-struct ProgramOptions {
-    std::string baseUrl;          // Frigate control-plane base; enables multi-camera discovery
-    std::string url;              // single stream, used only when baseUrl is empty
-    std::string streamUrlTemplate;
-    std::string user;             // Frigate username/password login; needs both + baseUrl
-    std::string password;
-    int loginRefreshSeconds = 600;
-    bool softwareDecode = false;
-    int pollIntervalSeconds = 5;
+// All startup settings: the reconfigurable connection/decode set (handed to
+// AppSession) plus the UI-only diagnostics overlay (applied to the renderer).
+struct StartupConfig {
+    gig::AppConfig session;
     bool showOverlay = true;
-    TlsOptions tls;
 };
 
-// Read all settings from the platform store into ProgramOptions, applying the
-// same derivation + validation the ini loader did. Missing values fall back to
-// defaults; the store is the sole configuration source. The password is the one
-// DPAPI-encrypted value.
-ProgramOptions loadConfig(const gig::SettingsStore& store)
+// Read all settings from the platform store, applying the same derivation +
+// validation the ini loader did. Missing values fall back to defaults; the store
+// is the sole configuration source. The password is the one DPAPI-encrypted value.
+StartupConfig loadConfig(const gig::SettingsStore& store)
 {
-    ProgramOptions options;
-    options.baseUrl = store.getString("base").value_or(std::string());
-    options.url = store.getString("url").value_or(std::string());
-    options.streamUrlTemplate = store.getString("stream-url").value_or(std::string());
-    options.user = store.getString("user").value_or(std::string());
-    options.password = store.getString("password", /*encrypted=*/true).value_or(std::string());
-    options.loginRefreshSeconds = static_cast<int>(store.getInt("login-refresh").value_or(600));
-    options.tls.caFile = store.getString("ca").value_or(std::string());
-    options.tls.certFile = store.getString("cert").value_or(std::string());
-    options.tls.keyFile = store.getString("key").value_or(std::string());
-    options.softwareDecode = store.getBool("software").value_or(false);
-    options.showOverlay = store.getBool("overlay").value_or(true);
-    options.tls.verifyServer = !store.getBool("insecure").value_or(false);
-    options.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
-    options.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
+    StartupConfig cfg;
+    gig::AppConfig& s = cfg.session;
+    s.baseUrl = store.getString("base").value_or(std::string());
+    s.url = store.getString("url").value_or(std::string());
+    s.streamUrlTemplate = store.getString("stream-url").value_or(std::string());
+    s.user = store.getString("user").value_or(std::string());
+    s.password = store.getString("password", /*encrypted=*/true).value_or(std::string());
+    s.loginRefreshSeconds = static_cast<int>(store.getInt("login-refresh").value_or(600));
+    s.tls.caFile = store.getString("ca").value_or(std::string());
+    s.tls.certFile = store.getString("cert").value_or(std::string());
+    s.tls.keyFile = store.getString("key").value_or(std::string());
+    s.softwareDecode = store.getBool("software").value_or(false);
+    cfg.showOverlay = store.getBool("overlay").value_or(true);
+    s.tls.verifyServer = !store.getBool("insecure").value_or(false);
+    s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
+    s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
 
     // The Windows certificate store is implicit when no PEM material is given:
     // store trust roots for server verification + a CurrentUser\MY client cert.
-    options.tls.useWindowsStore = options.tls.caFile.empty()
-        && options.tls.certFile.empty()
-        && options.tls.keyFile.empty();
+    s.tls.useWindowsStore = s.tls.caFile.empty()
+        && s.tls.certFile.empty()
+        && s.tls.keyFile.empty();
 
     // Frigate login needs both credential halves and a base URL to POST to.
-    if (options.user.empty() != options.password.empty()) {
+    if (s.user.empty() != s.password.empty()) {
         gig::logWarning() << "settings: 'user' and 'password' must both be set; ignoring login auth";
-        options.user.clear();
-        options.password.clear();
+        s.user.clear();
+        s.password.clear();
     }
-    if (!options.user.empty() && options.baseUrl.empty()) {
+    if (!s.user.empty() && s.baseUrl.empty()) {
         gig::logWarning() << "settings: user/password needs 'base' for the login endpoint; ignoring login auth";
-        options.user.clear();
-        options.password.clear();
+        s.user.clear();
+        s.password.clear();
     }
-    if (!options.user.empty() && options.loginRefreshSeconds < 10) {
+    if (!s.user.empty() && s.loginRefreshSeconds < 10) {
         gig::logWarning() << "settings: login-refresh below 10s; clamping to 10";
-        options.loginRefreshSeconds = 10;
+        s.loginRefreshSeconds = 10;
     }
 
-    return options;
+    return cfg;
 }
 
 class SdlLifetime {
@@ -203,7 +193,7 @@ int main(int argc, char** argv)
         if (!settings->getInt("schema-version")) {
             settings->setInt("schema-version", 1); // first run: stamp for future migrations
         }
-        const ProgramOptions options = loadConfig(*settings);
+        const StartupConfig cfg = loadConfig(*settings);
 
         SdlLifetime sdl;
 
@@ -219,93 +209,47 @@ int main(int argc, char** argv)
             throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
         }
 
+        void* mainHwnd = nullptr; // for owning the reconnect message box to the window
 #ifdef _WIN32
         // Own the Windows cert picker + CNG consent / key-access prompts to our
         // window so they are modal to it: a disabled main window can't be closed
         // mid-prompt, which would otherwise deadlock shutdown (join) against a
         // thread blocked in the prompt.
         if (const SDL_PropertiesID windowProps = SDL_GetWindowProperties(window.get())) {
-            void* hwnd = SDL_GetPointerProperty(windowProps, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-            gig::setConsentParentWindow(hwnd);
-            if (hwnd) {
-                umbra::setDarkWndNotifySafe(static_cast<HWND>(hwnd)); // dark title bar + ctl-color
+            mainHwnd = SDL_GetPointerProperty(windowProps, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+            gig::setConsentParentWindow(mainHwnd);
+            if (mainHwnd) {
+                umbra::setDarkWndNotifySafe(static_cast<HWND>(mainHwnd)); // dark title bar + ctl-color
             }
         }
 #endif
+        (void)mainHwnd;
 
         auto renderer = createD3D11Renderer();
         if (!renderer->initialize(window.get())) {
             return 1;
         }
 
-        // Resolve the camera set: discover from --base, else fall back to the
-        // single --url camera (legacy/manual mode).
+        // The app-lifetime TLS resumption pool + cookie jar, shared across the
+        // control plane and video and preserved across reconnects.
         auto sessionCache = std::make_shared<gig::TlsSessionCache>();
         auto cookieJar = std::make_shared<gig::CookieJar>();
 
-        // Native Frigate login: populate the shared cookie jar before the
-        // first API call so discovery already carries the frigate_token.
-        // Failure is fatal, like any other startup misconfiguration.
-        std::unique_ptr<gig::FrigateAuth> auth;
-        if (!options.user.empty()) {
-            gig::FrigateAuthConfig authConfig;
-            authConfig.baseUrl = options.baseUrl;
-            authConfig.user = options.user;
-            authConfig.password = options.password;
-            authConfig.refreshInterval = std::chrono::seconds(options.loginRefreshSeconds);
-            authConfig.tls = options.tls;
-            auth = std::make_unique<gig::FrigateAuth>(authConfig, sessionCache, cookieJar);
-            auth->loginOrThrow();
+        // The reconfigurable subsystem (login -> discover -> supervisor). Bring
+        // it up once here; F5 (and, later, the settings dialog) re-applies it
+        // live. A startup failure is fatal -- there's no dialog yet to fix it in.
+        gig::AppSession session(renderer->d3d11DecodeContext(), sessionCache, cookieJar);
+        if (const gig::ApplyResult applied = session.applyConfig(cfg.session); !applied.ok) {
+            throw std::runtime_error(applied.error);
         }
-
-        std::vector<gig::CameraStream> cameras;
-        if (!options.baseUrl.empty()) {
-            gig::HttpClient client(options.baseUrl, options.tls, sessionCache, cookieJar);
-            cameras = gig::discoverCameras(client, options.streamUrlTemplate);
-        } else if (!options.url.empty()) {
-            cameras.push_back({ "camera", "", options.url });
-            gig::logInfo() << "no base configured; single camera " << options.url;
-        } else {
-            // Nothing configured -- fail fast with a clear message instead of
-            // spinning a doomed empty-URL decoder. (M5's settings dialog will
-            // replace this with an open-the-dialog-on-first-run prompt.)
-            throw std::runtime_error(
-                "no Frigate connection configured -- set 'base' (or 'url') under HKCU\\Software\\gig");
-        }
-        if (cameras.empty()) {
-            throw std::runtime_error("no cameras to display");
-        }
-
-        std::vector<std::string> cameraLabels;
-        cameraLabels.reserve(cameras.size());
-        for (const gig::CameraStream& camera : cameras) {
-            cameraLabels.push_back(camera.streamName.empty() ? camera.cameraName : camera.streamName);
-        }
-        renderer->setCameraLabels(cameraLabels);
-
-        gig::SupervisorConfig supervisorConfig;
-        supervisorConfig.baseUrl = options.baseUrl;
-        supervisorConfig.tls = options.tls;
-        supervisorConfig.softwareDecode = options.softwareDecode;
-        supervisorConfig.pollInterval = std::chrono::seconds(options.pollIntervalSeconds);
-
-        gig::CameraSupervisor supervisor(
-            std::move(cameras),
-            supervisorConfig,
-            renderer->d3d11DecodeContext(),
-            sessionCache,
-            cookieJar);
-        supervisor.start();
-        if (auth) {
-            auth->startAutoRefresh();
-        }
+        renderer->setCameraLabels(session.cameraLabels());
 
         OverlayStats initialStats;
-        initialStats.showDiagnostics = options.showOverlay;
+        initialStats.showDiagnostics = cfg.showOverlay;
         renderer->setDiagnostics(initialStats);
 
         // Keep the grid reflowing while the window is actively resized.
-        ResizeWatchContext resizeContext { renderer.get(), &supervisor };
+        ResizeWatchContext resizeContext { renderer.get(), &session };
         SDL_AddEventWatch(liveResizeWatch, &resizeContext);
 
         bool running = true;
@@ -339,6 +283,27 @@ int main(int argc, char** argv)
                     }
                     continue;
                 }
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) {
+                    // Reconnect live: re-login, re-discover, rebuild the supervisor
+                    // with the current config -- no restart. (M5's settings dialog
+                    // will drive this same path with edited settings.)
+                    gig::logInfo() << "reconnect requested (F5)";
+                    renderer->setFocusedTile(-1);
+                    const gig::ApplyResult result = session.applyConfig(cfg.session);
+                    renderer->setCameraLabels(session.cameraLabels());
+                    // The rebuilt supervisor restarts its frame counter at 0, so
+                    // reset the running deltas to avoid a one-tick bogus fps.
+                    lastTitleFrames = 0;
+                    lastStatsFrames = 0;
+                    if (!result.ok) {
+                        gig::logError() << "reconnect failed: " << result.error;
+#ifdef _WIN32
+                        umbra::DarkMessageBox(static_cast<HWND>(mainHwnd), widen(result.error).c_str(),
+                            L"gig - reconnect failed", MB_ICONERROR | MB_OK);
+#endif
+                    }
+                    continue;
+                }
                 if (imguiUsed) {
                     continue; // the log view (ImGui) consumed this event
                 }
@@ -351,8 +316,8 @@ int main(int argc, char** argv)
                         SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
                         if (windowWidth > 0 && windowHeight > 0) {
                             // Match the renderer's grid (cameras + optional diagnostics cell).
-                            const std::size_t cameraCount = supervisor.cameraCount();
-                            const int effective = static_cast<int>(cameraCount) + (options.showOverlay ? 1 : 0);
+                            const std::size_t cameraCount = session.cameraCount();
+                            const int effective = static_cast<int>(cameraCount) + (cfg.showOverlay ? 1 : 0);
                             const gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight);
                             const auto inCell = [&](const gig::TileRect& cell) {
                                 return event.button.x >= cell.x && event.button.x < cell.x + cell.width
@@ -367,7 +332,7 @@ int main(int argc, char** argv)
                                 }
                             }
                             // The synthetic diagnostics tile toggles the log view.
-                            if (!focusedOne && options.showOverlay && cameraCount < layout.tiles.size()
+                            if (!focusedOne && cfg.showOverlay && cameraCount < layout.tiles.size()
                                 && inCell(layout.tiles[cameraCount])) {
                                 renderer->setLogViewVisible(!renderer->logViewVisible());
                             }
@@ -378,42 +343,42 @@ int main(int argc, char** argv)
                 }
             }
 
-            const std::vector<std::shared_ptr<VideoFrame>> frames = supervisor.snapshotFrames();
+            const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
             renderer->render(frames);
 
             const auto now = std::chrono::steady_clock::now();
             if (now - lastTitleUpdate > std::chrono::seconds(1)) {
                 const double elapsed = std::chrono::duration<double>(now - lastTitleUpdate).count();
                 lastTitleUpdate = now;
-                const std::uint64_t total = supervisor.totalDecodedFrames();
+                const std::uint64_t total = session.totalDecodedFrames();
                 const double fps = elapsed > 0.0 ? static_cast<double>(total - lastTitleFrames) / elapsed : 0.0;
                 lastTitleFrames = total;
 
                 OverlayStats stats;
-                stats.showDiagnostics = options.showOverlay;
-                stats.camerasOnline = supervisor.liveCameraCount();
-                stats.camerasOffline = static_cast<int>(supervisor.cameraCount()) - supervisor.liveCameraCount();
+                stats.showDiagnostics = cfg.showOverlay;
+                stats.camerasOnline = session.liveCameraCount();
+                stats.camerasOffline = static_cast<int>(session.cameraCount()) - session.liveCameraCount();
                 stats.fps = fps;
                 stats.framesTotal = total;
-                stats.kbps = supervisor.ingestKbps();
+                stats.kbps = session.ingestKbps();
                 stats.cpuPercent = sampleProcessCpuPercent();
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;
 
                 std::string title = "gig - " + std::to_string(stats.camerasOnline)
-                    + "/" + std::to_string(supervisor.cameraCount()) + " live - frames "
+                    + "/" + std::to_string(session.cameraCount()) + " live - frames "
                     + std::to_string(total);
                 SDL_SetWindowTitle(window.get(), title.c_str());
             }
 
             if (now - lastStatsLog > std::chrono::seconds(5)) {
-                const std::uint64_t total = supervisor.totalDecodedFrames();
+                const std::uint64_t total = session.totalDecodedFrames();
                 const double seconds = std::chrono::duration<double>(now - lastStatsLog).count();
                 const double fps = seconds > 0.0 ? static_cast<double>(total - lastStatsFrames) / seconds : 0.0;
                 gig::logInfo() << "decoded " << total << " frames total ("
                                << static_cast<int>(fps + 0.5) << "/s), live "
-                               << supervisor.liveCameraCount() << "/" << supervisor.cameraCount()
-                               << ", ingest " << supervisor.ingestKbps() << " kbps, cpu "
+                               << session.liveCameraCount() << "/" << session.cameraCount()
+                               << ", ingest " << session.ingestKbps() << " kbps, cpu "
                                << static_cast<int>(lastCpuPercent + 0.5) << "%";
                 lastStatsLog = now;
                 lastStatsFrames = total;
@@ -426,10 +391,7 @@ int main(int argc, char** argv)
 
         SDL_RemoveEventWatch(liveResizeWatch, &resizeContext);
         gig::logInfo() << "shutting down";
-        if (auth) {
-            auth->stop();
-        }
-        supervisor.stop();
+        session.stop();
         return 0;
     } catch (const std::exception& error) {
         gig::logError() << "fatal: " << error.what();

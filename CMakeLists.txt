@@ -23,6 +23,8 @@ add_executable(gig WIN32
     src/main.cpp
     src/log.cpp
     src/log.hpp
+    src/app/app_session.cpp
+    src/app/app_session.h
     src/app/camera_supervisor.cpp
     src/app/camera_supervisor.h
     src/d3d11_decode_context.h

@@ -43,7 +43,7 @@ $blob = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.Get
 Set-ItemProperty 'HKCU:\Software\gig' -Name password -Value $blob -Type Binary
 ```
 
-Launch `gig.exe`. Each tile is labeled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU; clicking it toggles a full-window log view (Esc or the ✕ closes it). Click a camera tile to zoom it to fill the window; click again (or press Esc) to return to the grid. Esc in the grid quits.
+Launch `gig.exe`. Each tile is labeled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU; clicking it toggles a full-window log view (Esc or the ✕ closes it). Click a camera tile to zoom it to fill the window; click again (or press Esc) to return to the grid. **F5** reconnects (re-login, re-discover, rebuild) without restarting. Esc in the grid quits.
 
 ### Authentication
 

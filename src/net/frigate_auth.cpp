@@ -90,17 +90,6 @@ bool FrigateAuth::login(std::string* error)
     return true;
 }
 
-void FrigateAuth::loginOrThrow()
-{
-    std::string error;
-    if (!login(&error)) {
-        throw std::runtime_error(
-            "Frigate login failed for user '" + config_.user + "': " + error
-            + " -- check user/password in gig.ini");
-    }
-    logInfo() << "frigate auth: logged in to " << config_.baseUrl << " as '" << config_.user << "'";
-}
-
 void FrigateAuth::startAutoRefresh()
 {
     if (thread_.joinable()) {
