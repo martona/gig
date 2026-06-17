@@ -50,6 +50,8 @@ add_executable(gig WIN32
     src/net/url.h
     src/net/win_cert_store.cpp
     src/net/win_cert_store.h
+    src/platform/settings_store.hpp
+    src/platform/settings_store_win.cpp
     src/render/d3d11_renderer.cpp
     src/render/grid_layout.cpp
     src/render/grid_layout.h

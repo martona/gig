@@ -7,6 +7,7 @@
 #include "net/http_client.hpp"
 #include "net/tls_session_cache.hpp"
 #include "net/win_cert_store.h"
+#include "platform/settings_store.hpp"
 #include "render/grid_layout.h"
 #include "render/video_renderer.h"
 #include "video_frame.h"
@@ -14,10 +15,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
-#include <cctype>
 #include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -29,8 +27,6 @@
 #endif
 
 namespace {
-
-constexpr const char* DefaultUrl = "https://frigate.lan/security-go2rtc/api/stream.ts?src=frontgate";
 
 #ifdef _WIN32
 // Process CPU usage since the previous call, normalized so 100% == all cores busy.
@@ -105,7 +101,7 @@ bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
 
 struct ProgramOptions {
     std::string baseUrl;          // Frigate control-plane base; enables multi-camera discovery
-    std::string url = DefaultUrl; // single stream, used only when baseUrl is empty
+    std::string url;              // single stream, used only when baseUrl is empty
     std::string streamUrlTemplate;
     std::string user;             // Frigate username/password login; needs both + baseUrl
     std::string password;
@@ -116,140 +112,27 @@ struct ProgramOptions {
     TlsOptions tls;
 };
 
-// Directory containing the running executable (so gig.ini sits next to it).
-std::filesystem::path exeDirectory()
-{
-#ifdef _WIN32
-    wchar_t buffer[MAX_PATH];
-    const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH) {
-        return {};
-    }
-    return std::filesystem::path(buffer, buffer + length).parent_path();
-#else
-    return {};
-#endif
-}
-
-std::string trimWhitespace(const std::string& value)
-{
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return {};
-    }
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1);
-}
-
-std::string stripQuotes(std::string value)
-{
-    if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') && value.back() == value.front()) {
-        value = value.substr(1, value.size() - 2);
-    }
-    return value;
-}
-
-bool iniTruthy(std::string value)
-{
-    for (char& ch : value) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-    return value == "1" || value == "true" || value == "yes" || value == "on";
-}
-
-// Apply one gig.ini key=value. Returns false for an unrecognized key. Throws
-// (caught by the caller) on a malformed numeric value.
-bool applyIniSetting(ProgramOptions& options, const std::string& key, const std::string& value)
-{
-    if (key == "base") {
-        options.baseUrl = value;
-    } else if (key == "url") {
-        options.url = value;
-    } else if (key == "stream-url" || key == "stream_url") {
-        options.streamUrlTemplate = value;
-    } else if (key == "user") {
-        options.user = value;
-    } else if (key == "password") {
-        options.password = value;
-    } else if (key == "login-refresh" || key == "login_refresh") {
-        options.loginRefreshSeconds = std::stoi(value);
-    } else if (key == "ca") {
-        options.tls.caFile = value;
-    } else if (key == "cert") {
-        options.tls.certFile = value;
-    } else if (key == "key") {
-        options.tls.keyFile = value;
-    } else if (key == "software") {
-        options.softwareDecode = iniTruthy(value);
-    } else if (key == "overlay") {
-        options.showOverlay = iniTruthy(value);
-    } else if (key == "insecure") {
-        options.tls.verifyServer = !iniTruthy(value);
-    } else if (key == "poll-interval" || key == "poll_interval") {
-        options.pollIntervalSeconds = std::stoi(value);
-    } else if (key == "rw-timeout-us" || key == "rw_timeout_us") {
-        options.tls.rwTimeoutUs = std::stoll(value);
-    } else {
-        return false;
-    }
-    return true;
-}
-
-// Load settings from gig.ini (next to the exe) into `options` -- the only
-// configuration source. A missing file is silently ignored; bad lines warn but
-// don't abort.
-void applyIniConfig(ProgramOptions& options)
-{
-    const std::filesystem::path dir = exeDirectory();
-    if (dir.empty()) {
-        return;
-    }
-    const std::filesystem::path path = dir / "gig.ini";
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec)) {
-        return;
-    }
-
-    std::ifstream file(path);
-    if (!file) {
-        return;
-    }
-
-    int applied = 0;
-    int lineNumber = 0;
-    std::string line;
-    while (std::getline(file, line)) {
-        ++lineNumber;
-        const std::string trimmed = trimWhitespace(line);
-        if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';' || trimmed.front() == '[') {
-            continue;
-        }
-        const std::size_t equals = trimmed.find('=');
-        if (equals == std::string::npos) {
-            continue;
-        }
-        std::string key = trimWhitespace(trimmed.substr(0, equals));
-        for (char& ch : key) {
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        }
-        const std::string value = stripQuotes(trimWhitespace(trimmed.substr(equals + 1)));
-        try {
-            if (applyIniSetting(options, key, value)) {
-                ++applied;
-            } else {
-                gig::logWarning() << "gig.ini: ignoring unknown key '" << key << "' (line " << lineNumber << ")";
-            }
-        } catch (const std::exception& error) {
-            gig::logWarning() << "gig.ini: bad value for '" << key << "' (line " << lineNumber << "): " << error.what();
-        }
-    }
-    gig::logInfo() << "gig.ini: applied " << applied << " setting(s) from " << path.string();
-}
-
-ProgramOptions loadConfig()
+// Read all settings from the platform store into ProgramOptions, applying the
+// same derivation + validation the ini loader did. Missing values fall back to
+// defaults; the store is the sole configuration source. The password is the one
+// DPAPI-encrypted value.
+ProgramOptions loadConfig(const gig::SettingsStore& store)
 {
     ProgramOptions options;
-    applyIniConfig(options);
+    options.baseUrl = store.getString("base").value_or(std::string());
+    options.url = store.getString("url").value_or(std::string());
+    options.streamUrlTemplate = store.getString("stream-url").value_or(std::string());
+    options.user = store.getString("user").value_or(std::string());
+    options.password = store.getString("password", /*encrypted=*/true).value_or(std::string());
+    options.loginRefreshSeconds = static_cast<int>(store.getInt("login-refresh").value_or(600));
+    options.tls.caFile = store.getString("ca").value_or(std::string());
+    options.tls.certFile = store.getString("cert").value_or(std::string());
+    options.tls.keyFile = store.getString("key").value_or(std::string());
+    options.softwareDecode = store.getBool("software").value_or(false);
+    options.showOverlay = store.getBool("overlay").value_or(true);
+    options.tls.verifyServer = !store.getBool("insecure").value_or(false);
+    options.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
+    options.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
 
     // The Windows certificate store is implicit when no PEM material is given:
     // store trust roots for server verification + a CurrentUser\MY client cert.
@@ -259,17 +142,17 @@ ProgramOptions loadConfig()
 
     // Frigate login needs both credential halves and a base URL to POST to.
     if (options.user.empty() != options.password.empty()) {
-        gig::logWarning() << "gig.ini: 'user' and 'password' must both be set; ignoring login auth";
+        gig::logWarning() << "settings: 'user' and 'password' must both be set; ignoring login auth";
         options.user.clear();
         options.password.clear();
     }
     if (!options.user.empty() && options.baseUrl.empty()) {
-        gig::logWarning() << "gig.ini: user/password needs 'base' for the login endpoint; ignoring login auth";
+        gig::logWarning() << "settings: user/password needs 'base' for the login endpoint; ignoring login auth";
         options.user.clear();
         options.password.clear();
     }
     if (!options.user.empty() && options.loginRefreshSeconds < 10) {
-        gig::logWarning() << "gig.ini: login-refresh below 10s; clamping to 10";
+        gig::logWarning() << "settings: login-refresh below 10s; clamping to 10";
         options.loginRefreshSeconds = 10;
     }
 
@@ -296,9 +179,13 @@ public:
 int main(int argc, char** argv)
 {
     (void)argc;
-    (void)argv; // GUI app; all configuration comes from gig.ini
+    (void)argv; // GUI app; all configuration comes from the settings store
     try {
-        const ProgramOptions options = loadConfig();
+        auto settings = gig::openSettingsStore();
+        if (!settings->getInt("schema-version")) {
+            settings->setInt("schema-version", 1); // first run: stamp for future migrations
+        }
+        const ProgramOptions options = loadConfig(*settings);
 
         SdlLifetime sdl;
 

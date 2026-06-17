@@ -170,7 +170,7 @@ struct HttpClient::Impl {
 
             http::request<http::string_body> request { method, parsed.target, 11 };
             request.set(http::field::host, hostHeader(parsed));
-            request.set(http::field::user_agent, "frigate-d3d-poc");
+            request.set(http::field::user_agent, "gig");
             request.set(http::field::accept, "*/*");
             if (!contentType.empty()) {
                 request.set(http::field::content_type, contentType);
