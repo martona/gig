@@ -1,5 +1,6 @@
 #include "app/app_session.h"
 #include "log.hpp"
+#include "net/cert_pin.hpp"
 #include "net/cookie_jar.hpp"
 #include "net/tls_session_cache.hpp"
 #include "net/win_cert_store.h"
@@ -37,6 +38,34 @@ std::wstring widen(const std::string& text)
     std::wstring wide(static_cast<std::size_t>(needed), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), needed);
     return wide;
+}
+
+// Ask whether to pin an untrusted / changed server certificate. "No" is the
+// default button (safer). Returns true to pin.
+bool promptPinDecision(void* parentHwnd, const gig::PendingPinDecision& decision)
+{
+    std::string message;
+    if (decision.changed) {
+        message = "WARNING: the TLS certificate for " + decision.host + " has CHANGED.\n\n"
+            "Previously pinned (SPKI-SHA256):\n  " + decision.previousSpki + "\n"
+            "Now presented:\n  " + decision.spki + "\n\n"
+            "Subject: " + decision.subject + "\n"
+            "Expires: " + decision.notAfter + "\n"
+            "Reason:  " + decision.errorText + "\n\n"
+            "This can be a normal renewal -- or an interception attempt. "
+            "Pin the new certificate and trust it?";
+    } else {
+        message = "The TLS certificate for " + decision.host + " is not trusted.\n\n"
+            "Reason:  " + decision.errorText + "\n"
+            "Subject: " + decision.subject + "\n"
+            "Expires: " + decision.notAfter + "\n"
+            "SPKI-SHA256:\n  " + decision.spki + "\n\n"
+            "Pin this certificate and trust it from now on?";
+    }
+    const UINT icon = decision.changed ? MB_ICONWARNING : MB_ICONQUESTION;
+    const int result = umbra::DarkMessageBox(static_cast<HWND>(parentHwnd), widen(message).c_str(),
+        L"gig - certificate", MB_YESNO | icon | MB_DEFBUTTON2);
+    return result == IDYES;
 }
 
 // Process CPU usage since the previous call, normalized so 100% == all cores busy.
@@ -221,6 +250,11 @@ int main(int argc, char** argv)
         }
         StartupConfig cfg = loadConfig(*settings);
 
+        // Cert pinning is process-wide: the TLS verify callback (deep in OpenSSL)
+        // reaches this via certPinStore(). Register before any TLS connection.
+        gig::CertPinStore pinStore(settings);
+        gig::setCertPinStore(&pinStore);
+
         SdlLifetime sdl;
 
         auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(
@@ -267,9 +301,21 @@ int main(int argc, char** argv)
         gig::AppSession session(renderer->d3d11DecodeContext(), sessionCache, cookieJar);
         gig::ApplyResult applied = session.applyConfig(cfg.session);
 #ifdef _WIN32
-        // First run / unusable config: let the user fix it in the settings dialog
-        // instead of dying. Keep offering until it applies or they cancel out.
         while (!applied.ok) {
+            // A certificate-trust failure is a pin decision, not a config problem.
+            if (auto pending = pinStore.takePending()) {
+                if (promptPinDecision(mainHwnd, *pending)) {
+                    pinStore.acceptPin(*pending);
+                    gig::logInfo() << "pinned certificate for " << pending->host;
+                } else {
+                    pinStore.declinePin(*pending);
+                    throw std::runtime_error("certificate for " + pending->host + " was not trusted");
+                }
+                applied = session.applyConfig(cfg.session);
+                continue;
+            }
+            // First run / unusable config: let the user fix it in the settings
+            // dialog instead of dying. Keep offering until it applies or cancel.
             gig::logWarning() << "config not usable (" << applied.error << "); opening settings";
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
@@ -279,10 +325,6 @@ int main(int argc, char** argv)
             saveConfig(*settings, edited, overlay);
             cfg = loadConfig(*settings);
             applied = session.applyConfig(cfg.session);
-            if (!applied.ok) {
-                umbra::DarkMessageBox(static_cast<HWND>(mainHwnd), widen(applied.error).c_str(),
-                    L"gig - settings", MB_ICONERROR | MB_OK);
-            }
         }
 #else
         if (!applied.ok) {
@@ -410,6 +452,21 @@ int main(int argc, char** argv)
                 }
             }
 
+#ifdef _WIN32
+            // A cert that went untrusted mid-session (e.g. it changed under us) is
+            // staged by the verify callback; offer to pin it, then reconnect.
+            if (auto pending = pinStore.takePending()) {
+                if (promptPinDecision(mainHwnd, *pending)) {
+                    pinStore.acceptPin(*pending);
+                    gig::logInfo() << "pinned certificate for " << pending->host;
+                    applyAndReport(cfg.session);
+                } else {
+                    pinStore.declinePin(*pending);
+                    gig::logWarning() << "declined certificate for " << pending->host;
+                }
+            }
+#endif
+
             const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
             renderer->render(frames);
 
@@ -459,6 +516,7 @@ int main(int argc, char** argv)
         SDL_RemoveEventWatch(liveResizeWatch, &resizeContext);
         gig::logInfo() << "shutting down";
         session.stop();
+        gig::setCertPinStore(nullptr); // no more TLS; unregister before pinStore dies
         return 0;
     } catch (const std::exception& error) {
         gig::logError() << "fatal: " << error.what();

@@ -35,6 +35,8 @@ add_executable(gig WIN32
     src/discovery/frigate_discovery.h
     src/health/stream_health.cpp
     src/health/stream_health.h
+    src/net/cert_pin.cpp
+    src/net/cert_pin.hpp
     src/net/cng_tls.cpp
     src/net/cng_tls.hpp
     src/net/cookie_jar.cpp

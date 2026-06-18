@@ -1,6 +1,7 @@
 #include "net/tls_client.hpp"
 
 #include "log.hpp"
+#include "net/cert_pin.hpp"
 #include "net/cookie_jar.hpp"
 #include "net/tls_context.hpp"
 #include "net/tls_session_cache.hpp"
@@ -71,6 +72,7 @@ struct MediaStream::Impl {
         if (!SSL_set_tlsext_host_name(stream_->native_handle(), parsed.host.c_str())) {
             throw std::runtime_error("failed to set TLS SNI host name");
         }
+        prepareConnectionPinning(stream_->native_handle(), parsed.host); // hostname verify + pinning
         if (sessionCache_) {
             offerCachedSession(stream_->native_handle(), *sessionCache_);
         }

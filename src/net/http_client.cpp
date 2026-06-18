@@ -1,6 +1,7 @@
 #include "net/http_client.hpp"
 
 #include "log.hpp"
+#include "net/cert_pin.hpp"
 #include "net/cookie_jar.hpp"
 #include "net/tls_context.hpp"
 #include "net/url.h"
@@ -189,6 +190,7 @@ struct HttpClient::Impl {
                 if (!SSL_set_tlsext_host_name(stream.native_handle(), parsed.host.c_str())) {
                     throw std::runtime_error("failed to set TLS SNI host name");
                 }
+                prepareConnectionPinning(stream.native_handle(), parsed.host); // hostname verify + pinning
                 if (sessionCache) {
                     offerCachedSession(stream.native_handle(), *sessionCache);
                 }

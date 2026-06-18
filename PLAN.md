@@ -249,7 +249,27 @@ tie it to yet); the `WM_SETTINGCHANGE` live-retheme gap from M2 still applies to
 
 ---
 
-## M6 — Cert pinning + hostname verification
+## M6 — Cert pinning + hostname verification ✅ DONE (June 2026)
+
+**Landed:** `src/net/cert_pin.{hpp,cpp}` — `CertPinStore` (pins = SPKI-SHA256 per host in
+the settings store under `pins/<host>`; pending-decision slot + declined-this-session set,
+all locked) + process-wide registration (`setCertPinStore`/`certPinStore`, like `cng_tls`'s
+cached cert) so the verify callback can reach it. **Hostname verification** (the missing
+piece) via `SSL_set1_host` in `prepareConnectionPinning`, called per-connection after SNI in
+both `http_client.cpp` and `tls_client.cpp` — folds the hostname check into `preverify_ok`.
+The **pinning verify callback** (`installPinningVerify`, wired into `configureSslContext`
+when verifyServer) replaces the default: pinned leaf → trust regardless of chain/hostname;
+else `preverify_ok` → trust; else record pending + reject. Host is stashed in SSL ex_data
+(freed on SSL destroy). **Flow** (fail → leisure → retry): main polls `takePending()` at
+startup (a cert failure is a pin decision, not a config one → distinct from the settings
+dialog) and every run-loop frame; `promptPinDecision` is a dark Yes/No box (No = default),
+first-contact vs **"PINNED CERT CHANGED"** (louder, when a different SPKI is already pinned);
+accept → persist + reconnect, decline → remembered for the session (no re-prompt). `insecure`
+(verify_none) disables all of it. Verified: **normal run 10/10 with no prompt** (the user's
+`frigate.lan` cert matches the hostname + is store-trusted → pinning transparent); a
+**forced-untrusted** cert (bogus `ca`) → pin prompt → IDYES → SPKI written to `pins\frigate.lan`
+→ retry accepted it → login + 10/10. The changed-cert branch is by construction (record-pending
+compares stored vs presented SPKI).
 
 **Goal:** TOFU pinning that overrides chain/hostname failures the user accepts,
 with loud detection when a *pinned* cert changes.

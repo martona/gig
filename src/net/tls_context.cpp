@@ -1,5 +1,6 @@
 #include "net/tls_context.hpp"
 
+#include "net/cert_pin.hpp"
 #include "net/cng_tls.hpp"
 
 #include <filesystem>
@@ -58,6 +59,11 @@ void configureSslContext(ssl::context& context, const TlsOptions& tls)
         } else {
             context.set_default_verify_paths();
         }
+        // Trust-on-first-use pinning: overrides the default verify callback so an
+        // untrusted-but-pinned cert is accepted and an untrusted-and-unpinned one
+        // is staged for the UI. No-op if no pin store is registered. (Per-
+        // connection SSL_set1_host adds hostname verification either way.)
+        installPinningVerify(context.native_handle());
     } else {
         context.set_verify_mode(ssl::verify_none);
     }
