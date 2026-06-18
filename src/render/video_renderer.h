@@ -22,6 +22,10 @@ struct OverlayStats {
 
 class VideoRenderer {
 public:
+    // A button press in the on-screen toolbar, polled by the run loop. The log
+    // toggle is handled inside the renderer; these two need the app.
+    enum class ToolbarAction { None, Settings, Reconnect };
+
     virtual ~VideoRenderer() = default;
 
     virtual bool initialize(SDL_Window* window) = 0;
@@ -46,6 +50,13 @@ public:
     // The full-window log view overlay (renders the captured log buffer).
     virtual void setLogViewVisible(bool visible) { (void)visible; }
     virtual bool logViewVisible() const { return false; }
+
+    // Returns + clears the toolbar button pressed since the last call.
+    virtual ToolbarAction takeToolbarAction() { return ToolbarAction::None; }
+
+    // Vertical space (logical points) the toolbar reserves above the grid, so the
+    // run loop's click hit-testing matches the rendered layout. 0 in focus view.
+    virtual float reservedTopLogical() const { return 0.0f; }
 
     virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };

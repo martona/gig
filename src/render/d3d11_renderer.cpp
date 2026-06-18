@@ -344,13 +344,21 @@ public:
                     2.0f);
                 overlay_.flush(context_.Get());
             } else {
+                // Reserve the top strip for the toolbar so the grid sits below it
+                // (undisturbed video). In focus view the toolbar auto-hides and the
+                // image is full-bleed, so no reservation there.
+                const int toolbarTop = static_cast<int>(toolbarHeightPx());
+                const int gridHeight = std::max(1, static_cast<int>(backBufferHeight_) - toolbarTop);
                 // Reserve one extra cell for the synthetic diagnostics tile.
                 const bool showDiagnostics = overlayStats_.showDiagnostics;
                 const int effectiveCount = static_cast<int>(frames.size()) + (showDiagnostics ? 1 : 0);
-                const gig::GridLayout layout = gig::computeGridLayout(
+                gig::GridLayout layout = gig::computeGridLayout(
                     effectiveCount,
                     static_cast<int>(backBufferWidth_),
-                    static_cast<int>(backBufferHeight_));
+                    gridHeight);
+                for (gig::TileRect& tile : layout.tiles) {
+                    tile.y += static_cast<float>(toolbarTop);
+                }
                 renderGridTiles(frames, layout);
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
@@ -427,6 +435,19 @@ public:
 
     void setLogViewVisible(bool visible) override { logViewVisible_ = visible; }
     bool logViewVisible() const override { return logViewVisible_; }
+
+    ToolbarAction takeToolbarAction() override
+    {
+        const ToolbarAction action = pendingToolbarAction_;
+        pendingToolbarAction_ = ToolbarAction::None;
+        return action;
+    }
+
+    float reservedTopLogical() const override
+    {
+        // The toolbar reserves space only in the grid view; focus view is full-bleed.
+        return focusedTile_ < 0 ? kToolbarLogicalHeight : 0.0f;
+    }
 
 private:
     // Per-camera GPU state. One frame's worth of textures/views plus the cached
@@ -1032,6 +1053,17 @@ private:
             fontConfig.SizePixels = 13.0f * dpiScale_;
             io.Fonts->AddFontDefault(&fontConfig);
         }
+        // Merge Segoe MDL2 Assets (system icon font) for the toolbar glyphs
+        // (gear / refresh / list). Toolbar falls back to text labels if absent.
+        // MDL2 glyphs sit high on a text baseline, so nudge them down to vertically
+        // center within the button (tune kIconNudge if needed).
+        static const ImWchar kIconRange[] = { 0xE700, 0xEA40, 0 };
+        constexpr float kIconNudge = 0.25f; // fraction of font height, downward
+        ImFontConfig iconConfig;
+        iconConfig.MergeMode = true;
+        iconConfig.GlyphOffset.y = kBaseFontPx * dpiScale_ * kIconNudge;
+        iconFontLoaded_ = io.Fonts->AddFontFromFileTTF(
+            "C:\\Windows\\Fonts\\segmdl2.ttf", kBaseFontPx * dpiScale_, &iconConfig, kIconRange) != nullptr;
     }
 
     void applyImguiStyle()
@@ -1077,12 +1109,105 @@ private:
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+        buildToolbar();
         if (logViewVisible_) {
             buildLogWindow();
         }
         ImGui::Render();
         context_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    }
+
+    // A thin auto-hiding control strip pinned to the top edge: app name + live
+    // status on the left, buttons on the right. Always visible in the grid view;
+    // in focus/zoom view it fades out after a few idle seconds (show on mouse
+    // movement). Drawn in ImGui so it composites over the video.
+    float toolbarHeightPx() const { return kToolbarLogicalHeight * dpiScale_; }
+
+    void buildToolbar()
+    {
+        constexpr float kToolbarHideDelay = 2.5f; // idle seconds before hiding in focus view
+
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool active = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f
+            || ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        toolbarIdle_ = active ? 0.0f : toolbarIdle_ + io.DeltaTime;
+        const bool focusView = focusedTile_ >= 0;
+        if (focusView && toolbarIdle_ >= kToolbarHideDelay) {
+            return; // immersive single-camera view: let it hide (image is full-bleed)
+        }
+
+        // Segoe MDL2 Assets glyphs (UTF-8): gear U+E713, refresh U+E72C, list U+EA37.
+        const char* const settingsLabel = iconFontLoaded_ ? "\xEE\x9C\x93" : "Settings";
+        const char* const reconnectLabel = iconFontLoaded_ ? "\xEE\x9C\xAC" : "Reconnect";
+        const char* const logLabel = iconFontLoaded_ ? "\xEE\xA8\xB7" : "Log";
+
+        const float height = toolbarHeightPx();
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
+        // Opaque chrome in the grid (it reserves space below it); slightly
+        // translucent in focus view, where it's a transient overlay.
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.07f, 0.08f, focusView ? 0.82f : 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f)); // flat icon buttons
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * dpiScale_, 0.0f));
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        if (ImGui::Begin("##toolbar", nullptr, flags)) {
+            const float rowHeight = ImGui::GetFrameHeight();
+            ImGui::SetCursorPosY((height - rowHeight) * 0.5f); // vertically center the row
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("gig");
+            ImGui::SameLine();
+
+            const int online = overlayStats_.camerasOnline;
+            const int total = overlayStats_.camerasOnline + overlayStats_.camerasOffline;
+            const ImVec4 green(0.40f, 0.85f, 0.40f, 1.0f);
+            const ImVec4 amber(0.90f, 0.70f, 0.20f, 1.0f);
+            const ImVec4 red(0.90f, 0.35f, 0.35f, 1.0f);
+            const ImVec4 statusColor = (total > 0 && online == total) ? green : (online == 0 ? red : amber);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(statusColor, "%d/%d live", online, total);
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%d fps   %.1f Mbps   cpu %.0f%%",
+                static_cast<int>(overlayStats_.fps + 0.5),
+                overlayStats_.kbps / 1000.0,
+                overlayStats_.cpuPercent);
+
+            // Right-aligned icon buttons (tooltips carry the meaning + shortcut).
+            const ImGuiStyle& style = ImGui::GetStyle();
+            const auto buttonWidth = [&](const char* label) {
+                return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f;
+            };
+            const float buttonsWidth = buttonWidth(settingsLabel) + buttonWidth(reconnectLabel)
+                + buttonWidth(logLabel) + style.ItemSpacing.x * 2.0f;
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
+            if (ImGui::Button(settingsLabel)) {
+                pendingToolbarAction_ = ToolbarAction::Settings;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Settings (F2)");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(reconnectLabel)) {
+                pendingToolbarAction_ = ToolbarAction::Reconnect;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Reconnect (F5)");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(logLabel)) {
+                logViewVisible_ = !logViewVisible_;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Log");
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
     }
 
     void buildLogWindow()
@@ -1163,6 +1288,12 @@ private:
     std::vector<std::string> logScratch_;
     float dpiScale_ = 1.0f;
     bool dpiDirty_ = false;
+    bool iconFontLoaded_ = false;
+    ToolbarAction pendingToolbarAction_ = ToolbarAction::None;
+    float toolbarIdle_ = 0.0f;
+
+    // Toolbar height in logical (DPI-independent) points; reserved above the grid.
+    static constexpr float kToolbarLogicalHeight = 32.0f;
 };
 
 } // namespace

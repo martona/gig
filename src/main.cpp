@@ -162,7 +162,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     s.tls.certFile = store.getString("cert").value_or(std::string());
     s.tls.keyFile = store.getString("key").value_or(std::string());
     s.softwareDecode = store.getBool("software").value_or(false);
-    cfg.showOverlay = store.getBool("overlay").value_or(true);
+    cfg.showOverlay = store.getBool("overlay").value_or(false); // debug tile off by default; status lives in the toolbar
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -367,6 +367,23 @@ int main(int argc, char** argv)
             }
         };
 
+#ifdef _WIN32
+        // Open the settings dialog, persist, and reconnect with the new config.
+        // Shared by F2 and the toolbar's Settings button.
+        auto openSettings = [&]() {
+            gig::AppConfig edited = cfg.session;
+            bool overlay = cfg.showOverlay;
+            if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay)) {
+                saveConfig(*settings, edited, overlay);
+                cfg = loadConfig(*settings); // re-derive useWindowsStore + re-validate
+                OverlayStats overlayStats;
+                overlayStats.showDiagnostics = cfg.showOverlay;
+                renderer->setDiagnostics(overlayStats);
+                applyAndReport(cfg.session);
+            }
+        };
+#endif
+
         while (running) {
             const auto frameStart = std::chrono::steady_clock::now();
 
@@ -398,18 +415,8 @@ int main(int argc, char** argv)
                 }
 #ifdef _WIN32
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F2) {
-                    // Edit settings, persist, reconnect with the new config live.
                     gig::logInfo() << "settings dialog (F2)";
-                    gig::AppConfig edited = cfg.session;
-                    bool overlay = cfg.showOverlay;
-                    if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay)) {
-                        saveConfig(*settings, edited, overlay);
-                        cfg = loadConfig(*settings); // re-derive useWindowsStore + re-validate
-                        OverlayStats overlayStats;
-                        overlayStats.showDiagnostics = cfg.showOverlay;
-                        renderer->setDiagnostics(overlayStats);
-                        applyAndReport(cfg.session);
-                    }
+                    openSettings();
                     continue;
                 }
 #endif
@@ -424,10 +431,15 @@ int main(int argc, char** argv)
                         int windowHeight = 0;
                         SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
                         if (windowWidth > 0 && windowHeight > 0) {
-                            // Match the renderer's grid (cameras + optional diagnostics cell).
+                            // Match the renderer's grid (cameras + optional diagnostics
+                            // cell), including the strip the toolbar reserves at the top.
                             const std::size_t cameraCount = session.cameraCount();
                             const int effective = static_cast<int>(cameraCount) + (cfg.showOverlay ? 1 : 0);
-                            const gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight);
+                            const int gridTop = static_cast<int>(renderer->reservedTopLogical());
+                            gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight - gridTop);
+                            for (gig::TileRect& tile : layout.tiles) {
+                                tile.y += static_cast<float>(gridTop);
+                            }
                             const auto inCell = [&](const gig::TileRect& cell) {
                                 return event.button.x >= cell.x && event.button.x < cell.x + cell.width
                                     && event.button.y >= cell.y && event.button.y < cell.y + cell.height;
@@ -470,6 +482,22 @@ int main(int argc, char** argv)
             const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
             renderer->render(frames);
 
+            // Toolbar buttons route through the same paths as F2 / F5.
+            switch (renderer->takeToolbarAction()) {
+            case VideoRenderer::ToolbarAction::Reconnect:
+                gig::logInfo() << "reconnect requested (toolbar)";
+                applyAndReport(cfg.session);
+                break;
+#ifdef _WIN32
+            case VideoRenderer::ToolbarAction::Settings:
+                gig::logInfo() << "settings dialog (toolbar)";
+                openSettings();
+                break;
+#endif
+            default:
+                break;
+            }
+
             const auto now = std::chrono::steady_clock::now();
             if (now - lastTitleUpdate > std::chrono::seconds(1)) {
                 const double elapsed = std::chrono::duration<double>(now - lastTitleUpdate).count();
@@ -488,11 +516,7 @@ int main(int argc, char** argv)
                 stats.cpuPercent = sampleProcessCpuPercent();
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;
-
-                std::string title = "gig - " + std::to_string(stats.camerasOnline)
-                    + "/" + std::to_string(session.cameraCount()) + " live - frames "
-                    + std::to_string(total);
-                SDL_SetWindowTitle(window.get(), title.c_str());
+                // The OS title stays "gig"; live status shows in the toolbar.
             }
 
             if (now - lastStatsLog > std::chrono::seconds(5)) {
