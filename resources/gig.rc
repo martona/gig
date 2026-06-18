@@ -1,8 +1,46 @@
 #include <windows.h>
+#include "ui/resource.h"
 
 // Numeric ID 1 makes this the executable's default shell icon, and SDL also
 // loads icon resource 1 for the window/taskbar.
 1 ICON "gig.ico"
+
+// Settings dialog (driven by src/ui/settings_dialog.cpp; opened with F2 and on
+// first run / unusable config). umbra themes it dark in WM_INITDIALOG.
+IDD_SETTINGS DIALOGEX 0, 0, 300, 254
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "gig settings"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Base URL:",            IDC_STATIC,        8,  12,  74, 10
+    EDITTEXT                                IDC_BASE,         86,  10, 206, 12, ES_AUTOHSCROLL
+    LTEXT           "User:",                IDC_STATIC,        8,  29,  74, 10
+    EDITTEXT                                IDC_USER,         86,  27, 206, 12, ES_AUTOHSCROLL
+    LTEXT           "Password:",            IDC_STATIC,        8,  46,  74, 10
+    EDITTEXT                                IDC_PASSWORD,     86,  44, 206, 12, ES_AUTOHSCROLL | ES_PASSWORD
+    LTEXT           "Login refresh (s):",   IDC_STATIC,        8,  63,  74, 10
+    EDITTEXT                                IDC_LOGIN_REFRESH,86,  61,  50, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "CA file:",              IDC_STATIC,        8,  80,  74, 10
+    EDITTEXT                                IDC_CA,           86,  78, 160, 12, ES_AUTOHSCROLL
+    PUSHBUTTON      "...",                  IDC_BROWSE_CA,   250,  78,  42, 12
+    LTEXT           "Client cert:",          IDC_STATIC,        8,  97,  74, 10
+    EDITTEXT                                IDC_CERT,         86,  95, 160, 12, ES_AUTOHSCROLL
+    PUSHBUTTON      "...",                  IDC_BROWSE_CERT, 250,  95,  42, 12
+    LTEXT           "Client key:",           IDC_STATIC,        8, 114,  74, 10
+    EDITTEXT                                IDC_KEY,          86, 112, 160, 12, ES_AUTOHSCROLL
+    PUSHBUTTON      "...",                  IDC_BROWSE_KEY,  250, 112,  42, 12
+    LTEXT           "Poll interval (s):",    IDC_STATIC,        8, 131,  74, 10
+    EDITTEXT                                IDC_POLL,         86, 129,  50, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "Single stream URL:",   IDC_STATIC,        8, 148,  74, 10
+    EDITTEXT                                IDC_URL,          86, 146, 206, 12, ES_AUTOHSCROLL
+    LTEXT           "Stream template:",     IDC_STATIC,        8, 165,  74, 10
+    EDITTEXT                                IDC_STREAM_URL,   86, 163, 206, 12, ES_AUTOHSCROLL
+    CONTROL         "Force software decode", IDC_SOFTWARE,    "Button", BS_AUTOCHECKBOX | WS_TABSTOP,  86, 182, 206, 10
+    CONTROL         "Show diagnostics overlay", IDC_OVERLAY,  "Button", BS_AUTOCHECKBOX | WS_TABSTOP,  86, 196, 206, 10
+    CONTROL         "Skip server cert verify (insecure)", IDC_INSECURE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 86, 210, 206, 10
+    DEFPUSHBUTTON   "OK",                   IDOK,            190, 232,  48, 14
+    PUSHBUTTON      "Cancel",               IDCANCEL,        244, 232,  48, 14
+END
 
 // Application manifest (Common Controls v6 for umbra theming + supportedOS).
 // The linker's auto-generated manifest is disabled (/MANIFEST:NO in CMake) so

@@ -1,0 +1,188 @@
+#include "ui/settings_dialog.h"
+
+#include "ui/resource.h"
+
+#include <optional>
+#include <string>
+
+#include <windows.h>
+#include <shobjidl.h> // IFileOpenDialog (Common Item Dialog)
+#include <umbra.h>
+
+namespace gig {
+namespace {
+
+std::wstring utf8ToWide(const std::string& text)
+{
+    if (text.empty()) {
+        return {};
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), needed);
+    return wide;
+}
+
+std::string wideToUtf8(const wchar_t* text, std::size_t length)
+{
+    if (length == 0) {
+        return {};
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, text, static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+    std::string utf8(static_cast<std::size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, static_cast<int>(length), utf8.data(), needed, nullptr, nullptr);
+    return utf8;
+}
+
+void setDlgTextUtf8(HWND dlg, int id, const std::string& text)
+{
+    SetDlgItemTextW(dlg, id, utf8ToWide(text).c_str());
+}
+
+std::string getDlgTextUtf8(HWND dlg, int id)
+{
+    HWND control = GetDlgItem(dlg, id);
+    const int length = GetWindowTextLengthW(control);
+    if (length <= 0) {
+        return {};
+    }
+    std::wstring wide(static_cast<std::size_t>(length) + 1, L'\0');
+    const int copied = GetWindowTextW(control, wide.data(), length + 1);
+    return wideToUtf8(wide.c_str(), static_cast<std::size_t>(copied));
+}
+
+// The Common Item Dialog (IFileOpenDialog), owned to the settings dialog.
+std::optional<std::wstring> browseForFile(HWND owner)
+{
+    const HRESULT initResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool weInitialized = SUCCEEDED(initResult); // S_OK / S_FALSE; not RPC_E_CHANGED_MODE
+
+    std::optional<std::wstring> chosen;
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+        const COMDLG_FILTERSPEC filters[] = {
+            { L"Certificates / keys", L"*.pem;*.crt;*.cer;*.key" },
+            { L"All files", L"*.*" },
+        };
+        dialog->SetFileTypes(2, filters);
+        if (SUCCEEDED(dialog->Show(owner))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item))) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                    chosen = path;
+                    CoTaskMemFree(path);
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
+    }
+    if (weInitialized) {
+        CoUninitialize();
+    }
+    return chosen;
+}
+
+struct DialogState {
+    AppConfig* config;
+    bool* showOverlay;
+};
+
+void populate(HWND dlg, const DialogState& state)
+{
+    const AppConfig& c = *state.config;
+    setDlgTextUtf8(dlg, IDC_BASE, c.baseUrl);
+    setDlgTextUtf8(dlg, IDC_USER, c.user);
+    setDlgTextUtf8(dlg, IDC_PASSWORD, c.password);
+    SetDlgItemInt(dlg, IDC_LOGIN_REFRESH, static_cast<UINT>(c.loginRefreshSeconds), FALSE);
+    setDlgTextUtf8(dlg, IDC_CA, c.tls.caFile);
+    setDlgTextUtf8(dlg, IDC_CERT, c.tls.certFile);
+    setDlgTextUtf8(dlg, IDC_KEY, c.tls.keyFile);
+    SetDlgItemInt(dlg, IDC_POLL, static_cast<UINT>(c.pollIntervalSeconds), FALSE);
+    setDlgTextUtf8(dlg, IDC_URL, c.url);
+    setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
+    CheckDlgButton(dlg, IDC_SOFTWARE, c.softwareDecode ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dlg, IDC_OVERLAY, *state.showOverlay ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dlg, IDC_INSECURE, c.tls.verifyServer ? BST_UNCHECKED : BST_CHECKED);
+}
+
+void readBack(HWND dlg, const DialogState& state)
+{
+    AppConfig& c = *state.config;
+    c.baseUrl = getDlgTextUtf8(dlg, IDC_BASE);
+    c.user = getDlgTextUtf8(dlg, IDC_USER);
+    c.password = getDlgTextUtf8(dlg, IDC_PASSWORD);
+    c.loginRefreshSeconds = static_cast<int>(GetDlgItemInt(dlg, IDC_LOGIN_REFRESH, nullptr, FALSE));
+    c.tls.caFile = getDlgTextUtf8(dlg, IDC_CA);
+    c.tls.certFile = getDlgTextUtf8(dlg, IDC_CERT);
+    c.tls.keyFile = getDlgTextUtf8(dlg, IDC_KEY);
+    c.pollIntervalSeconds = static_cast<int>(GetDlgItemInt(dlg, IDC_POLL, nullptr, FALSE));
+    c.url = getDlgTextUtf8(dlg, IDC_URL);
+    c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
+    c.softwareDecode = IsDlgButtonChecked(dlg, IDC_SOFTWARE) == BST_CHECKED;
+    *state.showOverlay = IsDlgButtonChecked(dlg, IDC_OVERLAY) == BST_CHECKED;
+    c.tls.verifyServer = IsDlgButtonChecked(dlg, IDC_INSECURE) != BST_CHECKED;
+    // tls.useWindowsStore is re-derived from ca/cert/key on reload; rwTimeoutUs
+    // is left as-is (not exposed in the dialog).
+}
+
+INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_INITDIALOG: {
+        auto* state = reinterpret_cast<DialogState*>(lParam);
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        umbra::setDarkWndNotifySafe(dlg); // dark title bar + themed controls
+        populate(dlg, *state);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_BROWSE_CA:
+            if (const auto path = browseForFile(dlg)) {
+                SetDlgItemTextW(dlg, IDC_CA, path->c_str());
+            }
+            return TRUE;
+        case IDC_BROWSE_CERT:
+            if (const auto path = browseForFile(dlg)) {
+                SetDlgItemTextW(dlg, IDC_CERT, path->c_str());
+            }
+            return TRUE;
+        case IDC_BROWSE_KEY:
+            if (const auto path = browseForFile(dlg)) {
+                SetDlgItemTextW(dlg, IDC_KEY, path->c_str());
+            }
+            return TRUE;
+        case IDOK: {
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (state) {
+                readBack(dlg, *state);
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        default:
+            break;
+        }
+        return FALSE;
+    default:
+        return FALSE;
+    }
+}
+
+} // namespace
+
+bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay)
+{
+    DialogState state { &config, &showOverlay };
+    const INT_PTR result = DialogBoxParamW(
+        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), parent,
+        settingsDlgProc, reinterpret_cast<LPARAM>(&state));
+    return result == IDOK;
+}
+
+} // namespace gig

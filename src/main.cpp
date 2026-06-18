@@ -21,6 +21,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <umbra.h>
+#include "ui/settings_dialog.h"
 #endif
 
 namespace {
@@ -162,6 +163,31 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     return cfg;
 }
 
+// Persist the editable settings back to the store (mirror of loadConfig's keys).
+// The password is DPAPI-encrypted; an empty password removes the value rather
+// than storing an empty blob. useWindowsStore is derived on load, never stored.
+void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay)
+{
+    store.setString("base", s.baseUrl);
+    store.setString("url", s.url);
+    store.setString("stream-url", s.streamUrlTemplate);
+    store.setString("user", s.user);
+    if (s.password.empty()) {
+        store.remove("password");
+    } else {
+        store.setString("password", s.password, /*encrypt=*/true);
+    }
+    store.setInt("login-refresh", s.loginRefreshSeconds);
+    store.setString("ca", s.tls.caFile);
+    store.setString("cert", s.tls.certFile);
+    store.setString("key", s.tls.keyFile);
+    store.setBool("software", s.softwareDecode);
+    store.setBool("overlay", showOverlay);
+    store.setBool("insecure", !s.tls.verifyServer);
+    store.setInt("poll-interval", s.pollIntervalSeconds);
+    store.setInt("rw-timeout-us", s.tls.rwTimeoutUs);
+}
+
 class SdlLifetime {
 public:
     SdlLifetime()
@@ -193,7 +219,7 @@ int main(int argc, char** argv)
         if (!settings->getInt("schema-version")) {
             settings->setInt("schema-version", 1); // first run: stamp for future migrations
         }
-        const StartupConfig cfg = loadConfig(*settings);
+        StartupConfig cfg = loadConfig(*settings);
 
         SdlLifetime sdl;
 
@@ -239,9 +265,30 @@ int main(int argc, char** argv)
         // it up once here; F5 (and, later, the settings dialog) re-applies it
         // live. A startup failure is fatal -- there's no dialog yet to fix it in.
         gig::AppSession session(renderer->d3d11DecodeContext(), sessionCache, cookieJar);
-        if (const gig::ApplyResult applied = session.applyConfig(cfg.session); !applied.ok) {
+        gig::ApplyResult applied = session.applyConfig(cfg.session);
+#ifdef _WIN32
+        // First run / unusable config: let the user fix it in the settings dialog
+        // instead of dying. Keep offering until it applies or they cancel out.
+        while (!applied.ok) {
+            gig::logWarning() << "config not usable (" << applied.error << "); opening settings";
+            gig::AppConfig edited = cfg.session;
+            bool overlay = cfg.showOverlay;
+            if (!gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay)) {
+                throw std::runtime_error(applied.error); // cancelled -> nothing to show
+            }
+            saveConfig(*settings, edited, overlay);
+            cfg = loadConfig(*settings);
+            applied = session.applyConfig(cfg.session);
+            if (!applied.ok) {
+                umbra::DarkMessageBox(static_cast<HWND>(mainHwnd), widen(applied.error).c_str(),
+                    L"gig - settings", MB_ICONERROR | MB_OK);
+            }
+        }
+#else
+        if (!applied.ok) {
             throw std::runtime_error(applied.error);
         }
+#endif
         renderer->setCameraLabels(session.cameraLabels());
 
         OverlayStats initialStats;
@@ -259,6 +306,24 @@ int main(int argc, char** argv)
         std::uint64_t lastTitleFrames = 0;
         double lastCpuPercent = 0.0;
         constexpr auto frameInterval = std::chrono::milliseconds(16);
+
+        // Reconnect with the given config (F5 / settings-apply): rebuild the
+        // session, rebind the renderer's camera set, reset the running frame
+        // deltas (the new supervisor counts from 0), report a failure.
+        auto applyAndReport = [&](const gig::AppConfig& connConfig) {
+            renderer->setFocusedTile(-1);
+            const gig::ApplyResult result = session.applyConfig(connConfig);
+            renderer->setCameraLabels(session.cameraLabels());
+            lastTitleFrames = 0;
+            lastStatsFrames = 0;
+            if (!result.ok) {
+                gig::logError() << "reconnect failed: " << result.error;
+#ifdef _WIN32
+                umbra::DarkMessageBox(static_cast<HWND>(mainHwnd), widen(result.error).c_str(),
+                    L"gig", MB_ICONERROR | MB_OK);
+#endif
+            }
+        };
 
         while (running) {
             const auto frameStart = std::chrono::steady_clock::now();
@@ -284,26 +349,28 @@ int main(int argc, char** argv)
                     continue;
                 }
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) {
-                    // Reconnect live: re-login, re-discover, rebuild the supervisor
-                    // with the current config -- no restart. (M5's settings dialog
-                    // will drive this same path with edited settings.)
+                    // Reconnect live with the current config -- no restart.
                     gig::logInfo() << "reconnect requested (F5)";
-                    renderer->setFocusedTile(-1);
-                    const gig::ApplyResult result = session.applyConfig(cfg.session);
-                    renderer->setCameraLabels(session.cameraLabels());
-                    // The rebuilt supervisor restarts its frame counter at 0, so
-                    // reset the running deltas to avoid a one-tick bogus fps.
-                    lastTitleFrames = 0;
-                    lastStatsFrames = 0;
-                    if (!result.ok) {
-                        gig::logError() << "reconnect failed: " << result.error;
+                    applyAndReport(cfg.session);
+                    continue;
+                }
 #ifdef _WIN32
-                        umbra::DarkMessageBox(static_cast<HWND>(mainHwnd), widen(result.error).c_str(),
-                            L"gig - reconnect failed", MB_ICONERROR | MB_OK);
-#endif
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F2) {
+                    // Edit settings, persist, reconnect with the new config live.
+                    gig::logInfo() << "settings dialog (F2)";
+                    gig::AppConfig edited = cfg.session;
+                    bool overlay = cfg.showOverlay;
+                    if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay)) {
+                        saveConfig(*settings, edited, overlay);
+                        cfg = loadConfig(*settings); // re-derive useWindowsStore + re-validate
+                        OverlayStats overlayStats;
+                        overlayStats.showDiagnostics = cfg.showOverlay;
+                        renderer->setDiagnostics(overlayStats);
+                        applyAndReport(cfg.session);
                     }
                     continue;
                 }
+#endif
                 if (imguiUsed) {
                     continue; // the log view (ImGui) consumed this event
                 }

@@ -31,7 +31,7 @@ Useful overrides:
 
 ## Run
 
-The app is GUI-only — there are no command-line options or subcommands. Settings are stored in the Windows registry under `HKCU\Software\gig` (the password is DPAPI-encrypted). A native settings dialog is in progress; until it lands, set values with `regedit` or PowerShell. A minimal config for a Frigate with authentication enabled:
+The app is GUI-only — there are no command-line options or subcommands. **On first run the settings dialog opens automatically** (it also opens on F2); fill in your Frigate URL and credentials and the grid comes up. Settings are stored in the Windows registry under `HKCU\Software\gig` (the password is DPAPI-encrypted); you can also seed them by script — a minimal config for a Frigate with authentication enabled:
 
 ```powershell
 New-Item -Path 'HKCU:\Software\gig' -Force | Out-Null
@@ -43,7 +43,7 @@ $blob = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.Get
 Set-ItemProperty 'HKCU:\Software\gig' -Name password -Value $blob -Type Binary
 ```
 
-Launch `gig.exe`. Each tile is labeled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU; clicking it toggles a full-window log view (Esc or the ✕ closes it). Click a camera tile to zoom it to fill the window; click again (or press Esc) to return to the grid. **F5** reconnects (re-login, re-discover, rebuild) without restarting. Esc in the grid quits.
+Launch `gig.exe`. Each tile is labeled with its camera, and a synthetic diagnostics tile shows live camera counts, frame rate, ingest bandwidth, and CPU; clicking it toggles a full-window log view (Esc or the ✕ closes it). Click a camera tile to zoom it to fill the window; click again (or press Esc) to return to the grid. **F2** opens a native settings dialog (edit server/auth/decode settings, applied live); **F5** reconnects (re-login, re-discover, rebuild) without restarting. Esc in the grid quits. On first run (or unusable config) the settings dialog opens automatically.
 
 ### Authentication
 

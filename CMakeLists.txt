@@ -61,6 +61,9 @@ add_executable(gig WIN32
     src/render/text_overlay.cpp
     src/render/text_overlay.h
     src/render/video_renderer.h
+    src/ui/resource.h
+    src/ui/settings_dialog.cpp
+    src/ui/settings_dialog.h
 )
 
 target_include_directories(gig PRIVATE
@@ -106,6 +109,7 @@ if(WIN32)
         uxtheme
         dwmapi
         comctl32
+        ole32
     )
 
     # We embed our own application manifest via resources/gig.rc (Common Controls

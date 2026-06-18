@@ -214,7 +214,23 @@ callback (M6's pin-accept must post to the UI thread, not reconfigure inline).
 
 ---
 
-## M5 — Native config dialog
+## M5 — Native config dialog ✅ DONE (June 2026)
+
+**Landed:** `src/ui/settings_dialog.{h,cpp}` + `src/ui/resource.h` + an `IDD_SETTINGS`
+`DIALOGEX` in `resources/gig.rc`. Modal Win32 dialog, **dark via `umbra::setDarkWndNotifySafe`**
+in `WM_INITDIALOG`; fields for base/user/password(masked)/login-refresh/ca/cert/key(+**Browse**
+via `IFileOpenDialog`, `ole32`)/poll-interval/url/stream-url + software/overlay/insecure
+checkboxes. `showSettingsDialog(parent, AppConfig&, bool&)` pre-fills, returns edited values on
+OK. `main.cpp`: `saveConfig()` mirrors `loadConfig`'s keys (password DPAPI-encrypted, or removed
+when blank; `useWindowsStore` re-derived on reload). **F2** opens it → `saveConfig` → reload →
+`applyAndReport` (the shared F5/apply lambda: live reconnect, rebind labels, reset frame deltas).
+**First-run / unusable config opens the dialog at startup** instead of dying (loop until it
+applies or the user cancels → exit). Verified headless (drove F2 + `GW_ENABLEDPOPUP` + `WM_COMMAND
+IDOK`): dialog opens, OK applies (2nd login + rediscover), first-run opens-not-fatal, 10/10
+steady-state, graceful exit. **This also proved the M1-deferred C++ `CryptProtectData` encrypt-WRITE
+round-trip** (OK re-saved the password encrypted; the reload decrypted it and re-login succeeded).
+Visual appearance (dark theme, layout) is the user's to confirm. Invocation is F2 for now (no UI to
+tie it to yet); the `WM_SETTINGCHANGE` live-retheme gap from M2 still applies to the dialog.
 
 **Goal:** edit Frigate server specs + client behavior, live-applied.
 
