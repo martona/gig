@@ -217,6 +217,73 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOve
     store.setInt("rw-timeout-us", s.tls.rwTimeoutUs);
 }
 
+// Last window placement, persisted across runs. x/y/w/h hold the *normal*
+// (non-maximized) rectangle so un-maximizing returns somewhere sane.
+struct WindowGeometry {
+    int x = 0;
+    int y = 0;
+    int w = 1280;
+    int h = 720;
+    bool maximized = false;
+    bool valid = false; // a complete record was loaded
+};
+
+WindowGeometry loadWindowGeometry(const gig::SettingsStore& store)
+{
+    WindowGeometry g;
+    const auto x = store.getInt("window-x");
+    const auto y = store.getInt("window-y");
+    const auto w = store.getInt("window-w");
+    const auto h = store.getInt("window-h");
+    if (x && y && w && h) {
+        g.x = static_cast<int>(*x);
+        g.y = static_cast<int>(*y);
+        g.w = static_cast<int>(*w);
+        g.h = static_cast<int>(*h);
+        g.maximized = store.getBool("window-maximized").value_or(false);
+        g.valid = true;
+    }
+    return g;
+}
+
+void saveWindowGeometry(gig::SettingsStore& store, const WindowGeometry& g)
+{
+    store.setInt("window-x", g.x);
+    store.setInt("window-y", g.y);
+    store.setInt("window-w", g.w);
+    store.setInt("window-h", g.h);
+    store.setBool("window-maximized", g.maximized);
+}
+
+// Usable only if the size is sane AND the title bar can be grabbed on some
+// currently-connected display -- guards against a monitor unplugged or a
+// resolution change since last run that would strand the window off-screen.
+bool geometryUsable(const WindowGeometry& g)
+{
+    if (g.w < 320 || g.h < 240 || g.w > 16384 || g.h > 16384) {
+        return false;
+    }
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (!displays || count <= 0) {
+        SDL_free(displays);
+        return false;
+    }
+    const int grabX = g.x + g.w / 2; // title-bar center
+    const int grabY = g.y + 16;      // ~title-bar height (points)
+    bool onScreen = false;
+    for (int i = 0; i < count && !onScreen; ++i) {
+        SDL_Rect bounds;
+        if (SDL_GetDisplayUsableBounds(displays[i], &bounds)
+            && grabX >= bounds.x && grabX < bounds.x + bounds.w
+            && grabY >= bounds.y && grabY < bounds.y + bounds.h) {
+            onScreen = true;
+        }
+    }
+    SDL_free(displays);
+    return onScreen;
+}
+
 class SdlLifetime {
 public:
     SdlLifetime()
@@ -257,16 +324,43 @@ int main(int argc, char** argv)
 
         SdlLifetime sdl;
 
+        // Restore the last window placement, validated against the current
+        // displays. Create hidden, position, (maybe) maximize, then show -- so a
+        // restored off-center window doesn't flash at the default spot first.
+        WindowGeometry geom = loadWindowGeometry(*settings);
+        const bool useGeom = geom.valid && geometryUsable(geom);
+        if (geom.valid && !useGeom) {
+            gig::logInfo() << "saved window geometry is off-screen/invalid; using default";
+        }
+
         auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(
             SDL_CreateWindow(
                 "gig",
-                1280,
-                720,
-                SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY),
+                useGeom ? geom.w : 1280,
+                useGeom ? geom.h : 720,
+                SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN),
             SDL_DestroyWindow);
 
         if (!window) {
             throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
+        }
+
+        if (useGeom) {
+            SDL_SetWindowPosition(window.get(), geom.x, geom.y);
+            if (geom.maximized) {
+                SDL_MaximizeWindow(window.get());
+            }
+        }
+        SDL_ShowWindow(window.get());
+
+        // Track the live *normal* rectangle (updated on move/resize while neither
+        // maximized nor minimized) so we can persist it at shutdown.
+        WindowGeometry liveGeom;
+        if (useGeom) {
+            liveGeom = geom;
+        } else {
+            SDL_GetWindowPosition(window.get(), &liveGeom.x, &liveGeom.y);
+            SDL_GetWindowSize(window.get(), &liveGeom.w, &liveGeom.h);
         }
 
         void* mainHwnd = nullptr; // for owning the reconnect message box to the window
@@ -462,6 +556,15 @@ int main(int argc, char** argv)
                 } else if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                     renderer->resize();
                 }
+
+                // Remember the normal (non-maximized/minimized) window rectangle.
+                if (event.type == SDL_EVENT_WINDOW_MOVED || event.type == SDL_EVENT_WINDOW_RESIZED) {
+                    const SDL_WindowFlags wflags = SDL_GetWindowFlags(window.get());
+                    if (!(wflags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))) {
+                        SDL_GetWindowPosition(window.get(), &liveGeom.x, &liveGeom.y);
+                        SDL_GetWindowSize(window.get(), &liveGeom.w, &liveGeom.h);
+                    }
+                }
             }
 
 #ifdef _WIN32
@@ -538,6 +641,19 @@ int main(int argc, char** argv)
         }
 
         SDL_RemoveEventWatch(liveResizeWatch, &resizeContext);
+
+        // Persist window placement for next launch. Query the live rectangle when
+        // not maximized; otherwise keep the tracked normal rect + the maximized flag.
+        {
+            const SDL_WindowFlags wflags = SDL_GetWindowFlags(window.get());
+            liveGeom.maximized = (wflags & SDL_WINDOW_MAXIMIZED) != 0;
+            if (!liveGeom.maximized && !(wflags & SDL_WINDOW_MINIMIZED)) {
+                SDL_GetWindowPosition(window.get(), &liveGeom.x, &liveGeom.y);
+                SDL_GetWindowSize(window.get(), &liveGeom.w, &liveGeom.h);
+            }
+            saveWindowGeometry(*settings, liveGeom);
+        }
+
         gig::logInfo() << "shutting down";
         session.stop();
         gig::setCertPinStore(nullptr); // no more TLS; unregister before pinStore dies
