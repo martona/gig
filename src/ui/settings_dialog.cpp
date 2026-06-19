@@ -87,6 +87,7 @@ std::optional<std::wstring> browseForFile(HWND owner)
 struct DialogState {
     AppConfig* config;
     bool* showOverlay;
+    std::string status;
 };
 
 void populate(HWND dlg, const DialogState& state)
@@ -135,6 +136,9 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM l
         SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         umbra::setDarkWndNotifySafe(dlg); // dark title bar + themed controls
         populate(dlg, *state);
+        if (!state->status.empty()) {
+            setDlgTextUtf8(dlg, IDC_STATUS, state->status);
+        }
         return TRUE;
     }
     case WM_COMMAND:
@@ -176,9 +180,9 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM l
 
 } // namespace
 
-bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay)
+bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, const std::string& statusMessage)
 {
-    DialogState state { &config, &showOverlay };
+    DialogState state { &config, &showOverlay, statusMessage };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), parent,
         settingsDlgProc, reinterpret_cast<LPARAM>(&state));

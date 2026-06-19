@@ -319,7 +319,7 @@ int main(int argc, char** argv)
             gig::logWarning() << "config not usable (" << applied.error << "); opening settings";
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
-            if (!gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay)) {
+            if (!gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, applied.error)) {
                 throw std::runtime_error(applied.error); // cancelled -> nothing to show
             }
             saveConfig(*settings, edited, overlay);

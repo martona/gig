@@ -178,6 +178,24 @@ bool failed(HRESULT result, const char* action)
     return true;
 }
 
+// "<%WINDIR%>\Fonts\<fileName>" as a UTF-8 path (ImGui wants UTF-8). Resolves the
+// real Windows directory instead of assuming C:.
+std::string windowsFontPath(const char* fileName)
+{
+    wchar_t winDir[MAX_PATH] = {};
+    const UINT length = GetWindowsDirectoryW(winDir, MAX_PATH);
+    const std::wstring dir = (length > 0 && length < MAX_PATH) ? std::wstring(winDir, length) : L"C:\\Windows";
+    const std::wstring widePath = dir + L"\\Fonts\\";
+
+    std::string utf8;
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, widePath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (needed > 0) {
+        utf8.resize(static_cast<std::size_t>(needed) - 1);
+        WideCharToMultiByte(CP_UTF8, 0, widePath.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+    }
+    return utf8 + fileName;
+}
+
 class D3D11Renderer final : public VideoRenderer {
 public:
     bool initialize(SDL_Window* window) override
@@ -1048,7 +1066,8 @@ private:
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
         // Prefer crisp monospace Consolas; fall back to the built-in bitmap font.
-        if (io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", kBaseFontPx * dpiScale_) == nullptr) {
+        const std::string consolasPath = windowsFontPath("consola.ttf");
+        if (io.Fonts->AddFontFromFileTTF(consolasPath.c_str(), kBaseFontPx * dpiScale_) == nullptr) {
             ImFontConfig fontConfig;
             fontConfig.SizePixels = 13.0f * dpiScale_;
             io.Fonts->AddFontDefault(&fontConfig);
@@ -1062,8 +1081,9 @@ private:
         ImFontConfig iconConfig;
         iconConfig.MergeMode = true;
         iconConfig.GlyphOffset.y = kBaseFontPx * dpiScale_ * kIconNudge;
+        const std::string iconPath = windowsFontPath("segmdl2.ttf");
         iconFontLoaded_ = io.Fonts->AddFontFromFileTTF(
-            "C:\\Windows\\Fonts\\segmdl2.ttf", kBaseFontPx * dpiScale_, &iconConfig, kIconRange) != nullptr;
+            iconPath.c_str(), kBaseFontPx * dpiScale_, &iconConfig, kIconRange) != nullptr;
     }
 
     void applyImguiStyle()

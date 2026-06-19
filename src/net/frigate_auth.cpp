@@ -18,12 +18,17 @@ namespace {
 // while, so retry briskly instead of waiting out the full interval.
 constexpr std::chrono::seconds RetryInterval { 30 };
 
-// Like the health client: keep I/O timeouts short so stop() never waits long
-// on an in-flight login.
-TlsOptions clampLoginTimeout(TlsOptions tls)
+// Login is slow server-side: Frigate hashes the password on /api/login, which
+// takes a few seconds on a small host. A short deadline races that and produces
+// intermittent timeouts (nginx logs HTTP 499 -- client closed early). So give
+// login a generous floor (>= 15s); a larger configured rw-timeout-us still wins.
+// (Worst case, an in-flight refresh login can delay shutdown by this much, but a
+// refresh fires only every login-refresh seconds, so the overlap is rare.)
+TlsOptions loginTimeout(TlsOptions tls)
 {
-    if (tls.rwTimeoutUs <= 0 || tls.rwTimeoutUs > 3'000'000) {
-        tls.rwTimeoutUs = 3'000'000;
+    constexpr std::int64_t kMinLoginUs = 15'000'000; // 15s
+    if (tls.rwTimeoutUs <= 0 || tls.rwTimeoutUs < kMinLoginUs) {
+        tls.rwTimeoutUs = kMinLoginUs;
     }
     return tls;
 }
@@ -53,7 +58,7 @@ FrigateAuth::FrigateAuth(
     : config_(std::move(config))
     , cookieJar_(cookieJar)
     , client_(std::make_unique<HttpClient>(
-          config_.baseUrl, clampLoginTimeout(config_.tls), std::move(sessionCache), std::move(cookieJar)))
+          config_.baseUrl, loginTimeout(config_.tls), std::move(sessionCache), std::move(cookieJar)))
 {
 }
 
