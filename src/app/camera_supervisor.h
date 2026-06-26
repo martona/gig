@@ -60,6 +60,16 @@ public:
     // Aggregate go2rtc ingest bandwidth (camera->go2rtc) across all streams.
     int ingestKbps() const { return ingestKbps_.load(); }
 
+    // Control-plane (go2rtc health poll) reachability for the status UI. Updated
+    // by the poll thread each cycle; safe to read from the UI thread.
+    struct ControlPlaneHealth {
+        bool polling = false;     // health poll active (baseUrl configured)
+        bool ok = true;           // last poll succeeded
+        bool schemaError = false; // producers present but no known byte field
+        int secondsSinceOk = 0;   // since last successful poll (0 if ok / not polling)
+    };
+    ControlPlaneHealth controlPlaneHealth() const;
+
 private:
     enum class Liveness { Unknown, Online, Offline };
     static const char* livenessName(Liveness liveness);
@@ -100,6 +110,13 @@ private:
     std::atomic<int> ingestKbps_ { 0 };
     std::uint64_t lastTotalBytes_ = 0;   // poll-thread only
     bool haveBandwidthBaseline_ = false; // poll-thread only
+
+    // Control-plane health, written by the poll thread, read by the UI thread.
+    mutable std::mutex healthMutex_;
+    bool healthPolling_ = false;
+    bool healthOk_ = true;
+    bool healthSchemaError_ = false;
+    std::chrono::steady_clock::time_point healthLastOk_;
 };
 
 } // namespace gig

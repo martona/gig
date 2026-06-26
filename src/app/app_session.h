@@ -31,9 +31,26 @@ struct AppConfig {
     TlsOptions tls;
 };
 
+// Why an applyConfig() failed, so the caller can react without a one-size-fits-
+// all modal: Config = structural/local problem (no connection set, unreadable
+// TLS material) that needs the settings dialog; Transient = a connection-time
+// failure (host unreachable, login/discovery) that should come up disconnected
+// with a status banner and let the user Reconnect, not block on a dialog.
+enum class ApplyFailure { None, Config, Transient };
+
 struct ApplyResult {
     bool ok = false;
     std::string error;
+    ApplyFailure failure = ApplyFailure::None;
+};
+
+// Control-plane (Frigate go2rtc) reachability for the status banner; safe
+// defaults (polling=false, ok=true) when no session is running.
+struct ControlPlaneStatus {
+    bool polling = false;
+    bool ok = true;
+    bool schemaError = false;
+    int secondsSinceOk = 0;
 };
 
 // Owns the reconfigurable subsystem -- Frigate login (FrigateAuth) + camera
@@ -78,6 +95,9 @@ public:
     std::uint64_t totalDecodedFrames() const;
     int liveCameraCount() const;
     int ingestKbps() const;
+
+    // Control-plane reachability for the status UI (default/healthy when stopped).
+    ControlPlaneStatus controlPlaneStatus() const;
 
 private:
     std::shared_ptr<D3D11DecodeContext> decodeContext_;

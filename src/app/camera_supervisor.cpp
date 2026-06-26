@@ -67,6 +67,17 @@ void CameraSupervisor::start()
     }
     healthClient_ = std::make_unique<HttpClient>(config_.baseUrl, healthTls, sessionCache_, cookieJar_);
 
+    {
+        // Discovery just succeeded, so the control plane is reachable now; seed
+        // the health state optimistically so a not-yet-run first poll doesn't
+        // read as stalled.
+        std::lock_guard<std::mutex> lock(healthMutex_);
+        healthPolling_ = true;
+        healthOk_ = true;
+        healthSchemaError_ = false;
+        healthLastOk_ = std::chrono::steady_clock::now();
+    }
+
     stopRequested_ = false;
     pollThread_ = std::thread([this] { pollLoop(); });
 }
@@ -91,6 +102,21 @@ std::vector<std::shared_ptr<VideoFrame>> CameraSupervisor::snapshotFrames() cons
     return latestFrames_;
 }
 
+CameraSupervisor::ControlPlaneHealth CameraSupervisor::controlPlaneHealth() const
+{
+    std::lock_guard<std::mutex> lock(healthMutex_);
+    ControlPlaneHealth health;
+    health.polling = healthPolling_;
+    health.ok = healthOk_;
+    health.schemaError = healthSchemaError_;
+    if (healthPolling_ && !healthOk_ && healthLastOk_.time_since_epoch().count() != 0) {
+        const auto elapsed = std::chrono::steady_clock::now() - healthLastOk_;
+        health.secondsSinceOk =
+            static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+    }
+    return health;
+}
+
 void CameraSupervisor::pollLoop()
 {
     logInfo() << "supervisor: health polling every " << config_.pollInterval.count()
@@ -109,7 +135,13 @@ void CameraSupervisor::reconcile()
     if (!bytes.ok) {
         // Never flip every camera offline on a fetch/parse failure -- that is the
         // go2rtc-reshuffle trap. Log (loudly on a schema change) and leave the
-        // running decoders exactly as they are.
+        // running decoders exactly as they are. Record the failure so the UI can
+        // surface "lost contact" / "health unreadable" non-modally.
+        {
+            std::lock_guard<std::mutex> lock(healthMutex_);
+            healthOk_ = false;
+            healthSchemaError_ = bytes.schemaError;
+        }
         if (bytes.schemaError) {
             logError() << "supervisor: " << bytes.error << " -- leaving decoders unchanged";
         } else {
@@ -117,6 +149,13 @@ void CameraSupervisor::reconcile()
                          << "); leaving decoders unchanged";
         }
         return;
+    }
+    {
+        // Poll succeeded: control plane reachable, liveness readable.
+        std::lock_guard<std::mutex> lock(healthMutex_);
+        healthOk_ = true;
+        healthSchemaError_ = false;
+        healthLastOk_ = std::chrono::steady_clock::now();
     }
 
     int online = 0;

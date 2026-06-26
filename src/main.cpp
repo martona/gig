@@ -408,6 +408,15 @@ int main(int argc, char** argv)
                 applied = session.applyConfig(cfg.session);
                 continue;
             }
+            // A transient connection failure (host down, login/discovery) must not
+            // trap the user in a modal: come up disconnected and let the status
+            // banner + Reconnect handle it. Only a structural/local config problem
+            // opens the settings dialog.
+            if (applied.failure != gig::ApplyFailure::Config) {
+                gig::logWarning() << "initial connect failed (" << applied.error
+                                  << "); starting disconnected -- use Reconnect to retry";
+                break;
+            }
             // First run / unusable config: let the user fix it in the settings
             // dialog instead of dying. Keep offering until it applies or cancel.
             gig::logWarning() << "config not usable (" << applied.error << "); opening settings";
@@ -421,7 +430,10 @@ int main(int argc, char** argv)
             applied = session.applyConfig(cfg.session);
         }
 #else
-        if (!applied.ok) {
+        // No settings dialog off-Windows yet: a structural config error is fatal,
+        // but a transient connection failure still comes up (disconnected) so it
+        // can recover via Reconnect.
+        if (!applied.ok && applied.failure == gig::ApplyFailure::Config) {
             throw std::runtime_error(applied.error);
         }
 #endif
@@ -429,6 +441,13 @@ int main(int argc, char** argv)
 
         OverlayStats initialStats;
         initialStats.showDiagnostics = cfg.showOverlay;
+        if (!applied.ok) {
+            // Came up without a session (transient connect failure): show the
+            // disconnected banner immediately, before the first stats tick.
+            initialStats.link = OverlayStats::LinkState::Disconnected;
+            initialStats.statusDetail = applied.error;
+            initialStats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
+        }
         renderer->setDiagnostics(initialStats);
 
         // Keep the grid reflowing while the window is actively resized.
@@ -441,6 +460,8 @@ int main(int argc, char** argv)
         std::uint64_t lastStatsFrames = 0;
         std::uint64_t lastTitleFrames = 0;
         double lastCpuPercent = 0.0;
+        // Last connection error, shown in the status banner while disconnected.
+        std::string lastConnectError = applied.ok ? std::string() : applied.error;
         constexpr auto frameInterval = std::chrono::milliseconds(16);
 
         // Reconnect with the given config (F5 / settings-apply): rebuild the
@@ -452,12 +473,11 @@ int main(int argc, char** argv)
             renderer->setCameraLabels(session.cameraLabels());
             lastTitleFrames = 0;
             lastStatsFrames = 0;
+            lastConnectError = result.ok ? std::string() : result.error;
             if (!result.ok) {
-                gig::logError() << "reconnect failed: " << result.error;
-#ifdef _WIN32
-                umbra::DarkMessageBox(static_cast<HWND>(mainHwnd), widen(result.error).c_str(),
-                    L"gig", MB_ICONERROR | MB_OK);
-#endif
+                // Surfaced non-modally via the status banner -- no messagebox to
+                // dismiss. The user can adjust settings or Reconnect.
+                gig::logError() << "connect failed: " << result.error;
             }
         };
 
@@ -617,6 +637,23 @@ int main(int argc, char** argv)
                 stats.framesTotal = total;
                 stats.kbps = session.ingestKbps();
                 stats.cpuPercent = sampleProcessCpuPercent();
+
+                // Derived connection status for the toolbar indicator + banner.
+                // A live session whose control-plane poll is failing is "reconnecting"
+                // (its decoders + poll self-heal); no session at all is "disconnected".
+                const gig::ControlPlaneStatus cp = session.controlPlaneStatus();
+                if (!session.running()) {
+                    stats.link = OverlayStats::LinkState::Disconnected;
+                    stats.statusDetail = lastConnectError;
+                } else if (cp.polling && !cp.ok) {
+                    stats.link = OverlayStats::LinkState::Reconnecting;
+                    stats.secondsSinceData = cp.secondsSinceOk;
+                } else {
+                    stats.link = OverlayStats::LinkState::Ok;
+                }
+                stats.healthDegraded = cp.schemaError;
+                stats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
+
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;
                 // The OS title stays "gig"; live status shows in the toolbar.

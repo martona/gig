@@ -18,6 +18,17 @@ struct OverlayStats {
     std::uint64_t framesTotal = 0;
     int kbps = 0;
     double cpuPercent = 0.0;
+
+    // Connection status, derived each refresh by the run loop. LinkState::Ok with
+    // healthDegraded == false means nothing is wrong (no banner). Reconnecting =
+    // a live session whose control-plane poll is failing (it is self-healing);
+    // Disconnected = no session up (needs a Reconnect).
+    enum class LinkState { Ok, Reconnecting, Disconnected };
+    LinkState link = LinkState::Ok;
+    bool healthDegraded = false; // go2rtc liveness unreadable (schema changed)
+    int secondsSinceData = 0;    // since last good control-plane contact (Reconnecting)
+    std::string statusHost;      // host/base shown in the banner
+    std::string statusDetail;    // short reason (Disconnected)
 };
 
 class VideoRenderer {

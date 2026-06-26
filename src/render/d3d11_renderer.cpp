@@ -1130,6 +1130,7 @@ private:
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         buildToolbar();
+        buildStatusBanner();
         if (logViewVisible_) {
             buildLogWindow();
         }
@@ -1186,9 +1187,22 @@ private:
             const ImVec4 green(0.40f, 0.85f, 0.40f, 1.0f);
             const ImVec4 amber(0.90f, 0.70f, 0.20f, 1.0f);
             const ImVec4 red(0.90f, 0.35f, 0.35f, 1.0f);
-            const ImVec4 statusColor = (total > 0 && online == total) ? green : (online == 0 ? red : amber);
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(statusColor, "%d/%d live", online, total);
+            // The live count is only trustworthy while the control plane is up;
+            // when it isn't, show the link state instead of a stale "N/N live".
+            switch (overlayStats_.link) {
+            case OverlayStats::LinkState::Disconnected:
+                ImGui::TextColored(red, "disconnected");
+                break;
+            case OverlayStats::LinkState::Reconnecting:
+                ImGui::TextColored(amber, "reconnecting");
+                break;
+            case OverlayStats::LinkState::Ok: {
+                const ImVec4 statusColor = (total > 0 && online == total) ? green : (online == 0 ? red : amber);
+                ImGui::TextColored(statusColor, "%d/%d live", online, total);
+                break;
+            }
+            }
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%d fps   %.1f Mbps   cpu %.0f%%",
@@ -1227,6 +1241,61 @@ private:
         }
         ImGui::End();
         ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+    }
+
+    // A slim colored strip pinned just under the toolbar, shown only while a
+    // transient condition is active and cleared automatically when it resolves
+    // (the run loop re-derives link/healthDegraded each refresh). Non-modal and
+    // input-transparent -- it never steals a click or blocks the flow.
+    void buildStatusBanner()
+    {
+        if (focusedTile_ >= 0) {
+            return; // immersive single-camera view stays clean
+        }
+        const OverlayStats& s = overlayStats_;
+        if (s.link == OverlayStats::LinkState::Ok && !s.healthDegraded) {
+            return; // all clear
+        }
+
+        const std::string host = s.statusHost.empty() ? std::string("Frigate") : s.statusHost;
+        ImVec4 background;
+        std::string message;
+        if (s.link == OverlayStats::LinkState::Disconnected) {
+            background = ImVec4(0.42f, 0.10f, 0.10f, 0.94f); // red
+            message = "Not connected to " + host + "  --  press Reconnect (F5)";
+            if (!s.statusDetail.empty()) {
+                message += "   [" + s.statusDetail + "]";
+            }
+        } else if (s.link == OverlayStats::LinkState::Reconnecting) {
+            background = ImVec4(0.42f, 0.28f, 0.05f, 0.94f); // amber
+            message = "Lost contact with " + host + "  --  reconnecting";
+            if (s.secondsSinceData > 0) {
+                message += " (last data " + std::to_string(s.secondsSinceData) + "s ago)";
+            }
+        } else { // Ok but health degraded
+            background = ImVec4(0.42f, 0.28f, 0.05f, 0.94f); // amber
+            message = "Camera health unreadable  --  go2rtc stream schema may have changed";
+        }
+
+        const float height = kBannerLogicalHeight * dpiScale_;
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x, viewport->WorkPos.y + toolbarHeightPx()));
+        ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.95f, 0.92f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * dpiScale_, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0.0f, 0.0f)); // honor our slim height at 1x
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav
+            | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoInputs;
+        if (ImGui::Begin("##statusbanner", nullptr, flags)) {
+            ImGui::SetCursorPosY((height - ImGui::GetFrameHeight()) * 0.5f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(message.c_str());
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(2);
     }
 
@@ -1314,6 +1383,9 @@ private:
 
     // Toolbar height in logical (DPI-independent) points; reserved above the grid.
     static constexpr float kToolbarLogicalHeight = 32.0f;
+    // Status-banner height (logical points). Overlays the grid top transiently --
+    // it does not reserve layout space, so the grid never reflows as it appears.
+    static constexpr float kBannerLogicalHeight = 22.0f;
 };
 
 } // namespace

@@ -58,7 +58,9 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
             auto auth = std::make_unique<FrigateAuth>(authConfig, sessionCache_, cookieJar_);
             std::string loginError;
             if (!auth->login(&loginError)) {
-                return { false, "login failed: " + loginError };
+                // Reaching/authenticating to Frigate failed -- transient (host
+                // down, blip, or wrong creds the user can fix via Reconnect).
+                return { false, "login failed: " + loginError, ApplyFailure::Transient };
             }
             logInfo() << "frigate auth: logged in to " << cfg.baseUrl << " as '" << cfg.user << "'";
             auth_ = std::move(auth);
@@ -68,17 +70,26 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
         std::vector<CameraStream> cameras;
         if (!cfg.baseUrl.empty()) {
             HttpClient client(cfg.baseUrl, cfg.tls, sessionCache_, cookieJar_);
-            cameras = discoverCameras(client, cfg.streamUrlTemplate);
+            try {
+                cameras = discoverCameras(client, cfg.streamUrlTemplate);
+            } catch (const std::exception& discoveryError) {
+                // A discovery throw is a connection-time failure (unreachable,
+                // bad response) -- transient, not a config problem.
+                stop();
+                return { false, std::string("discovery failed: ") + discoveryError.what(),
+                         ApplyFailure::Transient };
+            }
         } else if (!cfg.url.empty()) {
             cameras.push_back({ "camera", "", cfg.url });
             logInfo() << "no base configured; single camera " << cfg.url;
         } else {
             stop();
-            return { false, "no Frigate connection configured -- set a base URL (or single stream URL)" };
+            return { false, "no Frigate connection configured -- set a base URL (or single stream URL)",
+                     ApplyFailure::Config };
         }
         if (cameras.empty()) {
             stop();
-            return { false, "no cameras to display" };
+            return { false, "connected, but Frigate reported no cameras", ApplyFailure::Transient };
         }
 
         // 3. Labels for the renderer (stable camera order).
@@ -103,12 +114,14 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
             auth_->startAutoRefresh();
         }
 
-        return { true, {} };
+        return { true, {}, ApplyFailure::None };
     } catch (const std::exception& error) {
-        // Any failure (bad PEM material, discovery throw, ...) leaves a clean,
-        // stopped session rather than a half-built one.
+        // The only throws left here are construction-time -- unreadable PEM/TLS
+        // material in an HttpClient/TlsClient/FrigateAuth ctor. Those are local
+        // config the user must fix in the settings dialog (network failures take
+        // the Transient returns above, not this path).
         stop();
-        return { false, error.what() };
+        return { false, error.what(), ApplyFailure::Config };
     }
 }
 
@@ -135,6 +148,19 @@ int AppSession::liveCameraCount() const
 int AppSession::ingestKbps() const
 {
     return supervisor_ ? supervisor_->ingestKbps() : 0;
+}
+
+ControlPlaneStatus AppSession::controlPlaneStatus() const
+{
+    ControlPlaneStatus status;
+    if (supervisor_) {
+        const CameraSupervisor::ControlPlaneHealth health = supervisor_->controlPlaneHealth();
+        status.polling = health.polling;
+        status.ok = health.ok;
+        status.schemaError = health.schemaError;
+        status.secondsSinceOk = health.secondsSinceOk;
+    }
+    return status;
 }
 
 } // namespace gig
