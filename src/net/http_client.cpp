@@ -6,8 +6,10 @@
 #include "net/tls_context.hpp"
 #include "net/url.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -51,16 +53,29 @@ void applyTimeout(Stream& stream, std::int64_t rwTimeoutUs)
 // tcp_stream timer only fires for ASYNC operations (sync calls silently ignore
 // expires_after), so every I/O step goes through here -- this is what makes
 // rwTimeoutUs real. Same idiom as MediaStream::runOne in tls_client.cpp.
+//
+// It is also the cancellation chokepoint: cancel() (another thread) sets
+// `cancelled` and calls io.stop() to wake a blocked run(). We bail before
+// starting a new op if already cancelled, and after run() we map a forced stop
+// (which would otherwise leave `result` defaulted to success) to an abort, so
+// the caller's `if (ec)` reliably unwinds the request.
 template <typename Stream, typename Initiate>
 boost::system::error_code runStep(
-    asio::io_context& io, Stream& stream, std::int64_t rwTimeoutUs, Initiate&& initiate)
+    asio::io_context& io, Stream& stream, std::int64_t rwTimeoutUs,
+    const std::atomic_bool& cancelled, Initiate&& initiate)
 {
+    if (cancelled.load()) {
+        return asio::error::operation_aborted;
+    }
     applyTimeout(stream, rwTimeoutUs);
     boost::system::error_code result;
     initiate([&result](boost::system::error_code ec) { result = ec; });
     io.restart();
     io.run();
     beast::get_lowest_layer(stream).expires_never();
+    if (cancelled.load() && !result) {
+        result = asio::error::operation_aborted;
+    }
     return result;
 }
 
@@ -69,6 +84,7 @@ void readResponse(
     asio::io_context& io,
     Stream& stream,
     std::int64_t rwTimeoutUs,
+    const std::atomic_bool& cancelled,
     beast::flat_buffer& buffer,
     std::size_t maxBytes,
     CookieJar& cookies,
@@ -78,7 +94,7 @@ void readResponse(
     http::response_parser<http::dynamic_body> parser;
     parser.body_limit(static_cast<std::uint64_t>(maxBytes));
 
-    boost::system::error_code ec = runStep(io, stream, rwTimeoutUs, [&](auto&& complete) {
+    boost::system::error_code ec = runStep(io, stream, rwTimeoutUs, cancelled, [&](auto&& complete) {
         http::async_read_header(
             stream, buffer, parser,
             [c = std::forward<decltype(complete)>(complete)](
@@ -94,7 +110,7 @@ void readResponse(
             result.truncated = true;
             break;
         }
-        ec = runStep(io, stream, rwTimeoutUs, [&](auto&& complete) {
+        ec = runStep(io, stream, rwTimeoutUs, cancelled, [&](auto&& complete) {
             http::async_read_some(
                 stream, buffer, parser,
                 [c = std::forward<decltype(complete)>(complete)](
@@ -166,6 +182,23 @@ struct HttpClient::Impl {
             const std::string origin = originForUrl(parsed);
 
             asio::io_context io;
+            // Publish this io_context for cancel() (another thread). The guard
+            // clears it under the lock before `io` is destroyed -- declared
+            // after `io` so it unwinds first -- so cancel() never touches a dead
+            // io_context. cancelled_ stays set, so any later step bails in runStep.
+            {
+                std::lock_guard<std::mutex> lock(cancelMutex_);
+                activeIo_ = &io;
+            }
+            struct IoGuard {
+                Impl* self;
+                ~IoGuard()
+                {
+                    std::lock_guard<std::mutex> lock(self->cancelMutex_);
+                    self->activeIo_ = nullptr;
+                }
+            } ioGuard { this };
+
             tcp::resolver resolver(io);
             const auto endpoints = resolver.resolve(parsed.host, parsed.port);
 
@@ -195,7 +228,7 @@ struct HttpClient::Impl {
                     offerCachedSession(stream.native_handle(), *sessionCache);
                 }
 
-                ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                ec = runStep(io, stream, tls.rwTimeoutUs, cancelled_, [&](auto&& complete) {
                     beast::get_lowest_layer(stream).async_connect(
                         endpoints,
                         [c = std::forward<decltype(complete)>(complete)](
@@ -206,7 +239,7 @@ struct HttpClient::Impl {
                     return result;
                 }
 
-                ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                ec = runStep(io, stream, tls.rwTimeoutUs, cancelled_, [&](auto&& complete) {
                     stream.async_handshake(
                         ssl::stream_base::client,
                         [c = std::forward<decltype(complete)>(complete)](
@@ -222,7 +255,7 @@ struct HttpClient::Impl {
                                << " cached=" << sessionCache->size();
                 }
 
-                ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                ec = runStep(io, stream, tls.rwTimeoutUs, cancelled_, [&](auto&& complete) {
                     http::async_write(
                         stream, request,
                         [c = std::forward<decltype(complete)>(complete)](
@@ -233,9 +266,9 @@ struct HttpClient::Impl {
                     return result;
                 }
 
-                readResponse(io, stream, tls.rwTimeoutUs, buffer, maxBytes, *cookieJar, origin, result);
+                readResponse(io, stream, tls.rwTimeoutUs, cancelled_, buffer, maxBytes, *cookieJar, origin, result);
 
-                runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+                runStep(io, stream, tls.rwTimeoutUs, cancelled_, [&](auto&& complete) {
                     stream.async_shutdown(
                         [c = std::forward<decltype(complete)>(complete)](
                             boost::system::error_code e) mutable { c(e); });
@@ -244,7 +277,7 @@ struct HttpClient::Impl {
             }
 
             beast::tcp_stream stream(io);
-            ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+            ec = runStep(io, stream, tls.rwTimeoutUs, cancelled_, [&](auto&& complete) {
                 stream.async_connect(
                     endpoints,
                     [c = std::forward<decltype(complete)>(complete)](
@@ -255,7 +288,7 @@ struct HttpClient::Impl {
                 return result;
             }
 
-            ec = runStep(io, stream, tls.rwTimeoutUs, [&](auto&& complete) {
+            ec = runStep(io, stream, tls.rwTimeoutUs, cancelled_, [&](auto&& complete) {
                 http::async_write(
                     stream, request,
                     [c = std::forward<decltype(complete)>(complete)](
@@ -266,7 +299,7 @@ struct HttpClient::Impl {
                 return result;
             }
 
-            readResponse(io, stream, tls.rwTimeoutUs, buffer, maxBytes, *cookieJar, origin, result);
+            readResponse(io, stream, tls.rwTimeoutUs, cancelled_, buffer, maxBytes, *cookieJar, origin, result);
 
             boost::system::error_code shutdownEc;
             stream.socket().shutdown(tcp::socket::shutdown_both, shutdownEc);
@@ -363,11 +396,30 @@ struct HttpClient::Impl {
         return out;
     }
 
+    void cancel()
+    {
+        cancelled_.store(true);
+        // Wake the worker's blocked io.run(); io_context::stop() is one of the
+        // few thread-safe members. The mutex guarantees activeIo_ is still live
+        // (fetchOnce clears it under the same lock before its io_context dies).
+        std::lock_guard<std::mutex> lock(cancelMutex_);
+        if (activeIo_) {
+            activeIo_->stop();
+        }
+    }
+
     std::string baseUrl;
     TlsOptions tls;
     std::shared_ptr<TlsSessionCache> sessionCache;
     std::shared_ptr<CookieJar> cookieJar;
     ssl::context tlsContext;
+
+    // Cross-thread cancellation (see HttpClient::cancel). cancelled_ is the
+    // source of truth checked in runStep; activeIo_ is the in-flight request's
+    // io_context, published only while a fetch is running.
+    std::atomic_bool cancelled_ { false };
+    std::mutex cancelMutex_;
+    asio::io_context* activeIo_ = nullptr;
 };
 
 HttpClient::HttpClient(
@@ -399,6 +451,11 @@ HttpResponse HttpClient::post(
 const std::string& HttpClient::baseUrl() const
 {
     return impl_->baseUrl;
+}
+
+void HttpClient::cancel()
+{
+    impl_->cancel();
 }
 
 } // namespace gig

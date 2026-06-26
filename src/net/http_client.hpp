@@ -57,6 +57,16 @@ public:
 
     const std::string& baseUrl() const;
 
+    // Abort an in-flight get()/post() from another thread (e.g. a shutdown
+    // signal). Wakes the blocked I/O so the current request returns promptly
+    // with an error instead of running out the rw timeout -- needed because the
+    // login POST carries a generous 15s floor (Frigate hashes server-side), so
+    // a refresh in flight would otherwise stall shutdown that long. Permanent:
+    // once cancelled, every subsequent request on this client fails fast. Safe
+    // to call concurrently with a request in progress; the client is otherwise
+    // single-threaded.
+    void cancel();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

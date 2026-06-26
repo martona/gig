@@ -37,8 +37,6 @@ add_executable(gig WIN32
     src/health/stream_health.h
     src/net/cert_pin.cpp
     src/net/cert_pin.hpp
-    src/net/cng_tls.cpp
-    src/net/cng_tls.hpp
     src/net/cookie_jar.cpp
     src/net/cookie_jar.hpp
     src/net/frigate_auth.cpp
@@ -53,8 +51,6 @@ add_executable(gig WIN32
     src/net/tls_session_cache.cpp
     src/net/tls_session_cache.hpp
     src/net/url.h
-    src/net/win_cert_store.cpp
-    src/net/win_cert_store.h
     src/platform/settings_store.hpp
     src/platform/settings_store_win.cpp
     src/render/d3d11_renderer.cpp
@@ -92,7 +88,16 @@ target_link_libraries(gig PRIVATE
 
 if(WIN32)
     enable_language(RC)
-    target_sources(gig PRIVATE resources/gig.rc)
+    target_sources(gig PRIVATE
+        resources/gig.rc
+        # Windows-only TLS client-cert path (CNG bridge + cert-store picker).
+        # The lazy client-cert callback drops off-Windows; login auth is the
+        # cross-platform replacement. See tls_context.cpp (#ifdef _WIN32).
+        src/net/cng_tls.cpp
+        src/net/cng_tls.hpp
+        src/net/win_cert_store.cpp
+        src/net/win_cert_store.h
+    )
 
     target_compile_definitions(gig PRIVATE
         NOMINMAX

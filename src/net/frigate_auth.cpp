@@ -108,6 +108,12 @@ void FrigateAuth::stop()
 {
     stopRequested_ = true;
     cv_.notify_all();
+    // A refresh login may be blocked in client_->post() (the 15s loginTimeout
+    // floor); abort it so shutdown doesn't wait it out. refreshLoop sees the
+    // failed login + stopRequested_ and returns without retrying.
+    if (client_) {
+        client_->cancel();
+    }
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -128,6 +134,8 @@ void FrigateAuth::refreshLoop()
         if (login(&error)) {
             logInfo() << "frigate auth: token refreshed";
             wait = config_.refreshInterval;
+        } else if (stopRequested_.load()) {
+            return; // login aborted by stop(); shutting down, not a real failure
         } else {
             logWarning() << "frigate auth: refresh failed (" << error << "); retrying in "
                          << RetryInterval.count() << "s";

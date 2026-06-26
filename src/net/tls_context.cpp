@@ -1,7 +1,9 @@
 #include "net/tls_context.hpp"
 
 #include "net/cert_pin.hpp"
+#ifdef _WIN32
 #include "net/cng_tls.hpp"
+#endif
 
 #include <filesystem>
 #include <stdexcept>
@@ -72,8 +74,12 @@ void configureSslContext(ssl::context& context, const TlsOptions& tls)
         // Client cert handling is lazy/handshake-driven: the CurrentUser\MY
         // picker and CNG consent appear only if a server actually requests a
         // certificate, and the selection is cached process-wide. Servers that
-        // never ask (e.g. Frigate's own nginx) stay prompt-free.
+        // never ask (e.g. Frigate's own nginx) stay prompt-free. The CNG bridge
+        // is Windows-only; off-Windows useWindowsStore is never derived (login
+        // auth is the cross-platform path), so this simply has no client cert.
+#ifdef _WIN32
         installWindowsStoreClientCertCallback(context.native_handle());
+#endif
         return;
     }
 
