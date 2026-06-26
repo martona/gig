@@ -87,6 +87,7 @@ std::optional<std::wstring> browseForFile(HWND owner)
 struct DialogState {
     AppConfig* config;
     bool* showOverlay;
+    int* labelMode; // 0 hide / 1 show-on-error-only / 2 always
     std::string status;
 };
 
@@ -119,6 +120,18 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     SetDlgItemInt(dlg, IDC_POLL, static_cast<UINT>(c.pollIntervalSeconds), FALSE);
     CheckDlgButton(dlg, IDC_SOFTWARE, c.softwareDecode ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dlg, IDC_OVERLAY, *state.showOverlay ? BST_CHECKED : BST_UNCHECKED);
+
+    HWND labelCombo = GetDlgItem(dlg, IDC_LABELMODE);
+    SendMessageW(labelCombo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(labelCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Hide"));
+    SendMessageW(labelCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Show on error only"));
+    SendMessageW(labelCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Always show"));
+    int sel = state.labelMode ? *state.labelMode : 1;
+    if (sel < 0 || sel > 2) {
+        sel = 1;
+    }
+    SendMessageW(labelCombo, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
+
     setDlgTextUtf8(dlg, IDC_URL, c.url);
     setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
 }
@@ -134,6 +147,12 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
     c.pollIntervalSeconds = static_cast<int>(GetDlgItemInt(dlg, IDC_POLL, nullptr, FALSE));
     c.softwareDecode = IsDlgButtonChecked(dlg, IDC_SOFTWARE) == BST_CHECKED;
     *state.showOverlay = IsDlgButtonChecked(dlg, IDC_OVERLAY) == BST_CHECKED;
+    if (state.labelMode) {
+        const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LABELMODE), CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR) {
+            *state.labelMode = static_cast<int>(sel);
+        }
+    }
     c.url = getDlgTextUtf8(dlg, IDC_URL);
     c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
     // tls.useWindowsStore is re-derived from ca/cert/key on reload; rwTimeoutUs
@@ -235,13 +254,15 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 
 } // namespace
 
-bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, const std::string& statusMessage)
+bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, int& labelMode,
+                        const std::string& statusMessage)
 {
     // Edit a working copy so a Cancel in either the primary or the nested advanced
     // dialog leaves the caller's config untouched; commit only on primary OK.
     AppConfig working = config;
     bool workingOverlay = showOverlay;
-    DialogState state { &working, &workingOverlay, statusMessage };
+    int workingLabelMode = labelMode;
+    DialogState state { &working, &workingOverlay, &workingLabelMode, statusMessage };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), parent,
         primaryDlgProc, reinterpret_cast<LPARAM>(&state));
@@ -250,6 +271,7 @@ bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, const
     }
     config = working;
     showOverlay = workingOverlay;
+    labelMode = workingLabelMode;
     return true;
 }
 

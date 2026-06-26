@@ -27,3 +27,4 @@
 #define IDC_STATUS          2017
 #define IDD_SETTINGS_ADVANCED 2018
 #define IDC_ADVANCED        2019
+#define IDC_LABELMODE       2020

@@ -143,6 +143,7 @@ bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
 struct StartupConfig {
     gig::AppConfig session;
     bool showOverlay = true;
+    LabelMode labelMode = LabelMode::ErrorOnly;
 };
 
 // Read all settings from the platform store, applying the same derivation +
@@ -163,6 +164,8 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     s.tls.keyFile = store.getString("key").value_or(std::string());
     s.softwareDecode = store.getBool("software").value_or(false);
     cfg.showOverlay = store.getBool("overlay").value_or(false); // debug tile off by default; status lives in the toolbar
+    const int labelMode = static_cast<int>(store.getInt("cam-labels").value_or(1)); // default: show on error only
+    cfg.labelMode = static_cast<LabelMode>((labelMode >= 0 && labelMode <= 2) ? labelMode : 1);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -195,7 +198,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // Persist the editable settings back to the store (mirror of loadConfig's keys).
 // The password is DPAPI-encrypted; an empty password removes the value rather
 // than storing an empty blob. useWindowsStore is derived on load, never stored.
-void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay)
+void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode)
 {
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
@@ -212,6 +215,7 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOve
     store.setString("key", s.tls.keyFile);
     store.setBool("software", s.softwareDecode);
     store.setBool("overlay", showOverlay);
+    store.setInt("cam-labels", static_cast<int>(labelMode));
     store.setBool("insecure", !s.tls.verifyServer);
     store.setInt("poll-interval", s.pollIntervalSeconds);
     store.setInt("rw-timeout-us", s.tls.rwTimeoutUs);
@@ -422,10 +426,11 @@ int main(int argc, char** argv)
             gig::logWarning() << "config not usable (" << applied.error << "); opening settings";
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
-            if (!gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, applied.error)) {
+            int labelMode = static_cast<int>(cfg.labelMode);
+            if (!gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, labelMode, applied.error)) {
                 throw std::runtime_error(applied.error); // cancelled -> nothing to show
             }
-            saveConfig(*settings, edited, overlay);
+            saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
             cfg = loadConfig(*settings);
             applied = session.applyConfig(cfg.session);
         }
@@ -438,6 +443,7 @@ int main(int argc, char** argv)
         }
 #endif
         renderer->setCameraLabels(session.cameraLabels());
+        renderer->setLabelMode(cfg.labelMode);
 
         OverlayStats initialStats;
         initialStats.showDiagnostics = cfg.showOverlay;
@@ -487,9 +493,11 @@ int main(int argc, char** argv)
         auto openSettings = [&]() {
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
-            if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay)) {
-                saveConfig(*settings, edited, overlay);
+            int labelMode = static_cast<int>(cfg.labelMode);
+            if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, labelMode)) {
+                saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
                 cfg = loadConfig(*settings); // re-derive useWindowsStore + re-validate
+                renderer->setLabelMode(cfg.labelMode);
                 OverlayStats overlayStats;
                 overlayStats.showDiagnostics = cfg.showOverlay;
                 renderer->setDiagnostics(overlayStats);

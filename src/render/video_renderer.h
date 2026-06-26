@@ -31,6 +31,11 @@ struct OverlayStats {
     std::string statusDetail;    // short reason (Disconnected)
 };
 
+// When to draw the per-tile camera label. ErrorOnly shows it only while a tile
+// has no live frame (the connecting / reconnecting "signal" phase), where it's
+// useful to identify which camera; it stays out of the way once video is up.
+enum class LabelMode { Hide = 0, ErrorOnly = 1, Always = 2 };
+
 class VideoRenderer {
 public:
     // A button press in the on-screen toolbar, polled by the run loop. The log
@@ -53,6 +58,10 @@ public:
     // Per-camera labels (stable camera order) and live diagnostics for the HUD.
     virtual void setCameraLabels(const std::vector<std::string>& labels) = 0;
     virtual void setDiagnostics(const OverlayStats& stats) = 0;
+
+    // When to draw the per-tile labels. Changes rarely (settings only), so it's a
+    // setter rather than per-frame state.
+    virtual void setLabelMode(LabelMode mode) { (void)mode; }
 
     // Per-camera cumulative downloaded bytes (stable order), pushed each frame so
     // the renderer can animate a data-driven "receiving / reconnecting" signal on

@@ -446,10 +446,12 @@ public:
                 renderSingleTile(static_cast<std::size_t>(focusedTile_), frames);
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
-                drawTileLabel(
-                    gig::TileRect { 0.0f, 0.0f, static_cast<float>(backBufferWidth_), static_cast<float>(backBufferHeight_) },
-                    labelFor(static_cast<std::size_t>(focusedTile_)),
-                    2.0f);
+                if (labelVisible(static_cast<std::size_t>(focusedTile_))) {
+                    drawTileLabel(
+                        gig::TileRect { 0.0f, 0.0f, static_cast<float>(backBufferWidth_), static_cast<float>(backBufferHeight_) },
+                        labelFor(static_cast<std::size_t>(focusedTile_)),
+                        2.0f);
+                }
                 overlay_.flush(context_.Get());
             } else {
                 // Reserve the top strip for the toolbar so the grid sits below it
@@ -471,7 +473,9 @@ public:
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
                 for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
-                    drawTileLabel(layout.tiles[i], labelFor(i), 1.0f);
+                    if (labelVisible(i)) {
+                        drawTileLabel(layout.tiles[i], labelFor(i), 1.0f);
+                    }
                 }
                 if (showDiagnostics && frames.size() < layout.tiles.size()) {
                     drawDiagnosticsTile(layout.tiles[frames.size()]);
@@ -519,6 +523,11 @@ public:
     void setTileActivity(const std::vector<std::uint64_t>& byteCounts) override
     {
         tileBytes_ = byteCounts;
+    }
+
+    void setLabelMode(LabelMode mode) override
+    {
+        labelMode_ = mode;
     }
 
     bool handleEvent(const SDL_Event& event) override
@@ -1252,6 +1261,18 @@ private:
         return index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
     }
 
+    // Whether tile `index`'s label should draw this frame, per the label mode.
+    // ErrorOnly shows it only while the tile is in the signal phase (no frame).
+    bool labelVisible(std::size_t index) const
+    {
+        switch (labelMode_) {
+        case LabelMode::Hide: return false;
+        case LabelMode::Always: return true;
+        case LabelMode::ErrorOnly: return index < tiles_.size() && tiles_[index].showedSignal;
+        }
+        return false;
+    }
+
     void drawTileLabel(const gig::TileRect& cell, const std::string& label, float scale)
     {
         if (label.empty() || !overlay_.ready() || cell.width <= 0.0f || cell.height <= 0.0f) {
@@ -1630,6 +1651,7 @@ private:
     gig::TextOverlay overlay_;
     std::vector<std::string> cameraLabels_;
     OverlayStats overlayStats_;
+    LabelMode labelMode_ = LabelMode::ErrorOnly;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();
     bool imguiReady_ = false;
     bool logViewVisible_ = false;
