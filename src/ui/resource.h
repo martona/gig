@@ -25,3 +25,5 @@
 #define IDC_OVERLAY         2015
 #define IDC_INSECURE        2016
 #define IDC_STATUS          2017
+#define IDD_SETTINGS_ADVANCED 2018
+#define IDC_ADVANCED        2019

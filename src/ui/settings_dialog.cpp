@@ -90,55 +90,64 @@ struct DialogState {
     std::string status;
 };
 
-void populate(HWND dlg, const DialogState& state)
+// Primary dialog: the base URL + credentials most users touch.
+void populatePrimary(HWND dlg, const DialogState& state)
 {
     const AppConfig& c = *state.config;
     setDlgTextUtf8(dlg, IDC_BASE, c.baseUrl);
     setDlgTextUtf8(dlg, IDC_USER, c.user);
     setDlgTextUtf8(dlg, IDC_PASSWORD, c.password);
-    SetDlgItemInt(dlg, IDC_LOGIN_REFRESH, static_cast<UINT>(c.loginRefreshSeconds), FALSE);
-    setDlgTextUtf8(dlg, IDC_CA, c.tls.caFile);
-    setDlgTextUtf8(dlg, IDC_CERT, c.tls.certFile);
-    setDlgTextUtf8(dlg, IDC_KEY, c.tls.keyFile);
-    SetDlgItemInt(dlg, IDC_POLL, static_cast<UINT>(c.pollIntervalSeconds), FALSE);
-    setDlgTextUtf8(dlg, IDC_URL, c.url);
-    setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
-    CheckDlgButton(dlg, IDC_SOFTWARE, c.softwareDecode ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(dlg, IDC_OVERLAY, *state.showOverlay ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(dlg, IDC_INSECURE, c.tls.verifyServer ? BST_UNCHECKED : BST_CHECKED);
 }
 
-void readBack(HWND dlg, const DialogState& state)
+void readBackPrimary(HWND dlg, const DialogState& state)
 {
     AppConfig& c = *state.config;
     c.baseUrl = getDlgTextUtf8(dlg, IDC_BASE);
     c.user = getDlgTextUtf8(dlg, IDC_USER);
     c.password = getDlgTextUtf8(dlg, IDC_PASSWORD);
-    c.loginRefreshSeconds = static_cast<int>(GetDlgItemInt(dlg, IDC_LOGIN_REFRESH, nullptr, FALSE));
+}
+
+// Advanced dialog: TLS material, tuning, and the niche connection fields.
+void populateAdvanced(HWND dlg, const DialogState& state)
+{
+    const AppConfig& c = *state.config;
+    setDlgTextUtf8(dlg, IDC_CA, c.tls.caFile);
+    setDlgTextUtf8(dlg, IDC_CERT, c.tls.certFile);
+    setDlgTextUtf8(dlg, IDC_KEY, c.tls.keyFile);
+    CheckDlgButton(dlg, IDC_INSECURE, c.tls.verifyServer ? BST_UNCHECKED : BST_CHECKED);
+    SetDlgItemInt(dlg, IDC_LOGIN_REFRESH, static_cast<UINT>(c.loginRefreshSeconds), FALSE);
+    SetDlgItemInt(dlg, IDC_POLL, static_cast<UINT>(c.pollIntervalSeconds), FALSE);
+    CheckDlgButton(dlg, IDC_SOFTWARE, c.softwareDecode ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dlg, IDC_OVERLAY, *state.showOverlay ? BST_CHECKED : BST_UNCHECKED);
+    setDlgTextUtf8(dlg, IDC_URL, c.url);
+    setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
+}
+
+void readBackAdvanced(HWND dlg, const DialogState& state)
+{
+    AppConfig& c = *state.config;
     c.tls.caFile = getDlgTextUtf8(dlg, IDC_CA);
     c.tls.certFile = getDlgTextUtf8(dlg, IDC_CERT);
     c.tls.keyFile = getDlgTextUtf8(dlg, IDC_KEY);
+    c.tls.verifyServer = IsDlgButtonChecked(dlg, IDC_INSECURE) != BST_CHECKED;
+    c.loginRefreshSeconds = static_cast<int>(GetDlgItemInt(dlg, IDC_LOGIN_REFRESH, nullptr, FALSE));
     c.pollIntervalSeconds = static_cast<int>(GetDlgItemInt(dlg, IDC_POLL, nullptr, FALSE));
-    c.url = getDlgTextUtf8(dlg, IDC_URL);
-    c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
     c.softwareDecode = IsDlgButtonChecked(dlg, IDC_SOFTWARE) == BST_CHECKED;
     *state.showOverlay = IsDlgButtonChecked(dlg, IDC_OVERLAY) == BST_CHECKED;
-    c.tls.verifyServer = IsDlgButtonChecked(dlg, IDC_INSECURE) != BST_CHECKED;
+    c.url = getDlgTextUtf8(dlg, IDC_URL);
+    c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
     // tls.useWindowsStore is re-derived from ca/cert/key on reload; rwTimeoutUs
     // is left as-is (not exposed in the dialog).
 }
 
-INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lParam)
+INT_PTR CALLBACK advancedDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message) {
     case WM_INITDIALOG: {
         auto* state = reinterpret_cast<DialogState*>(lParam);
         SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         umbra::setDarkWndNotifySafe(dlg); // dark title bar + themed controls
-        populate(dlg, *state);
-        if (!state->status.empty()) {
-            setDlgTextUtf8(dlg, IDC_STATUS, state->status);
-        }
+        populateAdvanced(dlg, *state);
         return TRUE;
     }
     case WM_COMMAND:
@@ -161,7 +170,53 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM l
         case IDOK: {
             auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
             if (state) {
-                readBack(dlg, *state);
+                readBackAdvanced(dlg, *state);
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        default:
+            break;
+        }
+        return FALSE;
+    default:
+        return FALSE;
+    }
+}
+
+INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_INITDIALOG: {
+        auto* state = reinterpret_cast<DialogState*>(lParam);
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        umbra::setDarkWndNotifySafe(dlg); // dark title bar + themed controls
+        populatePrimary(dlg, *state);
+        if (!state->status.empty()) {
+            setDlgTextUtf8(dlg, IDC_STATUS, state->status);
+        }
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_ADVANCED: {
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (state) {
+                // Nested modal editing the same working config: its OK writes the
+                // advanced fields back, its Cancel leaves them as they were. The
+                // primary fields stay live in their controls across the trip.
+                DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS_ADVANCED),
+                    dlg, advancedDlgProc, reinterpret_cast<LPARAM>(state));
+            }
+            return TRUE;
+        }
+        case IDOK: {
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (state) {
+                readBackPrimary(dlg, *state);
             }
             EndDialog(dlg, IDOK);
             return TRUE;
@@ -182,11 +237,20 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM l
 
 bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, const std::string& statusMessage)
 {
-    DialogState state { &config, &showOverlay, statusMessage };
+    // Edit a working copy so a Cancel in either the primary or the nested advanced
+    // dialog leaves the caller's config untouched; commit only on primary OK.
+    AppConfig working = config;
+    bool workingOverlay = showOverlay;
+    DialogState state { &working, &workingOverlay, statusMessage };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), parent,
-        settingsDlgProc, reinterpret_cast<LPARAM>(&state));
-    return result == IDOK;
+        primaryDlgProc, reinterpret_cast<LPARAM>(&state));
+    if (result != IDOK) {
+        return false;
+    }
+    config = working;
+    showOverlay = workingOverlay;
+    return true;
 }
 
 } // namespace gig
