@@ -51,6 +51,13 @@ constexpr std::array<Vertex, 4> QuadVertices = {
 // both the overlay atlas and the ImGui log font -- bump this one knob to taste.
 constexpr float kBaseFontPx = 16.0f;
 
+// Ease curve (smooth in/out) for the click-to-zoom tile animation.
+float smoothstep01(float x)
+{
+    x = std::clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
 const char* VertexShaderSource = R"(
 struct VSIn {
     float2 position : POSITION;
@@ -429,6 +436,15 @@ public:
             animTime_ += dt;
             updateActivity(dt);
 
+            // Ease the zoom animation toward its target (1 = focused, 0 = grid).
+            const float zoomTarget = (focusedTile_ >= 0) ? 1.0f : 0.0f;
+            if (animProgress_ != zoomTarget) {
+                const float step = (kZoomDuration > 0.0f) ? dt / kZoomDuration : 1.0f;
+                animProgress_ = (animProgress_ < zoomTarget)
+                    ? std::min(zoomTarget, animProgress_ + step)
+                    : std::max(zoomTarget, animProgress_ - step);
+            }
+
             const float clearColor[] = { 0.01f, 0.01f, 0.012f, 1.0f };
             context_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
 
@@ -442,7 +458,9 @@ public:
             context_->RSSetViewports(1, &fullViewport);
             context_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
 
-            if (focusedTile_ >= 0 && focusedTile_ < static_cast<int>(frames.size())) {
+            const bool fullyFocused = focusedTile_ >= 0 && animProgress_ >= 1.0f
+                && focusedTile_ < static_cast<int>(frames.size());
+            if (fullyFocused) {
                 renderSingleTile(static_cast<std::size_t>(focusedTile_), frames);
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
@@ -470,6 +488,24 @@ public:
                     tile.y += static_cast<float>(toolbarTop);
                 }
                 renderGridTiles(frames, layout);
+
+                // Zoom transition: a tile growing out of (or shrinking back into)
+                // its grid cell, drawn over the grid. At progress 1 we switch to
+                // the static fullscreen path above, so the hand-off is seamless.
+                if (animProgress_ > 0.0f && animTile_ >= 0
+                    && animTile_ < static_cast<int>(frames.size())
+                    && animTile_ < static_cast<int>(layout.tiles.size())) {
+                    const gig::TileRect& cell = layout.tiles[static_cast<std::size_t>(animTile_)];
+                    const float e = smoothstep01(animProgress_);
+                    const gig::TileRect grown {
+                        std::lerp(cell.x, 0.0f, e),
+                        std::lerp(cell.y, 0.0f, e),
+                        std::lerp(cell.width, static_cast<float>(backBufferWidth_), e),
+                        std::lerp(cell.height, static_cast<float>(backBufferHeight_), e),
+                    };
+                    drawTileContentAt(static_cast<std::size_t>(animTile_), grown);
+                }
+
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
                 for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
@@ -502,6 +538,14 @@ public:
 
     void setFocusedTile(int index) override
     {
+        if (index == focusedTile_) {
+            return;
+        }
+        // Remember the tile in motion: the target when zooming in, the outgoing
+        // one when zooming back to the grid. animProgress_ keeps its current value
+        // and eases toward the new target in render(), so clicking mid-zoom just
+        // reverses smoothly.
+        animTile_ = (index >= 0) ? index : focusedTile_;
         focusedTile_ = index;
     }
 
@@ -1155,6 +1199,24 @@ private:
         }
     }
 
+    // Draw tile `index`'s current content (video letterboxed into `rect`, or the
+    // signal animation) without mutating its upload/fade state -- that was already
+    // done this frame by renderGridTiles. Used by the zoom transition overlay.
+    void drawTileContentAt(std::size_t index, const gig::TileRect& rect)
+    {
+        if (index >= tiles_.size()) {
+            return;
+        }
+        const TileState& tile = tiles_[index];
+        if (tile.planeViews[0]) {
+            const D3D11_VIEWPORT viewport = computeVideoViewport(rect, tile.textureWidth, tile.textureHeight);
+            context_->RSSetViewports(1, &viewport);
+            drawTile(tile);
+        } else {
+            drawSignal(rect, index, tile.signalEnergy, 1.0f);
+        }
+    }
+
     // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
     // the back buffer has already been cleared.
     void renderGridTiles(const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::GridLayout& layout)
@@ -1648,6 +1710,9 @@ private:
 
     std::vector<TileState> tiles_;
     int focusedTile_ = -1;
+    int animTile_ = -1;                            // tile zooming in/out (-1 = none)
+    float animProgress_ = 0.0f;                     // 0 = grid cell, 1 = fullscreen
+    static constexpr float kZoomDuration = 0.30f;   // seconds for the zoom/unzoom
     gig::TextOverlay overlay_;
     std::vector<std::string> cameraLabels_;
     OverlayStats overlayStats_;
