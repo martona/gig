@@ -41,6 +41,10 @@ CameraSupervisor::CameraSupervisor(
         slot.info = std::move(camera);
         slots_.push_back(std::move(slot));
     }
+
+    // One activity counter per slot (value-initialized to 0). Lives for the
+    // supervisor's lifetime, independent of decoder churn.
+    slotBytes_ = std::make_unique<std::atomic<std::uint64_t>[]>(slots_.size());
 }
 
 CameraSupervisor::~CameraSupervisor()
@@ -100,6 +104,17 @@ std::vector<std::shared_ptr<VideoFrame>> CameraSupervisor::snapshotFrames() cons
 {
     std::lock_guard<std::mutex> lock(frameMutex_);
     return latestFrames_;
+}
+
+std::vector<std::uint64_t> CameraSupervisor::tileByteCounts() const
+{
+    std::vector<std::uint64_t> counts(slots_.size(), 0);
+    if (slotBytes_) {
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            counts[i] = slotBytes_[i].load(std::memory_order_relaxed);
+        }
+    }
+    return counts;
 }
 
 CameraSupervisor::ControlPlaneHealth CameraSupervisor::controlPlaneHealth() const
@@ -242,7 +257,8 @@ void CameraSupervisor::startDecoder(std::size_t index)
             latestFrames_[index] = std::move(shared);
         },
         config_.softwareDecode,
-        config_.startupStagger * static_cast<int>(index));
+        config_.startupStagger * static_cast<int>(index),
+        slotBytes_ ? &slotBytes_[index] : nullptr);
     slot.decoder->start();
 }
 

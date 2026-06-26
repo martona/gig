@@ -110,14 +110,26 @@ int interruptCallback(void* opaque)
     return (stopFlag && stopFlag->load()) ? 1 : 0;
 }
 
+// What the AVIO read callback needs: the byte source plus an optional activity
+// sink. Bundled because avio_alloc_context carries a single opaque pointer.
+struct ReadContext {
+    gig::MediaStream* stream;
+    std::atomic<std::uint64_t>* byteSink; // may be null
+};
+
 // AVIO read callback: pull decrypted bytes from our MediaStream. FFmpeg wants a
 // positive byte count, AVERROR_EOF at a clean end, or another negative AVERROR on
 // error/abort -- never 0.
 int readPacket(void* opaque, std::uint8_t* buf, int size)
 {
-    auto* stream = static_cast<gig::MediaStream*>(opaque);
-    const int result = stream->read(buf, size);
+    auto* ctx = static_cast<ReadContext*>(opaque);
+    const int result = ctx->stream->read(buf, size);
     if (result > 0) {
+        if (ctx->byteSink) {
+            // Cheap "we are receiving" signal for the UI -- counts pre-keyframe
+            // bytes, which is exactly the window where no frame can be shown yet.
+            ctx->byteSink->fetch_add(static_cast<std::uint64_t>(result), std::memory_order_relaxed);
+        }
         return result;
     }
     return (result == 0) ? AVERROR_EOF : AVERROR_EXIT;
@@ -592,13 +604,15 @@ FfmpegDecoder::FfmpegDecoder(
     std::shared_ptr<D3D11DecodeContext> d3d11Context,
     FrameCallback frameCallback,
     bool softwareOnly,
-    std::chrono::milliseconds startupDelay)
+    std::chrono::milliseconds startupDelay,
+    std::atomic<std::uint64_t>* byteSink)
     : url_(std::move(url))
     , tlsClient_(std::move(tlsClient))
     , d3d11Context_(std::move(d3d11Context))
     , frameCallback_(std::move(frameCallback))
     , softwareOnly_(softwareOnly)
     , startupDelay_(startupDelay)
+    , byteSink_(byteSink)
 {
 }
 
@@ -701,13 +715,17 @@ void FfmpegDecoder::decodeOnce()
         }
     } activeStreamGuard{ this };
 
+    // Declared before the AVIO so it outlives it (destruction is format -> avio ->
+    // readContext -> guard -> stream); readPacket reads through it.
+    ReadContext readContext { stream.get(), byteSink_ };
+
     constexpr int ioBufferSize = 64 * 1024;
     auto* ioBuffer = static_cast<unsigned char*>(av_malloc(ioBufferSize));
     if (!ioBuffer) {
         throw std::runtime_error("Could not allocate AVIO buffer.");
     }
     AVIOContext* rawAvioContext = avio_alloc_context(
-        ioBuffer, ioBufferSize, /*write_flag=*/0, stream.get(), &readPacket, nullptr, nullptr);
+        ioBuffer, ioBufferSize, /*write_flag=*/0, &readContext, &readPacket, nullptr, nullptr);
     if (!rawAvioContext) {
         av_free(ioBuffer);
         throw std::runtime_error("Could not allocate AVIO context.");

@@ -603,6 +603,7 @@ int main(int argc, char** argv)
 #endif
 
             const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
+            renderer->setTileActivity(session.tileByteCounts()); // drives the per-tile signal animation
             renderer->render(frames);
 
             // Toolbar buttons route through the same paths as F2 / F5.

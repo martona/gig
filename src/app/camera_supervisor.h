@@ -70,6 +70,12 @@ public:
     };
     ControlPlaneHealth controlPlaneHealth() const;
 
+    // Per-camera cumulative downloaded bytes (stable slot order) for the UI's
+    // "receiving" activity animation. Advances while a decoder is pulling data,
+    // stalls when it isn't -- so the renderer can tell "alive, no keyframe yet"
+    // from "actually stuck". Read from the UI thread; bumped by decoder threads.
+    std::vector<std::uint64_t> tileByteCounts() const;
+
 private:
     enum class Liveness { Unknown, Online, Offline };
     static const char* livenessName(Liveness liveness);
@@ -94,6 +100,9 @@ private:
     std::shared_ptr<TlsClient> videoTls_; // one shared TLS holder for all video connections
 
     std::vector<CameraSlot> slots_; // lifecycle owned by the poll thread (or start() when not polling)
+    // One byte counter per slot, owned here so it outlives any decoder and the UI
+    // never touches a decoder being torn down. Bumped by the AVIO read path.
+    std::unique_ptr<std::atomic<std::uint64_t>[]> slotBytes_;
 
     mutable std::mutex frameMutex_;
     std::vector<std::shared_ptr<VideoFrame>> latestFrames_; // guarded by frameMutex_

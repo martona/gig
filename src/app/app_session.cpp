@@ -150,6 +150,11 @@ int AppSession::ingestKbps() const
     return supervisor_ ? supervisor_->ingestKbps() : 0;
 }
 
+std::vector<std::uint64_t> AppSession::tileByteCounts() const
+{
+    return supervisor_ ? supervisor_->tileByteCounts() : std::vector<std::uint64_t>{};
+}
+
 ControlPlaneStatus AppSession::controlPlaneStatus() const
 {
     ControlPlaneStatus status;

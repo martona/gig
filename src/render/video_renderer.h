@@ -54,6 +54,12 @@ public:
     virtual void setCameraLabels(const std::vector<std::string>& labels) = 0;
     virtual void setDiagnostics(const OverlayStats& stats) = 0;
 
+    // Per-camera cumulative downloaded bytes (stable order), pushed each frame so
+    // the renderer can animate a data-driven "receiving / reconnecting" signal on
+    // tiles with no displayable frame yet. The renderer smooths the deltas into a
+    // per-tile activity level; flat deltas read as cold (stuck), rising as alive.
+    virtual void setTileActivity(const std::vector<std::uint64_t>& byteCounts) { (void)byteCounts; }
+
     // Feed an SDL event to any in-renderer UI (ImGui). Returns true if the UI
     // consumed it, so the caller should skip its own handling of that event.
     virtual bool handleEvent(const SDL_Event& event) { (void)event; return false; }

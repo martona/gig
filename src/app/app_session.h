@@ -99,6 +99,10 @@ public:
     // Control-plane reachability for the status UI (default/healthy when stopped).
     ControlPlaneStatus controlPlaneStatus() const;
 
+    // Per-camera cumulative downloaded bytes (stable order) for the per-tile
+    // "receiving" activity animation; empty when stopped.
+    std::vector<std::uint64_t> tileByteCounts() const;
+
 private:
     std::shared_ptr<D3D11DecodeContext> decodeContext_;
     std::shared_ptr<TlsSessionCache> sessionCache_;

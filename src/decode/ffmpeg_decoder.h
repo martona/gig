@@ -28,7 +28,11 @@ public:
         std::shared_ptr<D3D11DecodeContext> d3d11Context,
         FrameCallback frameCallback,
         bool softwareOnly = false,
-        std::chrono::milliseconds startupDelay = std::chrono::milliseconds(0));
+        std::chrono::milliseconds startupDelay = std::chrono::milliseconds(0),
+        // Optional sink the AVIO read path adds downloaded byte counts to, so the
+        // UI can show live "receiving data" activity before the first keyframe.
+        // Owned by the caller (the supervisor) and outlives the decoder.
+        std::atomic<std::uint64_t>* byteSink = nullptr);
     ~FfmpegDecoder();
 
     FfmpegDecoder(const FfmpegDecoder&) = delete;
@@ -47,6 +51,7 @@ private:
     FrameCallback frameCallback_;
     bool softwareOnly_ = false;
     std::chrono::milliseconds startupDelay_ { 0 };
+    std::atomic<std::uint64_t>* byteSink_ = nullptr;
     std::atomic_bool stopRequested_ = false;
     std::thread worker_;
     std::uint64_t frameIndex_ = 0;

@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -142,11 +144,88 @@ float4 PSMain(PSIn input) : SV_TARGET {
 }
 )";
 
+// Procedural "signal" shader for tiles with no displayable frame yet (waiting for
+// a keyframe, reconnecting, or offline). It's a scope: a trace whose liveliness
+// is driven by uEnergy (the real download rate), so a stream that's receiving but
+// pre-keyframe reads alive/calm, and a stuck one goes cold with a searching sweep.
+const char* SignalPixelShaderSource = R"(
+cbuffer SignalConstants : register(b0) {
+    float uTime;
+    float uEnergy;
+    float uSeed;
+    float uAspect;
+    float uAlpha;
+    float3 _pad;
+};
+
+struct PSIn {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+float hash11(float n) { return frac(sin(n) * 43758.5453); }
+
+float traceWave(float x, float t, float e, float seed) {
+    // Calm, slow, low-frequency shape -- what you see when little/no data arrives.
+    float smoothW = sin(x * 7.0 + t * 1.3 + seed) * 0.6
+                  + sin(x * 3.0 - t * 0.9 + seed * 0.5) * 0.4;
+    // Wild, fast, jagged shape -- what you see when data is pouring in.
+    float chaosW = sin(x * 30.0 + t * 20.0 + seed * 2.3) * 0.5
+                 + sin(x * 61.0 - t * 31.0 + seed) * 0.3
+                 + (hash11(floor(x * 120.0) + floor(t * 55.0) * 7.0) - 0.5) * 1.0;
+    float shape = lerp(smoothW, chaosW, e); // morph smooth -> crazy with energy
+    float a = 0.04 + e * 0.34;              // resting height -> crazy height
+    return shape * a;
+}
+
+float4 PSMain(PSIn input) : SV_TARGET {
+    float2 uv = input.uv;
+    float t = uTime;
+    float e = saturate(uEnergy);
+
+    float3 col = float3(0.043, 0.051, 0.071);
+    col += smoothstep(0.004, 0.0, abs(uv.y - 0.5)) * 0.05; // faint baseline
+
+    float3 cold = float3(0.88, 0.62, 0.16);
+    float3 hot  = float3(0.27, 0.80, 0.66);
+    float3 traceCol = lerp(cold, hot, saturate(e * 1.4));
+
+    float w = traceWave(uv.x, t, e, uSeed);
+    float d = abs(uv.y - 0.5 - w);
+    float core = smoothstep(0.018, 0.0, d);
+    float glow = smoothstep(0.085, 0.0, d) * 0.22;
+    col += traceCol * (core + glow);
+
+    float head = smoothstep(0.03, 0.0, distance(uv, float2(0.985, 0.5 + w))) * e;
+    col += traceCol * head;
+
+    float coldness = 1.0 - saturate(e / 0.18);
+    if (coldness > 0.001) {
+        float sweepX = frac(t * 0.5 + uSeed * 0.37);
+        float beam = smoothstep(0.012, 0.0, abs(uv.x - sweepX));
+        float behind = sweepX - uv.x;
+        float trail = (behind > 0.0) ? saturate(1.0 - behind / 0.16) * 0.16 : 0.0;
+        col += cold * (beam * 0.6 + trail) * coldness;
+    }
+
+    return float4(col, uAlpha);
+}
+)";
+
 struct ColorMatrixConstants {
     float r[4];
     float g[4];
     float b[4];
     float unused[4];
+};
+
+struct SignalConstants {
+    float time;
+    float energy;
+    float seed;
+    float aspect;
+    float alpha;
+    float pad[3];
 };
 
 ColorMatrixConstants yuvToRgbMatrix(bool fullRange)
@@ -339,6 +418,17 @@ public:
                 tiles_.resize(frames.size());
             }
 
+            // Advance the animation clock and ease each tile's activity from the
+            // latest byte counts (set just before this call by the run loop).
+            const auto nowTp = std::chrono::steady_clock::now();
+            float dt = haveRenderTp_ ? std::chrono::duration<float>(nowTp - lastRenderTp_).count() : 0.0f;
+            lastRenderTp_ = nowTp;
+            haveRenderTp_ = true;
+            dt = std::clamp(dt, 0.0f, 0.1f);
+            lastDt_ = dt;
+            animTime_ += dt;
+            updateActivity(dt);
+
             const float clearColor[] = { 0.01f, 0.01f, 0.012f, 1.0f };
             context_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
 
@@ -426,6 +516,11 @@ public:
         overlayStats_ = stats;
     }
 
+    void setTileActivity(const std::vector<std::uint64_t>& byteCounts) override
+    {
+        tileBytes_ = byteCounts;
+    }
+
     bool handleEvent(const SDL_Event& event) override
     {
         if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
@@ -489,6 +584,12 @@ private:
         std::shared_ptr<void> activeFrameOwner;
         ID3D11Texture2D* d3d11SourceTexture = nullptr;
         int d3d11SourceSlice = 0;
+
+        // Signal-animation state (for tiles with no displayable frame).
+        float signalEnergy = 0.0f;          // smoothed download activity, 0..1
+        std::uint64_t signalLastBytes = 0;  // last sampled cumulative byte count
+        bool showedSignal = false;          // signal was drawn last frame (for the resolve fade)
+        float frameFade = -1.0f;            // >=0 while crossfading signal out over the first frame
     };
 
     std::unique_lock<std::recursive_mutex> lockD3D11() const
@@ -554,10 +655,12 @@ private:
         ComPtr<ID3DBlob> bgraPixelShaderBlob;
         ComPtr<ID3DBlob> nv12PixelShaderBlob;
         ComPtr<ID3DBlob> yuv420PixelShaderBlob;
+        ComPtr<ID3DBlob> signalPixelShaderBlob;
         if (!compileShader(VertexShaderSource, "VSMain", "vs_4_0", vertexShaderBlob)
             || !compileShader(BgraPixelShaderSource, "PSMain", "ps_4_0", bgraPixelShaderBlob)
             || !compileShader(Nv12PixelShaderSource, "PSMain", "ps_4_0", nv12PixelShaderBlob)
-            || !compileShader(Yuv420PixelShaderSource, "PSMain", "ps_4_0", yuv420PixelShaderBlob)) {
+            || !compileShader(Yuv420PixelShaderSource, "PSMain", "ps_4_0", yuv420PixelShaderBlob)
+            || !compileShader(SignalPixelShaderSource, "PSMain", "ps_4_0", signalPixelShaderBlob)) {
             return false;
         }
 
@@ -594,6 +697,15 @@ private:
             nullptr,
             yuv420PixelShader_.GetAddressOf());
         if (failed(result, "ID3D11Device::CreatePixelShader(YUV420P)")) {
+            return false;
+        }
+
+        result = device_->CreatePixelShader(
+            signalPixelShaderBlob->GetBufferPointer(),
+            signalPixelShaderBlob->GetBufferSize(),
+            nullptr,
+            signalPixelShader_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreatePixelShader(Signal)")) {
             return false;
         }
 
@@ -643,7 +755,31 @@ private:
         colorMatrixDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
         result = device_->CreateBuffer(&colorMatrixDesc, nullptr, colorMatrixBuffer_.GetAddressOf());
-        return !failed(result, "ID3D11Device::CreateBuffer(ColorMatrix)");
+        if (failed(result, "ID3D11Device::CreateBuffer(ColorMatrix)")) {
+            return false;
+        }
+
+        D3D11_BUFFER_DESC signalDesc = {};
+        signalDesc.ByteWidth = sizeof(SignalConstants);
+        signalDesc.Usage = D3D11_USAGE_DEFAULT;
+        signalDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        result = device_->CreateBuffer(&signalDesc, nullptr, signalConstantBuffer_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreateBuffer(Signal)")) {
+            return false;
+        }
+
+        // Straight alpha blending, used only for the brief signal->frame crossfade.
+        D3D11_BLEND_DESC blendDesc = {};
+        blendDesc.RenderTarget[0].BlendEnable = TRUE;
+        blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        result = device_->CreateBlendState(&blendDesc, alphaBlendState_.GetAddressOf());
+        return !failed(result, "ID3D11Device::CreateBlendState");
     }
 
     void updateColorMatrix(bool fullRange)
@@ -944,10 +1080,77 @@ private:
         context_->PSSetShaderResources(0, 3, nullResources);
     }
 
+    // Ease each tile's signal energy toward its current download rate, so the
+    // animation tracks real bytes (alive vs stuck). Once per render frame.
+    void updateActivity(float dt)
+    {
+        // Reactive, not averaged: any bytes this frame slam energy to full, a frame
+        // with none lets it settle back toward calm. AVIO reads arrive in bursts, so
+        // this pumps energetically while a stream flows and goes smooth/flat the
+        // moment it stalls -- legible at a glance, where a smoothed average just sat
+        // near the (low) data-bearing-frame duty cycle and always looked quiet.
+        constexpr float kSettleTau = 0.25f; // seconds to calm down once data stops
+        const float settle = std::exp(-dt / kSettleTau);
+        for (std::size_t i = 0; i < tiles_.size(); ++i) {
+            TileState& tile = tiles_[i];
+            const std::uint64_t bytes = (i < tileBytes_.size()) ? tileBytes_[i] : tile.signalLastBytes;
+            const bool gotData = bytes > tile.signalLastBytes;
+            tile.signalLastBytes = bytes;
+            tile.signalEnergy = gotData ? 1.0f : tile.signalEnergy * settle;
+        }
+    }
+
+    // Draw the procedural signal animation across a whole cell (not letterboxed).
+    // alpha < 1 blends it over whatever is already there (the resolve crossfade).
+    void drawSignal(const gig::TileRect& cell, std::size_t index, float energy, float alpha)
+    {
+        if (cell.width <= 0.0f || cell.height <= 0.0f) {
+            return;
+        }
+        D3D11_VIEWPORT viewport = {};
+        viewport.TopLeftX = cell.x;
+        viewport.TopLeftY = cell.y;
+        viewport.Width = cell.width;
+        viewport.Height = cell.height;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        context_->RSSetViewports(1, &viewport);
+
+        SignalConstants constants = {};
+        constants.time = animTime_;
+        constants.energy = energy;
+        constants.seed = static_cast<float>(index) * 2.39996f; // golden-angle phase per tile
+        constants.aspect = cell.width / cell.height;
+        constants.alpha = alpha;
+        context_->UpdateSubresource(signalConstantBuffer_.Get(), 0, nullptr, &constants, 0, 0);
+
+        UINT stride = sizeof(Vertex);
+        UINT offset = 0;
+        ID3D11Buffer* vertexBuffers[] = { vertexBuffer_.Get() };
+        context_->IASetInputLayout(inputLayout_.Get());
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+        context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
+        context_->PSSetShader(signalPixelShader_.Get(), nullptr, 0);
+        ID3D11Buffer* constantBuffers[] = { signalConstantBuffer_.Get() };
+        context_->PSSetConstantBuffers(0, 1, constantBuffers);
+
+        const bool blend = alpha < 0.999f;
+        if (blend) {
+            const float factors[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            context_->OMSetBlendState(alphaBlendState_.Get(), factors, 0xffffffff);
+        }
+        context_->Draw(4, 0);
+        if (blend) {
+            context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+        }
+    }
+
     // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
     // the back buffer has already been cleared.
     void renderGridTiles(const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::GridLayout& layout)
     {
+        constexpr float kFadeDur = 0.22f; // quick resolve crossfade (signal -> first frame)
         for (std::size_t i = 0; i < frames.size(); ++i) {
             TileState& tile = tiles_[i];
             const VideoFrame* frame = frames[i].get();
@@ -959,14 +1162,40 @@ private:
                 resetFrameTextures(tile); // drop stale GPU state so an idle/offline tile blanks
             }
 
-            if (!tile.planeViews[0] || i >= layout.tiles.size()) {
+            if (i >= layout.tiles.size()) {
+                continue;
+            }
+            const gig::TileRect& cell = layout.tiles[i];
+
+            if (!tile.planeViews[0]) {
+                // No displayable frame yet (waiting for a keyframe / reconnecting /
+                // offline): the data-driven signal animation IS the tile.
+                drawSignal(cell, i, tile.signalEnergy, 1.0f);
+                tile.showedSignal = true;
+                tile.frameFade = -1.0f;
                 continue;
             }
 
+            // We have a frame. If we were just showing the signal, start a quick
+            // crossfade so it resolves into the first frame instead of popping.
+            if (tile.showedSignal) {
+                tile.frameFade = 0.0f;
+                tile.showedSignal = false;
+            }
             const D3D11_VIEWPORT videoViewport =
-                computeVideoViewport(layout.tiles[i], tile.textureWidth, tile.textureHeight);
+                computeVideoViewport(cell, tile.textureWidth, tile.textureHeight);
             context_->RSSetViewports(1, &videoViewport);
             drawTile(tile);
+            if (tile.frameFade >= 0.0f) {
+                const float a = 1.0f - tile.frameFade / kFadeDur;
+                if (a > 0.0f) {
+                    drawSignal(cell, i, tile.signalEnergy, a);
+                }
+                tile.frameFade += lastDt_;
+                if (tile.frameFade >= kFadeDur) {
+                    tile.frameFade = -1.0f;
+                }
+            }
         }
     }
 
@@ -983,19 +1212,39 @@ private:
             resetFrameTextures(tile);
         }
 
-        if (!tile.planeViews[0]) {
-            return;
-        }
-
         const gig::TileRect full {
             0.0f,
             0.0f,
             static_cast<float>(backBufferWidth_),
             static_cast<float>(backBufferHeight_),
         };
+
+        if (!tile.planeViews[0]) {
+            // No frame yet: fill the focused view with the signal animation too.
+            drawSignal(full, index, tile.signalEnergy, 1.0f);
+            tile.showedSignal = true;
+            tile.frameFade = -1.0f;
+            return;
+        }
+
+        if (tile.showedSignal) {
+            tile.frameFade = 0.0f;
+            tile.showedSignal = false;
+        }
         const D3D11_VIEWPORT videoViewport = computeVideoViewport(full, tile.textureWidth, tile.textureHeight);
         context_->RSSetViewports(1, &videoViewport);
         drawTile(tile);
+        if (tile.frameFade >= 0.0f) {
+            constexpr float kFadeDur = 0.22f;
+            const float a = 1.0f - tile.frameFade / kFadeDur;
+            if (a > 0.0f) {
+                drawSignal(full, index, tile.signalEnergy, a);
+            }
+            tile.frameFade += lastDt_;
+            if (tile.frameFade >= kFadeDur) {
+                tile.frameFade = -1.0f;
+            }
+        }
     }
 
     std::string labelFor(std::size_t index) const
@@ -1361,10 +1610,20 @@ private:
     ComPtr<ID3D11PixelShader> bgraPixelShader_;
     ComPtr<ID3D11PixelShader> nv12PixelShader_;
     ComPtr<ID3D11PixelShader> yuv420PixelShader_;
+    ComPtr<ID3D11PixelShader> signalPixelShader_;
+    ComPtr<ID3D11Buffer> signalConstantBuffer_;
+    ComPtr<ID3D11BlendState> alphaBlendState_;
     ComPtr<ID3D11InputLayout> inputLayout_;
     ComPtr<ID3D11Buffer> vertexBuffer_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11Buffer> colorMatrixBuffer_;
+
+    // Per-tile signal-animation driving state.
+    std::vector<std::uint64_t> tileBytes_;   // latest per-camera cumulative bytes (from setTileActivity)
+    float animTime_ = 0.0f;                  // accumulated animation clock (seconds)
+    float lastDt_ = 0.0f;                    // last render delta, for the resolve fade
+    std::chrono::steady_clock::time_point lastRenderTp_;
+    bool haveRenderTp_ = false;
 
     std::vector<TileState> tiles_;
     int focusedTile_ = -1;
