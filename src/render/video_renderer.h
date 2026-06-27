@@ -63,6 +63,10 @@ public:
     // setter rather than per-frame state.
     virtual void setLabelMode(LabelMode mode) { (void)mode; }
 
+    // The camera tile under the mouse (-1 = none), for the hover affordance. Fed
+    // from the run loop's mouse-motion handling.
+    virtual void setHoveredTile(int index) { (void)index; }
+
     // Per-camera cumulative downloaded bytes (stable order), pushed each frame so
     // the renderer can animate a data-driven "receiving / reconnecting" signal on
     // tiles with no displayable frame yet. The renderer smooths the deltas into a

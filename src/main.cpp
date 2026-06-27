@@ -487,6 +487,31 @@ int main(int argc, char** argv)
             }
         };
 
+        // Camera tile under a window-space point, or -1. Mirrors the renderer's
+        // grid (cameras + optional diagnostics cell, below the toolbar strip); the
+        // diagnostics cell isn't a camera, so it's excluded here. Used for both the
+        // click-to-focus hit-test and the hover affordance.
+        auto cameraTileAt = [&](float x, float y) -> int {
+            int windowWidth = 0;
+            int windowHeight = 0;
+            SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
+            if (windowWidth <= 0 || windowHeight <= 0) {
+                return -1;
+            }
+            const std::size_t cameraCount = session.cameraCount();
+            const int effective = static_cast<int>(cameraCount) + (cfg.showOverlay ? 1 : 0);
+            const int gridTop = static_cast<int>(renderer->reservedTopLogical());
+            gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight - gridTop);
+            for (std::size_t t = 0; t < layout.tiles.size() && t < cameraCount; ++t) {
+                gig::TileRect cell = layout.tiles[t];
+                cell.y += static_cast<float>(gridTop);
+                if (x >= cell.x && x < cell.x + cell.width && y >= cell.y && y < cell.y + cell.height) {
+                    return static_cast<int>(t);
+                }
+            }
+            return -1;
+        };
+
 #ifdef _WIN32
         // Open the settings dialog, persist, and reconnect with the new config.
         // Shared by F2 and the toolbar's Settings button.
@@ -543,44 +568,42 @@ int main(int argc, char** argv)
                 }
 #endif
                 if (imguiUsed) {
-                    continue; // the log view (ImGui) consumed this event
+                    if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                        renderer->setHoveredTile(-1); // pointer is over the toolbar / log view
+                    }
+                    continue; // ImGui consumed this event
                 }
                 if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT) {
                     if (renderer->focusedTile() >= 0) {
                         renderer->setFocusedTile(-1); // any click returns to the grid
-                    } else {
+                    } else if (const int idx = cameraTileAt(event.button.x, event.button.y); idx >= 0) {
+                        renderer->setFocusedTile(idx);
+                    } else if (cfg.showOverlay) {
+                        // The synthetic diagnostics tile (not a camera) toggles the log view.
                         int windowWidth = 0;
                         int windowHeight = 0;
                         SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
-                        if (windowWidth > 0 && windowHeight > 0) {
-                            // Match the renderer's grid (cameras + optional diagnostics
-                            // cell), including the strip the toolbar reserves at the top.
-                            const std::size_t cameraCount = session.cameraCount();
-                            const int effective = static_cast<int>(cameraCount) + (cfg.showOverlay ? 1 : 0);
-                            const int gridTop = static_cast<int>(renderer->reservedTopLogical());
-                            gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight - gridTop);
-                            for (gig::TileRect& tile : layout.tiles) {
-                                tile.y += static_cast<float>(gridTop);
-                            }
-                            const auto inCell = [&](const gig::TileRect& cell) {
-                                return event.button.x >= cell.x && event.button.x < cell.x + cell.width
-                                    && event.button.y >= cell.y && event.button.y < cell.y + cell.height;
-                            };
-                            bool focusedOne = false;
-                            for (std::size_t t = 0; t < layout.tiles.size() && t < cameraCount; ++t) {
-                                if (inCell(layout.tiles[t])) {
-                                    renderer->setFocusedTile(static_cast<int>(t));
-                                    focusedOne = true;
-                                    break;
-                                }
-                            }
-                            // The synthetic diagnostics tile toggles the log view.
-                            if (!focusedOne && cfg.showOverlay && cameraCount < layout.tiles.size()
-                                && inCell(layout.tiles[cameraCount])) {
+                        const std::size_t cameraCount = session.cameraCount();
+                        const int gridTop = static_cast<int>(renderer->reservedTopLogical());
+                        gig::GridLayout layout = gig::computeGridLayout(
+                            static_cast<int>(cameraCount) + 1, windowWidth, windowHeight - gridTop);
+                        if (cameraCount < layout.tiles.size()) {
+                            gig::TileRect cell = layout.tiles[cameraCount];
+                            cell.y += static_cast<float>(gridTop);
+                            if (event.button.x >= cell.x && event.button.x < cell.x + cell.width
+                                && event.button.y >= cell.y && event.button.y < cell.y + cell.height) {
                                 renderer->setLogViewVisible(!renderer->logViewVisible());
                             }
                         }
                     }
+                } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                    // Hover affordance: in focus view the whole image is the hot
+                    // element; in the grid it's the camera tile under the pointer.
+                    renderer->setHoveredTile(renderer->focusedTile() >= 0
+                        ? renderer->focusedTile()
+                        : cameraTileAt(event.motion.x, event.motion.y));
+                } else if (event.type == SDL_EVENT_WINDOW_MOUSE_LEAVE) {
+                    renderer->setHoveredTile(-1);
                 } else if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                     renderer->resize();
                 }

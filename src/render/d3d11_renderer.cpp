@@ -219,6 +219,31 @@ float4 PSMain(PSIn input) : SV_TARGET {
 }
 )";
 
+// Hover affordance for clickable tiles: a thin soft border plus a very faint
+// overall brighten, drawn over the hovered tile so it reads as "hot".
+const char* HoverPixelShaderSource = R"(
+cbuffer HoverConstants : register(b0) {
+    float2 uSizePx;   // tile size in pixels
+    float uBorderPx;  // border thickness in pixels
+    float uPad;
+    float4 uColor;    // rgb + max border alpha
+};
+
+struct PSIn {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+float4 PSMain(PSIn input) : SV_TARGET {
+    float2 px = input.uv * uSizePx;
+    float2 dEdge = min(px, uSizePx - px);
+    float edge = min(dEdge.x, dEdge.y);
+    float border = 1.0 - smoothstep(uBorderPx - 1.0, uBorderPx + 1.0, edge);
+    float a = saturate(border + 0.06) * uColor.a; // border + faint fill
+    return float4(uColor.rgb, a);
+}
+)";
+
 struct ColorMatrixConstants {
     float r[4];
     float g[4];
@@ -233,6 +258,13 @@ struct SignalConstants {
     float aspect;
     float alpha;
     float pad[3];
+};
+
+struct HoverConstants {
+    float sizePx[2];
+    float borderPx;
+    float pad;
+    float color[4];
 };
 
 ColorMatrixConstants yuvToRgbMatrix(bool fullRange)
@@ -462,6 +494,10 @@ public:
                 && focusedTile_ < static_cast<int>(frames.size());
             if (fullyFocused) {
                 renderSingleTile(static_cast<std::size_t>(focusedTile_), frames);
+                if (hoveredTile_ == focusedTile_) {
+                    drawHover(gig::TileRect {
+                        0.0f, 0.0f, static_cast<float>(backBufferWidth_), static_cast<float>(backBufferHeight_) });
+                }
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
                 if (labelVisible(static_cast<std::size_t>(focusedTile_))) {
@@ -504,6 +540,14 @@ public:
                         std::lerp(cell.height, static_cast<float>(backBufferHeight_), e),
                     };
                     drawTileContentAt(static_cast<std::size_t>(animTile_), grown);
+                }
+
+                // Hover affordance on the tile under the mouse (not while zooming,
+                // where the layout is in motion).
+                if (animProgress_ == 0.0f && hoveredTile_ >= 0
+                    && hoveredTile_ < static_cast<int>(frames.size())
+                    && hoveredTile_ < static_cast<int>(layout.tiles.size())) {
+                    drawHover(layout.tiles[static_cast<std::size_t>(hoveredTile_)]);
                 }
 
                 context_->RSSetViewports(1, &fullViewport);
@@ -572,6 +616,11 @@ public:
     void setLabelMode(LabelMode mode) override
     {
         labelMode_ = mode;
+    }
+
+    void setHoveredTile(int index) override
+    {
+        hoveredTile_ = index;
     }
 
     bool handleEvent(const SDL_Event& event) override
@@ -709,11 +758,13 @@ private:
         ComPtr<ID3DBlob> nv12PixelShaderBlob;
         ComPtr<ID3DBlob> yuv420PixelShaderBlob;
         ComPtr<ID3DBlob> signalPixelShaderBlob;
+        ComPtr<ID3DBlob> hoverPixelShaderBlob;
         if (!compileShader(VertexShaderSource, "VSMain", "vs_4_0", vertexShaderBlob)
             || !compileShader(BgraPixelShaderSource, "PSMain", "ps_4_0", bgraPixelShaderBlob)
             || !compileShader(Nv12PixelShaderSource, "PSMain", "ps_4_0", nv12PixelShaderBlob)
             || !compileShader(Yuv420PixelShaderSource, "PSMain", "ps_4_0", yuv420PixelShaderBlob)
-            || !compileShader(SignalPixelShaderSource, "PSMain", "ps_4_0", signalPixelShaderBlob)) {
+            || !compileShader(SignalPixelShaderSource, "PSMain", "ps_4_0", signalPixelShaderBlob)
+            || !compileShader(HoverPixelShaderSource, "PSMain", "ps_4_0", hoverPixelShaderBlob)) {
             return false;
         }
 
@@ -759,6 +810,15 @@ private:
             nullptr,
             signalPixelShader_.GetAddressOf());
         if (failed(result, "ID3D11Device::CreatePixelShader(Signal)")) {
+            return false;
+        }
+
+        result = device_->CreatePixelShader(
+            hoverPixelShaderBlob->GetBufferPointer(),
+            hoverPixelShaderBlob->GetBufferSize(),
+            nullptr,
+            hoverPixelShader_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreatePixelShader(Hover)")) {
             return false;
         }
 
@@ -821,7 +881,17 @@ private:
             return false;
         }
 
-        // Straight alpha blending, used only for the brief signal->frame crossfade.
+        D3D11_BUFFER_DESC hoverDesc = {};
+        hoverDesc.ByteWidth = sizeof(HoverConstants);
+        hoverDesc.Usage = D3D11_USAGE_DEFAULT;
+        hoverDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        result = device_->CreateBuffer(&hoverDesc, nullptr, hoverConstantBuffer_.GetAddressOf());
+        if (failed(result, "ID3D11Device::CreateBuffer(Hover)")) {
+            return false;
+        }
+
+        // Straight alpha blending, used for the signal->frame crossfade and the
+        // hover highlight.
         D3D11_BLEND_DESC blendDesc = {};
         blendDesc.RenderTarget[0].BlendEnable = TRUE;
         blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
@@ -1215,6 +1285,49 @@ private:
         } else {
             drawSignal(rect, index, tile.signalEnergy, 1.0f);
         }
+    }
+
+    // Subtle hover affordance over a clickable tile: a soft border + faint fill,
+    // drawn in the tile's own pixel viewport (no ImGui coord assumptions).
+    void drawHover(const gig::TileRect& cell)
+    {
+        if (cell.width <= 0.0f || cell.height <= 0.0f) {
+            return;
+        }
+        D3D11_VIEWPORT viewport = {};
+        viewport.TopLeftX = cell.x;
+        viewport.TopLeftY = cell.y;
+        viewport.Width = cell.width;
+        viewport.Height = cell.height;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        context_->RSSetViewports(1, &viewport);
+
+        HoverConstants constants = {};
+        constants.sizePx[0] = cell.width;
+        constants.sizePx[1] = cell.height;
+        constants.borderPx = 2.0f * dpiScale_;
+        constants.color[0] = 0.80f;
+        constants.color[1] = 0.90f;
+        constants.color[2] = 1.0f;
+        constants.color[3] = 0.6f; // max border alpha
+        context_->UpdateSubresource(hoverConstantBuffer_.Get(), 0, nullptr, &constants, 0, 0);
+
+        UINT stride = sizeof(Vertex);
+        UINT offset = 0;
+        ID3D11Buffer* vertexBuffers[] = { vertexBuffer_.Get() };
+        context_->IASetInputLayout(inputLayout_.Get());
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+        context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
+        context_->PSSetShader(hoverPixelShader_.Get(), nullptr, 0);
+        ID3D11Buffer* constantBuffers[] = { hoverConstantBuffer_.Get() };
+        context_->PSSetConstantBuffers(0, 1, constantBuffers);
+
+        const float factors[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context_->OMSetBlendState(alphaBlendState_.Get(), factors, 0xffffffff);
+        context_->Draw(4, 0);
+        context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     }
 
     // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
@@ -1695,6 +1808,8 @@ private:
     ComPtr<ID3D11PixelShader> yuv420PixelShader_;
     ComPtr<ID3D11PixelShader> signalPixelShader_;
     ComPtr<ID3D11Buffer> signalConstantBuffer_;
+    ComPtr<ID3D11PixelShader> hoverPixelShader_;
+    ComPtr<ID3D11Buffer> hoverConstantBuffer_;
     ComPtr<ID3D11BlendState> alphaBlendState_;
     ComPtr<ID3D11InputLayout> inputLayout_;
     ComPtr<ID3D11Buffer> vertexBuffer_;
@@ -1713,6 +1828,7 @@ private:
     int animTile_ = -1;                            // tile zooming in/out (-1 = none)
     float animProgress_ = 0.0f;                     // 0 = grid cell, 1 = fullscreen
     static constexpr float kZoomDuration = 0.30f;   // seconds for the zoom/unzoom
+    int hoveredTile_ = -1;                          // tile under the mouse (-1 = none)
     gig::TextOverlay overlay_;
     std::vector<std::string> cameraLabels_;
     OverlayStats overlayStats_;
