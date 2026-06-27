@@ -11,6 +11,14 @@ param(
 
     [string]$VcVarsArch = "amd64",
 
+    # Version (W.X.Y.Z) stamped into gig.exe's VERSIONINFO. Omit for local builds
+    # (CMake defaults to 0.0.0.0); the release workflow derives it from the tag.
+    [string]$Version = "",
+
+    # Skip Azure Trusted Signing even when the ARTIFACT_SIGNING_* vars are set.
+    # CI passes this and signs via the trusted-signing GitHub Action instead.
+    [switch]$DisableCodeSigning,
+
     [switch]$ConfigureOnly
 )
 
@@ -280,6 +288,10 @@ $configureArgs = @(
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 )
 
+if ($Version) {
+    $configureArgs += "-DGIG_VERSION=$Version"
+}
+
 if ($env:VCPKG_INSTALL_OPTIONS) {
     $configureArgs += "-DVCPKG_INSTALL_OPTIONS=$env:VCPKG_INSTALL_OPTIONS"
 }
@@ -296,3 +308,38 @@ Write-Host "Building gig..."
 Invoke-NativeCommand -FilePath $cmakeExe -Arguments @("--build", $buildDir, "--config", $BuildType)
 
 Write-Host "Built: $buildDir"
+
+# Optional Azure Trusted Signing of gig.exe (local convenience). Needs 'az login'
+# + the ARTIFACT_SIGNING_* vars and sign.exe (dotnet tool install --global
+# --prerelease sign). CI passes -DisableCodeSigning and signs via the
+# azure/trusted-signing-action instead, so the build and the signing stay separable.
+$signingVars = [ordered]@{
+    "ARTIFACT_SIGNING_ENDPOINT"            = $env:ARTIFACT_SIGNING_ENDPOINT
+    "ARTIFACT_SIGNING_ACCOUNT"             = $env:ARTIFACT_SIGNING_ACCOUNT
+    "ARTIFACT_SIGNING_CERTIFICATE_PROFILE" = $env:ARTIFACT_SIGNING_CERTIFICATE_PROFILE
+}
+$presentVars = @($signingVars.GetEnumerator() | Where-Object { $_.Value })
+$missingVars = @($signingVars.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object { $_.Key })
+
+if ($DisableCodeSigning) {
+    Write-Host "Skipping artifact signing (-DisableCodeSigning was passed)."
+}
+elseif ($presentVars.Count -eq 0) {
+    # No signing env vars set; skip silently (the default for a plain local build).
+}
+elseif ($missingVars.Count -gt 0) {
+    Write-Warning "Skipping artifact signing; missing env var(s): $($missingVars -join ', ')"
+}
+else {
+    Write-Host "Signing gig.exe in $buildDir..."
+    $signArgs = @(
+        "code", "artifact-signing",
+        "-b", $buildDir,
+        "-ase", $env:ARTIFACT_SIGNING_ENDPOINT,
+        "-asa", $env:ARTIFACT_SIGNING_ACCOUNT,
+        "gig.exe",
+        "-v", "Information",
+        "-ascp", $env:ARTIFACT_SIGNING_CERTIFICATE_PROFILE
+    )
+    Invoke-NativeCommand -FilePath "sign.exe" -Arguments $signArgs
+}

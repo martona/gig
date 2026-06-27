@@ -1,0 +1,87 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-latest
+            triplet: x64-windows-static
+            vcvars_arch: amd64
+          - arch: arm64
+            runner: windows-11-arm
+            triplet: arm64-windows-static
+            vcvars_arch: arm64
+
+    concurrency:
+      group: windows-ci-${{ matrix.arch }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The expensive part is FFmpeg (+ deps) built from the overlay port. The
+      # build script keeps vcpkg's binary cache + downloads under build/; persist
+      # them so only a vcpkg.json / vcpkg-configuration.json / overlay change pays
+      # the cold-build cost again. (vcpkg itself is re-cloned per run -- cheap.)
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/vcpkg-binary-cache
+            build/vcpkg-downloads
+          key: ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-vcpkg-
+
+      - name: Build Release
+        run: .\scripts\build_windows.ps1 -BuildType Release -Triplet ${{ matrix.triplet }} -VcVarsArch ${{ matrix.vcvars_arch }} -DisableCodeSigning
+
+      - name: Verify artifact
+        run: |
+          $exe = ".\build\windows-release\gig.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Missing expected executable: $exe"
+          }
+          $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe))
+          Write-Host "gig.exe version: $($vi.FileVersion)"
+
+      - name: Verify static dependency closure
+        run: |
+          $exe = ".\build\windows-release\gig.exe"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -products * -property installationPath
+          $vcvars = Join-Path $installPath "VC\Auxiliary\Build\vcvarsall.bat"
+          $dump = & cmd.exe /d /s /c "call `"$vcvars`" ${{ matrix.vcvars_arch }} >nul && dumpbin /dependents `"$exe`""
+          $dump
+          # gig statically links FFmpeg / SDL3 / OpenSSL (vcpkg static) and the CRT
+          # (/MT). None of these should appear as DLL imports; only system DLLs
+          # (d3d11, dxgi, kernel32, ...) are allowed.
+          $blocked = $dump | Select-String -Pattern "VCRUNTIME|MSVCP|ucrtbase|avcodec|avformat|avutil|swscale|swresample|SDL3|libssl|libcrypto" -CaseSensitive:$false
+          if ($blocked) {
+            throw "Release exe imports unexpected non-system DLLs: $($blocked -join '; ')"
+          }

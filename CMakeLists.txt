@@ -12,6 +12,22 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+# Version (W.X.Y.Z), tag-driven: scripts/build_windows.ps1 -Version passes
+# -DGIG_VERSION (the release workflow derives it from the git tag). Plain local
+# builds default to 0.0.0.0. The parts feed resources/version.rc.in.
+if(NOT DEFINED GIG_VERSION OR GIG_VERSION STREQUAL "")
+    set(GIG_VERSION "0.0.0.0")
+endif()
+if(NOT GIG_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "GIG_VERSION must be W.X.Y.Z (four non-negative integers); got '${GIG_VERSION}'")
+endif()
+string(REPLACE "." ";" _gig_version_parts "${GIG_VERSION}")
+list(GET _gig_version_parts 0 GIG_VERSION_MAJOR)
+list(GET _gig_version_parts 1 GIG_VERSION_MINOR)
+list(GET _gig_version_parts 2 GIG_VERSION_PATCH)
+list(GET _gig_version_parts 3 GIG_VERSION_BUILD)
+message(STATUS "gig version: ${GIG_VERSION}")
+
 find_package(Boost REQUIRED COMPONENTS json)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
@@ -88,8 +104,19 @@ target_link_libraries(gig PRIVATE
 
 if(WIN32)
     enable_language(RC)
+
+    # Stamp the version into a generated VERSIONINFO resource (kept separate from
+    # gig.rc, which has no build-time tokens). Regenerated each configure, so a new
+    # -DGIG_VERSION re-stamps the exe. No relative paths inside, so living under the
+    # build tree is fine.
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/version.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/version.rc"
+        @ONLY)
+
     target_sources(gig PRIVATE
         resources/gig.rc
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/version.rc"
         # Windows-only TLS client-cert path (CNG bridge + cert-store picker).
         # The lazy client-cert callback drops off-Windows; login auth is the
         # cross-platform replacement. See tls_context.cpp (#ifdef _WIN32).
@@ -126,7 +153,17 @@ if(WIN32)
 endif()
 
 if(MSVC)
-    target_compile_options(gig PRIVATE /W4 /permissive-)
+    # /bigobj: the Boost.Beast TUs (http_client/tls_client) exceed the COFF section
+    # limit once /Zi adds debug-info sections.
+    target_compile_options(gig PRIVATE /W4 /permissive- /bigobj)
+    # Ship symbols: emit a PDB for optimized builds too (separate file). /DEBUG
+    # disables the size optimizations, so re-enable /OPT:REF + /OPT:ICF to keep the
+    # exe lean. Release CI zips the PDB into a -symbols.zip for crash symbolication.
+    target_compile_options(gig PRIVATE $<$<NOT:$<CONFIG:Debug>>:/Zi>)
+    target_link_options(gig PRIVATE
+        $<$<NOT:$<CONFIG:Debug>>:/DEBUG>
+        $<$<NOT:$<CONFIG:Debug>>:/OPT:REF>
+        $<$<NOT:$<CONFIG:Debug>>:/OPT:ICF>)
 else()
     target_compile_options(gig PRIVATE -Wall -Wextra -Wpedantic)
 endif()
