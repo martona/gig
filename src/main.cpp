@@ -22,10 +22,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <umbra.h>
-#include "ui/settings_dialog.h"
 #else
 #include <sys/resource.h> // getrusage (process CPU sampler)
 #include <sys/time.h>     // gettimeofday
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
+#include "ui/settings_dialog.h" // native settings dialog (Win32 dialog / AppKit window)
 #endif
 
 namespace {
@@ -564,14 +566,14 @@ int main(int argc, char** argv)
             return -1;
         };
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         // Open the settings dialog, persist, and reconnect with the new config.
         // Shared by F2 and the toolbar's Settings button.
         auto openSettings = [&]() {
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
             int labelMode = static_cast<int>(cfg.labelMode);
-            if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, labelMode)) {
+            if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode)) {
                 saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
@@ -614,7 +616,7 @@ int main(int argc, char** argv)
                     applyAndReport(cfg.session);
                     continue;
                 }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F2) {
                     gig::logInfo() << "settings dialog (F2)";
                     openSettings();
@@ -774,7 +776,7 @@ int main(int argc, char** argv)
                     gig::logInfo() << "reconnect requested (toolbar)";
                     applyAndReport(cfg.session);
                     break;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
                 case VideoRenderer::ToolbarAction::Settings:
                     gig::logInfo() << "settings dialog (toolbar)";
                     openSettings();

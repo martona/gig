@@ -150,18 +150,16 @@ private:
 
     static void keychainSet(std::string_view key, std::string_view value)
     {
-        NSData* data = [NSData dataWithBytes:value.data() length:value.size()];
-
-        // Update an existing item in place; otherwise add a fresh one.
-        NSDictionary* attributes = @{ (__bridge id)kSecValueData : data };
-        OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)keychainQuery(key),
-                                        (__bridge CFDictionaryRef)attributes);
-        if (status == errSecItemNotFound) {
-            NSMutableDictionary* add = keychainQuery(key);
-            add[(__bridge id)kSecValueData] = data;
-            add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-            status = SecItemAdd((__bridge CFDictionaryRef)add, nullptr);
-        }
+        // Delete any existing item, then add a fresh one, so gig (the writer) OWNS the
+        // keychain item. A signed gig then reads its own item without the access
+        // prompt -- whereas updating an item created by the `security` CLI keeps the
+        // CLI as owner and prompts once. (Pairs with the native settings UI writing
+        // the password.)
+        SecItemDelete((__bridge CFDictionaryRef)keychainQuery(key));
+        NSMutableDictionary* add = keychainQuery(key);
+        add[(__bridge id)kSecValueData] = [NSData dataWithBytes:value.data() length:value.size()];
+        add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+        const OSStatus status = SecItemAdd((__bridge CFDictionaryRef)add, nullptr);
         if (status != errSecSuccess) {
             logWarning() << "keychain write failed for '" << std::string(key)
                          << "' (OSStatus " << static_cast<long>(status) << ")";

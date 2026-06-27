@@ -212,6 +212,8 @@ elseif(APPLE)
         src/platform/settings_store_mac.mm
         src/net/system_trust_mac.mm
         src/net/system_trust_mac.h
+        src/ui/settings_dialog_mac.mm
+        src/ui/settings_dialog.h
     )
 
     # App icon: generate gig.icns from the 1024^2 boat.png master at build time

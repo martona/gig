@@ -132,7 +132,6 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     }
     SendMessageW(labelCombo, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
 
-    setDlgTextUtf8(dlg, IDC_URL, c.url);
     setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
 }
 
@@ -153,7 +152,6 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
             *state.labelMode = static_cast<int>(sel);
         }
     }
-    c.url = getDlgTextUtf8(dlg, IDC_URL);
     c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
     // tls.useSystemStore is re-derived from ca/cert/key on reload; rwTimeoutUs
     // is left as-is (not exposed in the dialog).
@@ -254,7 +252,7 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 
 } // namespace
 
-bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, int& labelMode,
+bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
                         const std::string& statusMessage)
 {
     // Edit a working copy so a Cancel in either the primary or the nested advanced
@@ -264,7 +262,7 @@ bool showSettingsDialog(HWND parent, AppConfig& config, bool& showOverlay, int& 
     int workingLabelMode = labelMode;
     DialogState state { &working, &workingOverlay, &workingLabelMode, statusMessage };
     const INT_PTR result = DialogBoxParamW(
-        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), parent,
+        GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
         primaryDlgProc, reinterpret_cast<LPARAM>(&state));
     if (result != IDOK) {
         return false;
