@@ -42,6 +42,15 @@ if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+
+    # Code-signing knobs, driven by scripts/build_macos.sh from APPLE_CODESIGN_IDENTITY /
+    # APPLE_TEAM_ID. A stable Developer ID signature is what makes the keychain
+    # "Always Allow" persist across rebuilds. Consumed by the Xcode generator block
+    # below; the Ninja path signs post-build in the script.
+    option(GIG_MACOS_ENABLE_CODE_SIGNING "Codesign the .app (Xcode generator)" OFF)
+    option(GIG_MACOS_ENABLE_HARDENED_RUNTIME "Enable hardened runtime (notarization prereq)" OFF)
+    set(GIG_MACOS_DEVELOPMENT_TEAM "" CACHE STRING "Apple Developer team ID for signing")
+    set(GIG_MACOS_CODE_SIGN_IDENTITY "" CACHE STRING "Apple code signing identity")
 endif()
 
 if(MSVC)
@@ -201,6 +210,8 @@ elseif(APPLE)
     target_sources(gig PRIVATE
         src/render/metal_renderer.mm
         src/platform/settings_store_mac.mm
+        src/net/system_trust_mac.mm
+        src/net/system_trust_mac.h
     )
 
     # The .mm sources use ARC (no manual retain/release). Set the Xcode build
@@ -235,6 +246,26 @@ elseif(APPLE)
         MACOSX_BUNDLE_BUNDLE_VERSION "${GIG_VERSION}"
         OUTPUT_NAME "gig"
     )
+
+    # Code signing for the Xcode generator (the Ninja path signs post-build in
+    # scripts/build_macos.sh). Pinning entitlements (get-task-allow=false) keeps the
+    # Xcode-injected get-task-allow=true out, which notarization would reject.
+    if(CMAKE_GENERATOR STREQUAL "Xcode")
+        if(GIG_MACOS_ENABLE_CODE_SIGNING)
+            set_target_properties(gig PROPERTIES
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "${GIG_MACOS_CODE_SIGN_IDENTITY}"
+                XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Manual"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${GIG_MACOS_DEVELOPMENT_TEAM}"
+                XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/gig.entitlements")
+            if(GIG_MACOS_ENABLE_HARDENED_RUNTIME)
+                set_target_properties(gig PROPERTIES
+                    XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME "YES"
+                    XCODE_ATTRIBUTE_OTHER_CODE_SIGN_FLAGS "--timestamp")
+            endif()
+        else()
+            set_target_properties(gig PROPERTIES XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
+        endif()
+    endif()
 endif()
 
 if(MSVC)

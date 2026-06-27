@@ -155,7 +155,7 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
     }
     c.url = getDlgTextUtf8(dlg, IDC_URL);
     c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
-    // tls.useWindowsStore is re-derived from ca/cert/key on reload; rwTimeoutUs
+    // tls.useSystemStore is re-derived from ca/cert/key on reload; rwTimeoutUs
     // is left as-is (not exposed in the dialog).
 }
 

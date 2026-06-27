@@ -4,6 +4,9 @@
 #ifdef _WIN32
 #include "net/cng_tls.hpp"
 #endif
+#ifdef __APPLE__
+#include "net/system_trust_mac.h"
+#endif
 
 #include <filesystem>
 #include <stdexcept>
@@ -50,12 +53,21 @@ void configureSslContext(ssl::context& context, const TlsOptions& tls)
     context.set_options(ssl::context::default_workarounds);
     if (tls.verifyServer) {
         context.set_verify_mode(ssl::verify_peer);
-        if (tls.useWindowsStore) {
-            // Trust roots from the Windows certificate store (our private CA lives
-            // in Trusted Root). Proven via the certstore probe.
+        if (tls.useSystemStore) {
+            // Trust roots from the OS store, sourced per platform; OpenSSL still
+            // does the verification (the locked Apple decision).
+#ifdef _WIN32
+            // Windows cert store (our private CA lives in Trusted Root). Proven via
+            // the certstore probe.
             if (SSL_CTX_load_verify_store(context.native_handle(), "org.openssl.winstore://") != 1) {
                 throw std::runtime_error("failed to load Windows store trust roots: " + opensslErrorString());
             }
+#elif defined(__APPLE__)
+            // macOS keychain roots (built-in + user/admin-trusted CAs).
+            loadSystemTrustRoots(context.native_handle());
+#else
+            context.set_default_verify_paths();
+#endif
         } else if (!tls.caFile.empty()) {
             context.load_verify_file(requireReadableFile(tls.caFile, "CA certificate"));
         } else {
@@ -70,13 +82,13 @@ void configureSslContext(ssl::context& context, const TlsOptions& tls)
         context.set_verify_mode(ssl::verify_none);
     }
 
-    if (tls.useWindowsStore) {
-        // Client cert handling is lazy/handshake-driven: the CurrentUser\MY
-        // picker and CNG consent appear only if a server actually requests a
-        // certificate, and the selection is cached process-wide. Servers that
-        // never ask (e.g. Frigate's own nginx) stay prompt-free. The CNG bridge
-        // is Windows-only; off-Windows useWindowsStore is never derived (login
-        // auth is the cross-platform path), so this simply has no client cert.
+    if (tls.useSystemStore) {
+        // System-store mode loads server-trust roots above on every platform. The
+        // CLIENT cert is Windows-only: a lazy/handshake-driven CurrentUser\MY pick
+        // via the CNG bridge (picker + consent fire only if a server requests a
+        // cert; cached process-wide). Off-Windows there is no system client-cert
+        // mechanism -- login auth is the cross-platform path -- so this configures
+        // none and returns.
 #ifdef _WIN32
         installWindowsStoreClientCertCallback(context.native_handle());
 #endif

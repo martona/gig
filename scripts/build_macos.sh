@@ -13,6 +13,10 @@ cd "$REPO_ROOT"
 CONFIG="Release"
 VERSION=""
 clean=0
+# Sign with a stable Developer ID so the keychain "Always Allow" persists across
+# rebuilds (set APPLE_CODESIGN_IDENTITY, e.g. "Developer ID Application: Name (TEAMID)").
+IDENTITY="${APPLE_CODESIGN_IDENTITY:-}"
+TEAM_ID="${APPLE_TEAM_ID:-}"
 
 usage() {
     cat <<EOF
@@ -113,8 +117,17 @@ CMAKE_ARGS=(
 [[ -n "$VERSION" ]] && CMAKE_ARGS+=(-DGIG_VERSION="$VERSION")
 
 if [[ "$USE_XCODE" == "1" ]]; then
+    SIGN_ARGS=(-DGIG_MACOS_ENABLE_CODE_SIGNING=OFF)
+    if [[ -n "$IDENTITY" ]]; then
+        SIGN_ARGS=(
+            -DGIG_MACOS_ENABLE_CODE_SIGNING=ON
+            -DGIG_MACOS_CODE_SIGN_IDENTITY="$IDENTITY"
+            -DGIG_MACOS_DEVELOPMENT_TEAM="$TEAM_ID"
+            -DGIG_MACOS_ENABLE_HARDENED_RUNTIME=ON
+        )
+    fi
     echo "[*] Configuring (Xcode generator)..."
-    cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -G Xcode "${CMAKE_ARGS[@]}"
+    cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -G Xcode "${CMAKE_ARGS[@]}" "${SIGN_ARGS[@]}"
     echo "[*] Building gig ($CONFIG)..."
     cmake --build "$BUILD_DIR" --config "$CONFIG"
 else
@@ -122,6 +135,23 @@ else
     cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$CONFIG" "${CMAKE_ARGS[@]}"
     echo "[*] Building gig..."
     cmake --build "$BUILD_DIR"
+    if [[ -n "$IDENTITY" ]]; then
+        # gig.app has no nested frameworks (static link), so a plain sign of the
+        # bundle covers the executable -- no --deep needed.
+        echo "[*] Signing gig.app with '$IDENTITY' (hardened runtime)..."
+        codesign --force --options=runtime --timestamp \
+            --entitlements "$REPO_ROOT/resources/gig.entitlements" \
+            --sign "$IDENTITY" "$APP_PATH"
+    fi
+fi
+
+if [[ -n "$IDENTITY" ]]; then
+    echo "[*] Verifying signature..."
+    codesign --verify --strict --verbose=2 "$APP_PATH"
+    codesign --display --verbose=2 "$APP_PATH" 2>&1 | grep -E 'Authority|TeamIdentifier|flags' || true
+else
+    echo "[*] Unsigned build. Set APPLE_CODESIGN_IDENTITY (+ APPLE_TEAM_ID) to sign --"
+    echo "    a stable Developer ID signature makes the keychain 'Always Allow' stick across rebuilds."
 fi
 
 echo "[*] Build complete: $APP_PATH"

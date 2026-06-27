@@ -23,6 +23,9 @@
 #include <windows.h>
 #include <umbra.h>
 #include "ui/settings_dialog.h"
+#else
+#include <sys/resource.h> // getrusage (process CPU sampler)
+#include <sys/time.h>     // gettimeofday
 #endif
 
 namespace {
@@ -105,7 +108,39 @@ double sampleProcessCpuPercent()
     return percent;
 }
 #else
-double sampleProcessCpuPercent() { return 0.0; }
+// POSIX process CPU since the previous call, normalized so 100% == all cores busy
+// (mirrors the Windows GetProcessTimes sampler). getrusage gives user+system time
+// as timevals (unambiguous us); wall from gettimeofday.
+double sampleProcessCpuPercent()
+{
+    static std::uint64_t lastProcUs = 0;
+    static std::uint64_t lastWallUs = 0;
+    static const unsigned cores = [] {
+        const unsigned count = std::thread::hardware_concurrency();
+        return count == 0 ? 1u : count;
+    }();
+
+    rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return 0.0;
+    }
+    const std::uint64_t procUs =
+        static_cast<std::uint64_t>(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1'000'000ull
+        + static_cast<std::uint64_t>(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+
+    timeval now {};
+    gettimeofday(&now, nullptr);
+    const std::uint64_t wallUs =
+        static_cast<std::uint64_t>(now.tv_sec) * 1'000'000ull + static_cast<std::uint64_t>(now.tv_usec);
+
+    double percent = 0.0;
+    if (lastWallUs != 0 && wallUs > lastWallUs) {
+        percent = static_cast<double>(procUs - lastProcUs) / static_cast<double>(wallUs - lastWallUs) / cores * 100.0;
+    }
+    lastProcUs = procUs;
+    lastWallUs = wallUs;
+    return percent;
+}
 #endif
 
 struct ResizeWatchContext {
@@ -170,18 +205,13 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
 
-    // The Windows certificate store is implicit when no PEM material is given:
-    // store trust roots for server verification + a CurrentUser\MY client cert.
-    // Off-Windows there is no winstore provider, so never derive it -- otherwise
-    // configureSslContext would try to load "org.openssl.winstore://" and throw.
-    // PEM (ca/cert/key) or OpenSSL's default verify paths handle trust on macOS.
-#ifdef _WIN32
-    s.tls.useWindowsStore = s.tls.caFile.empty()
+    // Use the OS trust store implicitly when no PEM material is given: Windows cert
+    // store, macOS keychain roots (built-in + user/admin-trusted CAs), or OpenSSL's
+    // default verify paths elsewhere. The platform-specific loading lives in
+    // configureSslContext; this is just the derivation.
+    s.tls.useSystemStore = s.tls.caFile.empty()
         && s.tls.certFile.empty()
         && s.tls.keyFile.empty();
-#else
-    s.tls.useWindowsStore = false;
-#endif
 
     // Frigate login needs both credential halves and a base URL to POST to.
     if (s.user.empty() != s.password.empty()) {
@@ -204,7 +234,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 
 // Persist the editable settings back to the store (mirror of loadConfig's keys).
 // The password is DPAPI-encrypted; an empty password removes the value rather
-// than storing an empty blob. useWindowsStore is derived on load, never stored.
+// than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode)
 {
     store.setString("base", s.baseUrl);
@@ -543,7 +573,7 @@ int main(int argc, char** argv)
             int labelMode = static_cast<int>(cfg.labelMode);
             if (gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, labelMode)) {
                 saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
-                cfg = loadConfig(*settings); // re-derive useWindowsStore + re-validate
+                cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 OverlayStats overlayStats;
                 overlayStats.showDiagnostics = cfg.showOverlay;
