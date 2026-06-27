@@ -91,7 +91,9 @@ if [[ "$DEV_DIR" == */Xcode.app/Contents/Developer ]]; then
     APP_PATH="$BUILD_DIR/$CONFIG/gig.app"
 else
     USE_XCODE=0
-    BUILD_DIR="build/macos-${CONFIG,,}"
+    # Lowercase via tr, not ${CONFIG,,}: macOS's /bin/bash is 3.2 (no case expansion),
+    # and CI may invoke this with that bash.
+    BUILD_DIR="build/macos-$(echo "$CONFIG" | tr '[:upper:]' '[:lower:]')"
     APP_PATH="$BUILD_DIR/gig.app"
 fi
 

@@ -77,8 +77,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 
+      # Invoked via `bash` (not ./) so it runs regardless of the script's executable
+      # bit, which git on Windows doesn't track.
       - name: Build Release
-        run: ./scripts/build_macos.sh
+        run: bash ./scripts/build_macos.sh
 
       - name: Verify macOS app bundle
         run: |
