@@ -17,6 +17,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
 
+#import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -235,6 +236,21 @@ public:
         if (!pipelineBgra_ || !pipelineNv12_ || !pipelineYuv420_ || !pipelineSignal_ || !pipelineHover_) {
             return false;
         }
+
+        // Initial display scale (pixels per point) for the HiDPI font bake below and
+        // the video viewports. Recomputed each render; re-baking the atlas on a
+        // mid-session display-scale change is a remaining item.
+        {
+            int pointW = 0, pointH = 0, pixelW = 0, pixelH = 0;
+            SDL_GetWindowSize(window_, &pointW, &pointH);
+            SDL_GetWindowSizeInPixels(window_, &pixelW, &pixelH);
+            scale_ = (pointH > 0) ? static_cast<float>(pixelH) / static_cast<float>(pointH) : 1.0f;
+        }
+
+        // Toolbar glyphs (SF Symbols -> textures); nil falls back to text labels.
+        iconSettings_ = makeSymbolTexture(@"gearshape");
+        iconReconnect_ = makeSymbolTexture(@"arrow.clockwise");
+        iconLog_ = makeSymbolTexture(@"list.bullet");
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -459,6 +475,67 @@ private:
         descriptor.usage = MTLTextureUsageShaderRead;
         descriptor.storageMode = MTLStorageModeShared;
         return [device_ newTextureWithDescriptor:descriptor];
+    }
+
+    // Rasterize an SF Symbol to a white-on-transparent RGBA texture for the toolbar
+    // (the macOS analog of the Windows Segoe MDL2 glyphs). Returns nil if the symbol
+    // is unavailable, in which case buildToolbar falls back to text labels.
+    id<MTLTexture> makeSymbolTexture(NSString* symbolName)
+    {
+        if (!device_) {
+            return nil;
+        }
+        NSImage* image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:nil];
+        if (!image) {
+            return nil;
+        }
+        NSImageSymbolConfiguration* sizeCfg =
+            [NSImageSymbolConfiguration configurationWithPointSize:15.0 weight:NSFontWeightRegular];
+        NSImage* configured = [image imageWithSymbolConfiguration:sizeCfg];
+        if (!configured) {
+            configured = image;
+        }
+        const NSSize ptSize = configured.size;
+        const int w = std::max(1, static_cast<int>(std::ceil(ptSize.width * scale_)));
+        const int h = std::max(1, static_cast<int>(std::ceil(ptSize.height * scale_)));
+
+        NSBitmapImageRep* rep = [[NSBitmapImageRep alloc]
+            initWithBitmapDataPlanes:nullptr pixelsWide:w pixelsHigh:h
+                        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                       colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32];
+        if (!rep) {
+            return nil;
+        }
+        NSGraphicsContext* gctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext.currentContext = gctx;
+        [[NSColor clearColor] set];
+        NSRectFill(NSMakeRect(0, 0, w, h));
+        [configured drawInRect:NSMakeRect(0, 0, w, h)
+                      fromRect:NSZeroRect
+                     operation:NSCompositingOperationSourceOver
+                      fraction:1.0];
+        [gctx flushGraphics];
+        [NSGraphicsContext restoreGraphicsState];
+
+        // Force white RGB and keep the rendered alpha as coverage -- straight alpha
+        // for ImGui's blend (it tints by the white vertex color), independent of
+        // whatever color/premultiplication the symbol drew with.
+        unsigned char* bytes = static_cast<unsigned char*>(rep.bitmapData);
+        if (bytes) {
+            for (int i = 0; i < w * h; ++i) {
+                bytes[i * 4 + 0] = 255;
+                bytes[i * 4 + 1] = 255;
+                bytes[i * 4 + 2] = 255;
+            }
+        }
+
+        id<MTLTexture> texture = makeTexture(MTLPixelFormatRGBA8Unorm, w, h);
+        [texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
+                   mipmapLevel:0
+                     withBytes:rep.bitmapData
+                   bytesPerRow:static_cast<NSUInteger>(rep.bytesPerRow)];
+        return texture;
     }
 
     void ensurePlane(TileState& tile, int i, MTLPixelFormat format, int width, int height)
@@ -896,15 +973,40 @@ private:
             ImGui::TextDisabled("%d fps   %.1f Mbps   cpu %.0f%%", static_cast<int>(overlayStats_.fps + 0.5),
                                 overlayStats_.kbps / 1000.0, overlayStats_.cpuPercent);
 
+            // Right-aligned buttons: SF Symbol glyphs when available, else text.
             const ImGuiStyle& style = ImGui::GetStyle();
-            const auto buttonWidth = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
-            const float buttonsWidth = buttonWidth("Settings") + buttonWidth("Reconnect") + buttonWidth("Log") + style.ItemSpacing.x * 2.0f;
-            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
-            if (ImGui::Button("Settings")) { pendingToolbarAction_ = ToolbarAction::Settings; }
-            ImGui::SameLine();
-            if (ImGui::Button("Reconnect")) { pendingToolbarAction_ = ToolbarAction::Reconnect; }
-            ImGui::SameLine();
-            if (ImGui::Button("Log")) { logViewVisible_ = !logViewVisible_; }
+            const bool icons = iconSettings_ && iconReconnect_ && iconLog_;
+            if (icons) {
+                const float ext = ImGui::GetFontSize();
+                const ImVec2 isz(ext, ext);
+                const float btnW = ext + style.FramePadding.x * 2.0f;
+                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - (btnW * 3.0f + style.ItemSpacing.x * 2.0f));
+                if (ImGui::ImageButton("##settings", (ImTextureID)(uintptr_t)(__bridge void*)iconSettings_, isz)) {
+                    pendingToolbarAction_ = ToolbarAction::Settings;
+                }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Settings (F2)"); }
+                ImGui::SameLine();
+                if (ImGui::ImageButton("##reconnect", (ImTextureID)(uintptr_t)(__bridge void*)iconReconnect_, isz)) {
+                    pendingToolbarAction_ = ToolbarAction::Reconnect;
+                }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Reconnect (F5)"); }
+                ImGui::SameLine();
+                if (ImGui::ImageButton("##log", (ImTextureID)(uintptr_t)(__bridge void*)iconLog_, isz)) {
+                    logViewVisible_ = !logViewVisible_;
+                }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Log"); }
+            } else {
+                const auto buttonWidth = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
+                const float buttonsWidth = buttonWidth("Settings") + buttonWidth("Reconnect") + buttonWidth("Log") + style.ItemSpacing.x * 2.0f;
+                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
+                if (ImGui::Button("Settings")) { pendingToolbarAction_ = ToolbarAction::Settings; }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Settings (F2)"); }
+                ImGui::SameLine();
+                if (ImGui::Button("Reconnect")) { pendingToolbarAction_ = ToolbarAction::Reconnect; }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Reconnect (F5)"); }
+                ImGui::SameLine();
+                if (ImGui::Button("Log")) { logViewVisible_ = !logViewVisible_; }
+            }
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -1003,14 +1105,18 @@ private:
 
     void loadImguiFont()
     {
-        // ImGui works in points on macOS (imgui_impl_sdl3 sets DisplayFramebufferScale),
-        // so bake at the point size; the backend scales to pixels. (Retina sharpness --
-        // baking at size*scale + FontGlobalScale=1/scale -- is a later polish item.)
+        // HiDPI-sharp: bake the atlas at device pixels (14pt * scale) and divide back
+        // with FontGlobalScale, so the displayed size stays 14pt but glyphs are crisp
+        // on Retina. (imgui_impl_sdl3 sets DisplayFramebufferScale; ImGui works in points.)
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
-        if (io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Menlo.ttc", 14.0f) == nullptr) {
-            io.Fonts->AddFontDefault();
+        const float pixelSize = 14.0f * scale_;
+        if (io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Menlo.ttc", pixelSize) == nullptr) {
+            ImFontConfig cfg;
+            cfg.SizePixels = 13.0f * scale_;
+            io.Fonts->AddFontDefault(&cfg);
         }
+        io.FontGlobalScale = (scale_ > 0.0f) ? 1.0f / scale_ : 1.0f;
     }
 
     void applyImguiStyle()
@@ -1031,6 +1137,9 @@ private:
     id<MTLRenderPipelineState> pipelineYuv420_ = nil;
     id<MTLRenderPipelineState> pipelineSignal_ = nil;
     id<MTLRenderPipelineState> pipelineHover_ = nil;
+    id<MTLTexture> iconSettings_ = nil;
+    id<MTLTexture> iconReconnect_ = nil;
+    id<MTLTexture> iconLog_ = nil;
 
     std::vector<TileState> tiles_;
     std::vector<std::uint64_t> tileBytes_;

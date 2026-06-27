@@ -28,6 +28,7 @@
 #endif
 #if defined(_WIN32) || defined(__APPLE__)
 #include "ui/settings_dialog.h" // native settings dialog (Win32 dialog / AppKit window)
+#include "ui/pin_prompt.h"      // cert-trust prompt (Win32 message box / AppKit NSAlert)
 #endif
 
 namespace {
@@ -43,34 +44,6 @@ std::wstring widen(const std::string& text)
     std::wstring wide(static_cast<std::size_t>(needed), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), needed);
     return wide;
-}
-
-// Ask whether to pin an untrusted / changed server certificate. "No" is the
-// default button (safer). Returns true to pin.
-bool promptPinDecision(void* parentHwnd, const gig::PendingPinDecision& decision)
-{
-    std::string message;
-    if (decision.changed) {
-        message = "WARNING: the TLS certificate for " + decision.host + " has CHANGED.\n\n"
-            "Previously pinned (SPKI-SHA256):\n  " + decision.previousSpki + "\n"
-            "Now presented:\n  " + decision.spki + "\n\n"
-            "Subject: " + decision.subject + "\n"
-            "Expires: " + decision.notAfter + "\n"
-            "Reason:  " + decision.errorText + "\n\n"
-            "This can be a normal renewal -- or an interception attempt. "
-            "Pin the new certificate and trust it?";
-    } else {
-        message = "The TLS certificate for " + decision.host + " is not trusted.\n\n"
-            "Reason:  " + decision.errorText + "\n"
-            "Subject: " + decision.subject + "\n"
-            "Expires: " + decision.notAfter + "\n"
-            "SPKI-SHA256:\n  " + decision.spki + "\n\n"
-            "Pin this certificate and trust it from now on?";
-    }
-    const UINT icon = decision.changed ? MB_ICONWARNING : MB_ICONQUESTION;
-    const int result = umbra::DarkMessageBox(static_cast<HWND>(parentHwnd), widen(message).c_str(),
-        L"gig - certificate", MB_YESNO | icon | MB_DEFBUTTON2);
-    return result == IDYES;
 }
 
 // Process CPU usage since the previous call, normalized so 100% == all cores busy.
@@ -436,16 +409,17 @@ int main(int argc, char** argv)
         auto sessionCache = std::make_shared<gig::TlsSessionCache>();
         auto cookieJar = std::make_shared<gig::CookieJar>();
 
-        // The reconfigurable subsystem (login -> discover -> supervisor). Bring
-        // it up once here; F5 (and, later, the settings dialog) re-applies it
-        // live. A startup failure is fatal -- there's no dialog yet to fix it in.
+        // The reconfigurable subsystem (login -> discover -> supervisor). Bring it
+        // up once here; F5 / the settings dialog re-apply it live. A structural
+        // config error opens the settings dialog (Win + macOS); a transient failure
+        // comes up disconnected.
         gig::AppSession session(renderer->d3d11DecodeContext(), sessionCache, cookieJar);
         gig::ApplyResult applied = session.applyConfig(cfg.session);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         while (!applied.ok) {
             // A certificate-trust failure is a pin decision, not a config problem.
             if (auto pending = pinStore.takePending()) {
-                if (promptPinDecision(mainHwnd, *pending)) {
+                if (gig::promptPinDecision(mainHwnd, *pending)) {
                     pinStore.acceptPin(*pending);
                     gig::logInfo() << "pinned certificate for " << pending->host;
                 } else {
@@ -470,7 +444,7 @@ int main(int argc, char** argv)
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
             int labelMode = static_cast<int>(cfg.labelMode);
-            if (!gig::showSettingsDialog(static_cast<HWND>(mainHwnd), edited, overlay, labelMode, applied.error)) {
+            if (!gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, applied.error)) {
                 throw std::runtime_error(applied.error); // cancelled -> nothing to show
             }
             saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
@@ -478,9 +452,8 @@ int main(int argc, char** argv)
             applied = session.applyConfig(cfg.session);
         }
 #else
-        // No settings dialog off-Windows yet: a structural config error is fatal,
-        // but a transient connection failure still comes up (disconnected) so it
-        // can recover via Reconnect.
+        // No native settings dialog on this platform: a structural config error is
+        // fatal; a transient connection failure still comes up (disconnected).
         if (!applied.ok && applied.failure == gig::ApplyFailure::Config) {
             throw std::runtime_error(applied.error);
         }
@@ -679,11 +652,11 @@ int main(int argc, char** argv)
                 lastInteraction = frameStart;
             }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
             // A cert that went untrusted mid-session (e.g. it changed under us) is
             // staged by the verify callback; offer to pin it, then reconnect.
             if (auto pending = pinStore.takePending()) {
-                if (promptPinDecision(mainHwnd, *pending)) {
+                if (gig::promptPinDecision(mainHwnd, *pending)) {
                     pinStore.acceptPin(*pending);
                     gig::logInfo() << "pinned certificate for " << pending->host;
                     applyAndReport(cfg.session);

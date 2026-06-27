@@ -24,6 +24,25 @@
 - (void)advanced:(id)sender { (void)sender; if (self.onAdvanced) self.onAdvanced(); }
 @end
 
+// Opens an NSOpenPanel and writes the chosen file path into its target field.
+@interface GigBrowseHelper : NSObject
+@property (nonatomic, weak) NSTextField* target;
+@end
+
+@implementation GigBrowseHelper
+- (void)browse:(id)sender
+{
+    (void)sender;
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    if ([panel runModal] == NSModalResponseOK && panel.URL) {
+        self.target.stringValue = panel.URL.path;
+    }
+}
+@end
+
 namespace gig {
 namespace {
 
@@ -74,6 +93,22 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
             [content addSubview:f];
             return f;
         };
+        // A path field with a trailing "…" button that opens an NSOpenPanel.
+        NSMutableArray* browseHelpers = [NSMutableArray array];
+        auto fieldWithBrowse = [&](const std::string& value) -> NSTextField* {
+            constexpr CGFloat browseW = 40;
+            const CGFloat fieldW = kWidth - 190 - browseW - 6;
+            NSTextField* f = [[NSTextField alloc] initWithFrame:NSMakeRect(174, y - 2, fieldW, 24)];
+            f.stringValue = toNs(value);
+            [content addSubview:f];
+            GigBrowseHelper* helper = [[GigBrowseHelper alloc] init];
+            helper.target = f;
+            [browseHelpers addObject:helper]; // keep alive for the modal's lifetime
+            NSButton* browse = [NSButton buttonWithTitle:@"…" target:helper action:@selector(browse:)];
+            browse.frame = NSMakeRect(174 + fieldW + 6, y - 2, browseW, 24);
+            [content addSubview:browse];
+            return f;
+        };
         auto check = [&](NSString* title, BOOL on) -> NSButton* {
             NSButton* b = [NSButton checkboxWithTitle:title target:nil action:nil];
             b.frame = NSMakeRect(16, y, kWidth - 32, 22);
@@ -85,13 +120,13 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
 
         section(@"TLS / security");
         label(@"CA file:");
-        NSTextField* caField = field(config.tls.caFile, kWidth - 190);
+        NSTextField* caField = fieldWithBrowse(config.tls.caFile);
         row();
         label(@"Client cert:");
-        NSTextField* certField = field(config.tls.certFile, kWidth - 190);
+        NSTextField* certField = fieldWithBrowse(config.tls.certFile);
         row();
         label(@"Client key:");
-        NSTextField* keyField = field(config.tls.keyFile, kWidth - 190);
+        NSTextField* keyField = fieldWithBrowse(config.tls.keyFile);
         row();
         NSTextField* note = [NSTextField labelWithString:@"Leave CA / cert / key blank to use the macOS keychain."];
         note.frame = NSMakeRect(16, y, kWidth - 32, 16);

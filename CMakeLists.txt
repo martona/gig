@@ -169,6 +169,8 @@ if(WIN32)
         src/ui/resource.h
         src/ui/settings_dialog.cpp
         src/ui/settings_dialog.h
+        src/ui/pin_prompt_win.cpp
+        src/ui/pin_prompt.h
         src/platform/settings_store_win.cpp
         # Windows-only TLS client-cert path (CNG bridge + cert-store picker).
         # The lazy client-cert callback drops off-Windows; login auth is the
@@ -214,6 +216,8 @@ elseif(APPLE)
         src/net/system_trust_mac.h
         src/ui/settings_dialog_mac.mm
         src/ui/settings_dialog.h
+        src/ui/pin_prompt_mac.mm
+        src/ui/pin_prompt.h
     )
 
     # App icon: generate gig.icns from the 1024^2 boat.png master at build time

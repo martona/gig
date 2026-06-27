@@ -84,8 +84,7 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
             logInfo() << "no base configured; single camera " << cfg.url;
         } else {
             stop();
-            return { false, "no Frigate connection configured -- set a base URL (or single stream URL)",
-                     ApplyFailure::Config };
+            return { false, "no Frigate connection configured -- set the Frigate URL", ApplyFailure::Config };
         }
         if (cameras.empty()) {
             stop();
