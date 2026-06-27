@@ -3,7 +3,8 @@ name: Release pipeline (reusable)
 # Build + sign + package + attest + publish. Invoked from release-tag.yml and
 # release-manual.yml; not directly triggerable. Callers compute version/tag/draft.
 #
-# Windows-only for now (amd64 + arm64). A macOS job slots in here during the port.
+# Windows (amd64 + arm64, Azure Trusted Signing) + macOS (arm64, Developer ID +
+# notarization). Both run under the release-signing environment.
 
 on:
   workflow_call:
@@ -167,9 +168,144 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-macos:
+    name: Build macOS (arm64)
+    runs-on: macos-latest
+    # Same release-signing environment as the Windows job, so any protection rules
+    # apply uniformly. The Apple secrets/vars below live in that environment.
+    environment: release-signing
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/v
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: brew install autoconf autoconf-archive automake libtool ninja
+
+      - name: Read vcpkg baseline
+        id: vcpkg-baseline
+        run: |
+          baseline="$(python3 - <<'PY'
+          import json
+          with open("vcpkg.json", encoding="utf-8") as manifest_file:
+              manifest = json.load(manifest_file)
+          print(manifest.get("builtin-baseline", ""))
+          PY
+          )"
+          if [[ -z "$baseline" ]]; then
+            echo "vcpkg.json must define builtin-baseline for CI." >&2
+            exit 1
+          fi
+          echo "ref=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout vcpkg
+        run: |
+          git clone --no-tags https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" checkout --detach "${{ steps.vcpkg-baseline.outputs.ref }}"
+
+      - name: Bootstrap vcpkg
+        run: |
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Prepare vcpkg binary cache
+        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v5
+        with:
+          path: vcpkg-cache
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-
+
+      # Imports the Developer ID Application cert into a temporary keychain scoped to
+      # this job; the action's post-step removes it on job exit.
+      - name: Import code signing certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_P12_PASSWORD }}
+          keychain-password: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+
+      - name: Write App Store Connect API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          umask 077
+          printf '%s' "$APPLE_API_KEY_P8" > "${{ runner.temp }}/authkey.p8"
+          # Quick sanity-check: notarytool errors are noisy if the key is missing the
+          # PEM markers (e.g. someone double-base64'd it).
+          if ! grep -q "BEGIN PRIVATE KEY" "${{ runner.temp }}/authkey.p8"; then
+            echo "::error::APPLE_API_KEY_P8 secret doesn't look like a PEM .p8 file"
+            exit 1
+          fi
+
+      - name: Build Release (signed + notarized)
+        env:
+          APPLE_CODESIGN_IDENTITY: ${{ vars.APPLE_CODESIGN_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/authkey.p8
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
+        run: ./scripts/build_macos.sh --version "${{ inputs.version }}" --notarize
+
+      - name: Verify macOS app bundle
+        run: |
+          # build_macos.sh outputs build/Release/gig.app (Xcode) or
+          # build/macos-release/gig.app (Command Line Tools); find either.
+          app="$(find build -name 'gig.app' -type d -print -quit)"
+          if [[ -z "$app" || ! -d "$app" ]]; then
+            echo "::error::Could not find gig.app under build/"
+            find build -print 2>&1 | head -100 >&2 || true
+            exit 1
+          fi
+          echo "Found app bundle at: $app"
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+          for path in \
+            "$app/Contents/MacOS/gig" \
+            "$app/Contents/Resources/gig.icns" \
+            "$app/Contents/Info.plist"
+          do
+            if [[ ! -e "$path" ]]; then
+              echo "Missing expected bundle path: $path" >&2
+              exit 1
+            fi
+          done
+          if [[ ! -x "$app/Contents/MacOS/gig" ]]; then
+            echo "App executable is not executable: $app/Contents/MacOS/gig" >&2
+            exit 1
+          fi
+          # The notarized ticket must be stapled; fail the release if it isn't.
+          xcrun stapler validate "$app"
+
+      - name: Package artifact
+        run: |
+          mkdir -p release-stage
+          # Version-less name so the README can link a stable releases/latest/download
+          # URL; the version rides in the bundle's Info.plist and the attestation binds
+          # by SHA256. ditto (not zip) preserves macOS metadata + the stapled ticket;
+          # --keepParent puts gig.app at the archive root.
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "$APP_PATH" \
+            "release-stage/gig-macos-arm64.zip"
+          ls -la release-stage/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: release-stage/*
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Create release
-    needs: [build-windows]
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
