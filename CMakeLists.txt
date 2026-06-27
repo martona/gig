@@ -240,6 +240,7 @@ elseif(APPLE)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     find_library(SECURITY_FRAMEWORK Security REQUIRED)       # Keychain (settings_store_mac)
     find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(METALKIT_FRAMEWORK MetalKit REQUIRED)       # imgui_impl_metal may reference it
     find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)   # CAMetalLayer
     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
     target_link_libraries(gig PRIVATE
@@ -247,6 +248,7 @@ elseif(APPLE)
         ${COREFOUNDATION_FRAMEWORK}
         ${SECURITY_FRAMEWORK}
         ${METAL_FRAMEWORK}
+        ${METALKIT_FRAMEWORK}
         ${QUARTZCORE_FRAMEWORK}
         ${APPKIT_FRAMEWORK}
     )

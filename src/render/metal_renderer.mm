@@ -3,9 +3,15 @@
 
 #include "log.hpp"
 
+#include <algorithm>
+#include <cfloat>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -14,18 +20,19 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
-// Phase C1 of the macOS renderer: software-frame video display. It uploads the
-// decoder's CPU planes (BGRA / NV12 / YUV420P) to MTLTextures and draws each camera
-// letterboxed into the shared grid_layout, with YUV->RGB in MSL fragment shaders.
-// Click-to-focus renders one tile fullscreen. Still TODO (C2-C4): the procedural
-// "signal" scope on frameless tiles, hover + zoom animation (and isAnimating()),
-// the text overlay (labels + diagnostics), and imgui_impl_metal (toolbar/log/banner).
+#include <imgui.h>
+#include <imgui_impl_metal.h>
+#include <imgui_impl_sdl3.h>
+
+// macOS renderer: software-frame video display (BGRA/NV12/YUV420P -> MTLTextures,
+// YUV->RGB in MSL) drawn letterboxed into the shared grid_layout, plus the full
+// chrome ported from the D3D11 renderer: the procedural "signal" scope on frameless
+// tiles, the resolve crossfade, hover + click-to-zoom animation, dear imgui (Metal
+// backend) for the toolbar / log / status banner, and camera labels + the
+// diagnostics tile via imgui draw lists. On-demand rendering via isAnimating().
 
 namespace {
 
-// MSL: a full-screen quad generated from vertex_id (no vertex buffer), plus one
-// fragment per pixel format. NV12/YUV420 do the YUV->RGB matrix the same way the
-// D3D11 shaders do (saturate(dot(row, [y,u,v,1]))).
 const char* const kShaderSource = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
@@ -73,13 +80,76 @@ fragment float4 fs_yuv420(VSOut in [[stage_in]],
     float4 px = float4(y, u, v, 1.0);
     return float4(saturate(dot(m.r, px)), saturate(dot(m.g, px)), saturate(dot(m.b, px)), 1.0);
 }
+
+// Signal "scope" for frameless tiles (ported from the HLSL; descending smoothsteps
+// rewritten as 1 - smoothstep so edge0 < edge1, which Metal requires).
+struct SignalConstants { float uTime; float uEnergy; float uSeed; float uAspect; float uAlpha; float p0; float p1; float p2; };
+
+static inline float hash11(float n) { return fract(sin(n) * 43758.5453); }
+
+static inline float traceWave(float x, float t, float e, float seed) {
+    float smoothW = sin(x * 7.0 + t * 1.3 + seed) * 0.6 + sin(x * 3.0 - t * 0.9 + seed * 0.5) * 0.4;
+    float chaosW = sin(x * 30.0 + t * 20.0 + seed * 2.3) * 0.5 + sin(x * 61.0 - t * 31.0 + seed) * 0.3
+                 + (hash11(floor(x * 120.0) + floor(t * 55.0) * 7.0) - 0.5) * 1.0;
+    float shape = mix(smoothW, chaosW, e);
+    float a = 0.04 + e * 0.34;
+    return shape * a;
+}
+
+fragment float4 fs_signal(VSOut in [[stage_in]], constant SignalConstants& c [[buffer(0)]]) {
+    float2 uv = in.uv;
+    float t = c.uTime;
+    float e = saturate(c.uEnergy);
+    float3 col = float3(0.043, 0.051, 0.071);
+    col += (1.0 - smoothstep(0.0, 0.004, abs(uv.y - 0.5))) * 0.05;
+    float3 cold = float3(0.88, 0.62, 0.16);
+    float3 hot  = float3(0.27, 0.80, 0.66);
+    float3 traceCol = mix(cold, hot, saturate(e * 1.4));
+    float w = traceWave(uv.x, t, e, c.uSeed);
+    float d = abs(uv.y - 0.5 - w);
+    float core = 1.0 - smoothstep(0.0, 0.018, d);
+    float glow = (1.0 - smoothstep(0.0, 0.085, d)) * 0.22;
+    col += traceCol * (core + glow);
+    float head = (1.0 - smoothstep(0.0, 0.03, distance(uv, float2(0.985, 0.5 + w)))) * e;
+    col += traceCol * head;
+    float coldness = 1.0 - saturate(e / 0.18);
+    if (coldness > 0.001) {
+        float sweepX = fract(t * 0.5 + c.uSeed * 0.37);
+        float beam = 1.0 - smoothstep(0.0, 0.012, abs(uv.x - sweepX));
+        float behind = sweepX - uv.x;
+        float trail = (behind > 0.0) ? saturate(1.0 - behind / 0.16) * 0.16 : 0.0;
+        col += cold * (beam * 0.6 + trail) * coldness;
+    }
+    return float4(col, c.uAlpha);
+}
+
+struct HoverConstants { float2 uSizePx; float uBorderPx; float uPad; float4 uColor; };
+
+fragment float4 fs_hover(VSOut in [[stage_in]], constant HoverConstants& c [[buffer(0)]]) {
+    float2 px = in.uv * c.uSizePx;
+    float2 dEdge = min(px, c.uSizePx - px);
+    float edge = min(dEdge.x, dEdge.y);
+    float border = 1.0 - smoothstep(c.uBorderPx - 1.0, c.uBorderPx + 1.0, edge);
+    float a = saturate(border + 0.06) * c.uColor.a;
+    return float4(c.uColor.rgb, a);
+}
 )METAL";
 
-// 3 rows (r,g,b) of the YUV->RGB matrix; matches d3d11_renderer's constants.
 struct ColorMatrix {
     float r[4];
     float g[4];
     float b[4];
+};
+
+struct SignalConstants {
+    float time, energy, seed, aspect, alpha, pad0, pad1, pad2;
+};
+
+struct HoverConstants {
+    float sizePx[2];
+    float borderPx;
+    float pad;
+    float color[4];
 };
 
 ColorMatrix yuvToRgb(bool fullRange)
@@ -98,8 +168,12 @@ ColorMatrix yuvToRgb(bool fullRange)
     };
 }
 
-// One camera's GPU state: a texture per plane plus the identity of the last upload,
-// so a tile re-uploads only when its frame index changes.
+float smoothstep01(float x)
+{
+    x = std::clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
 struct TileState {
     id<MTLTexture> plane[3] = { nil, nil, nil };
     int planeW[3] = { 0, 0, 0 };
@@ -110,7 +184,18 @@ struct TileState {
     int texH = 0;
     bool fullRange = false;
     std::uint64_t uploadedFrameIndex = 0;
+
+    float signalEnergy = 0.0f;
+    std::uint64_t signalLastBytes = 0;
+    bool showedSignal = false;
+    float frameFade = -1.0f;
 };
+
+constexpr float kToolbarLogicalHeight = 32.0f;
+constexpr float kBannerLogicalHeight = 22.0f;
+constexpr float kToolbarHideDelay = 2.5f;
+constexpr float kZoomDuration = 0.30f;
+constexpr float kFadeDur = 0.22f;
 
 class MetalRenderer final : public VideoRenderer {
 public:
@@ -124,48 +209,63 @@ public:
             return false;
         }
         layer_ = (__bridge CAMetalLayer*)SDL_Metal_GetLayer(metalView_);
-        if (!layer_) {
-            gig::logError() << "SDL_Metal_GetLayer returned null";
-            return false;
-        }
-
         device_ = MTLCreateSystemDefaultDevice();
-        if (!device_) {
-            gig::logError() << "MTLCreateSystemDefaultDevice failed";
+        if (!layer_ || !device_) {
+            gig::logError() << "Metal layer/device unavailable";
             return false;
         }
         layer_.device = device_;
         layer_.pixelFormat = MTLPixelFormatBGRA8Unorm;
         queue_ = [device_ newCommandQueue];
-        if (!queue_) {
-            gig::logError() << "Metal command queue creation failed";
-            return false;
-        }
 
         NSError* error = nil;
         id<MTLLibrary> library =
             [device_ newLibraryWithSource:[NSString stringWithUTF8String:kShaderSource] options:nil error:&error];
         if (!library) {
             gig::logError() << "metal shader compile failed: "
-                            << (error.localizedDescription.UTF8String ?: "(unknown)");
+                            << (error ? error.localizedDescription.UTF8String : "(unknown)");
             return false;
         }
         id<MTLFunction> vs = [library newFunctionWithName:@"vs_main"];
-        pipelineBgra_ = makePipeline(vs, [library newFunctionWithName:@"fs_bgra"]);
-        pipelineNv12_ = makePipeline(vs, [library newFunctionWithName:@"fs_nv12"]);
-        pipelineYuv420_ = makePipeline(vs, [library newFunctionWithName:@"fs_yuv420"]);
-        if (!pipelineBgra_ || !pipelineNv12_ || !pipelineYuv420_) {
+        pipelineBgra_ = makePipeline(vs, [library newFunctionWithName:@"fs_bgra"], false);
+        pipelineNv12_ = makePipeline(vs, [library newFunctionWithName:@"fs_nv12"], false);
+        pipelineYuv420_ = makePipeline(vs, [library newFunctionWithName:@"fs_yuv420"], false);
+        pipelineSignal_ = makePipeline(vs, [library newFunctionWithName:@"fs_signal"], true);
+        pipelineHover_ = makePipeline(vs, [library newFunctionWithName:@"fs_hover"], true);
+        if (!pipelineBgra_ || !pipelineNv12_ || !pipelineYuv420_ || !pipelineSignal_ || !pipelineHover_) {
             return false;
+        }
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr;
+        loadImguiFont();
+        applyImguiStyle();
+        if (ImGui_ImplSDL3_InitForMetal(window_) && ImGui_ImplMetal_Init(device_)) {
+            imguiReady_ = true;
+        } else {
+            gig::logWarning() << "ImGui init failed; toolbar/log disabled.";
+            ImGui::DestroyContext();
         }
 
         gig::logInfo() << "metal renderer ready: " << device_.name.UTF8String;
         return true;
     }
 
-    void resize() override
+    ~MetalRenderer() override
     {
-        // drawableSize is refreshed from the window's pixel size each render().
+        if (imguiReady_) {
+            ImGui_ImplMetal_Shutdown();
+            ImGui_ImplSDL3_Shutdown();
+            ImGui::DestroyContext();
+        }
+        if (metalView_) {
+            SDL_Metal_DestroyView(metalView_);
+            metalView_ = nullptr;
+        }
     }
+
+    void resize() override {}
 
     void render(const std::vector<std::shared_ptr<VideoFrame>>& frames) override
     {
@@ -174,45 +274,93 @@ public:
         }
 
         @autoreleasepool {
-            int pixelWidth = 0;
-            int pixelHeight = 0;
+            int pointWidth = 0, pointHeight = 0, pixelWidth = 0, pixelHeight = 0;
+            SDL_GetWindowSize(window_, &pointWidth, &pointHeight);
             SDL_GetWindowSizeInPixels(window_, &pixelWidth, &pixelHeight);
-            if (pixelWidth <= 0 || pixelHeight <= 0) {
+            if (pixelWidth <= 0 || pixelHeight <= 0 || pointWidth <= 0 || pointHeight <= 0) {
                 return;
             }
+            scale_ = static_cast<float>(pixelHeight) / static_cast<float>(pointHeight);
             layer_.drawableSize = CGSizeMake(pixelWidth, pixelHeight);
 
             if (tiles_.size() != frames.size()) {
                 tiles_.resize(frames.size());
             }
 
+            const auto nowTp = std::chrono::steady_clock::now();
+            float dt = haveRenderTp_ ? std::chrono::duration<float>(nowTp - lastRenderTp_).count() : 0.0f;
+            lastRenderTp_ = nowTp;
+            haveRenderTp_ = true;
+            dt = std::clamp(dt, 0.0f, 0.1f);
+            lastDt_ = dt;
+            animTime_ += dt;
+            updateActivity(dt);
+
+            const float zoomTarget = (focusedTile_ >= 0) ? 1.0f : 0.0f;
+            if (animProgress_ != zoomTarget) {
+                const float step = (kZoomDuration > 0.0f) ? dt / kZoomDuration : 1.0f;
+                animProgress_ = (animProgress_ < zoomTarget) ? std::min(zoomTarget, animProgress_ + step)
+                                                             : std::max(zoomTarget, animProgress_ - step);
+            }
+            sawAnimatedContent_ = false;
+
             id<CAMetalDrawable> drawable = [layer_ nextDrawable];
             if (!drawable) {
                 return;
             }
-
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
             pass.colorAttachments[0].texture = drawable.texture;
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             pass.colorAttachments[0].clearColor = MTLClearColorMake(0.01, 0.01, 0.012, 1.0);
-
             id<MTLCommandBuffer> commandBuffer = [queue_ commandBuffer];
             id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
 
-            const bool focused = focusedTile_ >= 0 && focusedTile_ < static_cast<int>(frames.size());
-            if (focused) {
-                const gig::TileRect full {
-                    0.0f, 0.0f, static_cast<float>(pixelWidth), static_cast<float>(pixelHeight)
-                };
-                drawOne(encoder, static_cast<std::size_t>(focusedTile_), frames, full);
+            // Layout in points (matches main.cpp's hit-test + imgui); video viewports
+            // scale to pixels. Reserve the toolbar strip in grid view only.
+            const gig::TileRect fullPts { 0.0f, 0.0f, static_cast<float>(pointWidth), static_cast<float>(pointHeight) };
+            const bool fullyFocused = focusedTile_ >= 0 && animProgress_ >= 1.0f
+                && focusedTile_ < static_cast<int>(frames.size());
+
+            gig::GridLayout layout;
+            if (fullyFocused) {
+                renderSingleTile(encoder, static_cast<std::size_t>(focusedTile_), frames, fullPts);
+                if (hoveredTile_ == focusedTile_) {
+                    drawHover(encoder, fullPts);
+                }
             } else {
-                const gig::GridLayout layout =
-                    gig::computeGridLayout(static_cast<int>(frames.size()), pixelWidth, pixelHeight);
-                for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
-                    drawOne(encoder, i, frames, layout.tiles[i]);
+                const float toolbarTop = toolbarHeightLogical();
+                const int gridHeight = std::max(1, pointHeight - static_cast<int>(toolbarTop));
+                const bool showDiag = overlayStats_.showDiagnostics;
+                const int effective = static_cast<int>(frames.size()) + (showDiag ? 1 : 0);
+                layout = gig::computeGridLayout(effective, pointWidth, gridHeight);
+                for (gig::TileRect& tile : layout.tiles) {
+                    tile.y += toolbarTop;
+                }
+                renderGridTiles(encoder, frames, layout);
+
+                if (animProgress_ > 0.0f && animTile_ >= 0 && animTile_ < static_cast<int>(frames.size())
+                    && animTile_ < static_cast<int>(layout.tiles.size())) {
+                    const gig::TileRect& cell = layout.tiles[static_cast<std::size_t>(animTile_)];
+                    const float e = smoothstep01(animProgress_);
+                    const gig::TileRect grown {
+                        std::lerp(cell.x, 0.0f, e), std::lerp(cell.y, 0.0f, e),
+                        std::lerp(cell.width, static_cast<float>(pointWidth), e),
+                        std::lerp(cell.height, static_cast<float>(pointHeight), e),
+                    };
+                    drawTileContentAt(encoder, static_cast<std::size_t>(animTile_), grown);
+                }
+                if (animProgress_ == 0.0f && hoveredTile_ >= 0 && hoveredTile_ < static_cast<int>(frames.size())
+                    && hoveredTile_ < static_cast<int>(layout.tiles.size())) {
+                    drawHover(encoder, layout.tiles[static_cast<std::size_t>(hoveredTile_)]);
                 }
             }
+
+            renderImGui(commandBuffer, encoder, pass, frames, layout, fullyFocused, fullPts);
+
+            const bool zoomAnimating = animProgress_ != zoomTarget;
+            const bool toolbarAnimating = focusedTile_ >= 0 && toolbarIdle_ < kToolbarHideDelay;
+            animating_ = sawAnimatedContent_ || zoomAnimating || toolbarAnimating;
 
             [encoder endEncoding];
             [commandBuffer presentDrawable:drawable];
@@ -220,26 +368,62 @@ public:
         }
     }
 
-    // No animation in C1: the run loop draws on new frames / input. (C2 adds the
-    // signal scope + zoom/hover and flips this true while they're in flight.)
-    bool isAnimating() const override { return false; }
+    bool isAnimating() const override { return animating_; }
 
-    void setFocusedTile(int index) override { focusedTile_ = index; }
+    void setFocusedTile(int index) override
+    {
+        if (index == focusedTile_) {
+            return;
+        }
+        animTile_ = (index >= 0) ? index : focusedTile_;
+        focusedTile_ = index;
+    }
     int focusedTile() const override { return focusedTile_; }
 
-    void setCameraLabels(const std::vector<std::string>&) override {}
-    void setDiagnostics(const OverlayStats&) override {}
+    void setCameraLabels(const std::vector<std::string>& labels) override { cameraLabels_ = labels; }
+    void setDiagnostics(const OverlayStats& stats) override { overlayStats_ = stats; }
+    void setLabelMode(LabelMode mode) override { labelMode_ = mode; }
+    void setHoveredTile(int index) override { hoveredTile_ = index; }
+    void setTileActivity(const std::vector<std::uint64_t>& byteCounts) override { tileBytes_ = byteCounts; }
 
-    ~MetalRenderer() override
+    bool handleEvent(const SDL_Event& event) override
     {
-        if (metalView_) {
-            SDL_Metal_DestroyView(metalView_);
-            metalView_ = nullptr;
+        if (!imguiReady_) {
+            return false;
+        }
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        const ImGuiIO& io = ImGui::GetIO();
+        switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_WHEEL:
+            return io.WantCaptureMouse;
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_TEXT_INPUT:
+            return io.WantCaptureKeyboard;
+        default:
+            return false;
         }
     }
 
+    void setLogViewVisible(bool visible) override { logViewVisible_ = visible; }
+    bool logViewVisible() const override { return logViewVisible_; }
+
+    ToolbarAction takeToolbarAction() override
+    {
+        const ToolbarAction action = pendingToolbarAction_;
+        pendingToolbarAction_ = ToolbarAction::None;
+        return action;
+    }
+
+    float reservedTopLogical() const override { return focusedTile_ < 0 ? kToolbarLogicalHeight : 0.0f; }
+
 private:
-    id<MTLRenderPipelineState> makePipeline(id<MTLFunction> vertexFn, id<MTLFunction> fragmentFn)
+    float toolbarHeightLogical() const { return kToolbarLogicalHeight; }
+
+    id<MTLRenderPipelineState> makePipeline(id<MTLFunction> vertexFn, id<MTLFunction> fragmentFn, bool blend)
     {
         if (!vertexFn || !fragmentFn) {
             gig::logError() << "metal: missing shader function";
@@ -249,13 +433,18 @@ private:
         descriptor.vertexFunction = vertexFn;
         descriptor.fragmentFunction = fragmentFn;
         descriptor.colorAttachments[0].pixelFormat = layer_.pixelFormat;
-
+        if (blend) {
+            descriptor.colorAttachments[0].blendingEnabled = YES;
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        }
         NSError* error = nil;
-        id<MTLRenderPipelineState> state =
-            [device_ newRenderPipelineStateWithDescriptor:descriptor error:&error];
+        id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&error];
         if (!state) {
             gig::logError() << "metal pipeline creation failed: "
-                            << (error.localizedDescription.UTF8String ?: "(unknown)");
+                            << (error ? error.localizedDescription.UTF8String : "(unknown)");
         }
         return state;
     }
@@ -268,7 +457,7 @@ private:
                                                               height:static_cast<NSUInteger>(height)
                                                            mipmapped:NO];
         descriptor.usage = MTLTextureUsageShaderRead;
-        descriptor.storageMode = MTLStorageModeShared; // CPU upload via replaceRegion (unified memory)
+        descriptor.storageMode = MTLStorageModeShared;
         return [device_ newTextureWithDescriptor:descriptor];
     }
 
@@ -313,8 +502,8 @@ private:
             tile.texH = frame.height;
         }
 
-        const int chromaWidth = (frame.width + 1) / 2;
-        const int chromaHeight = (frame.height + 1) / 2;
+        const int cw = (frame.width + 1) / 2;
+        const int ch = (frame.height + 1) / 2;
         switch (frame.format) {
         case VideoFrameFormat::BGRA:
             ensurePlane(tile, 0, MTLPixelFormatBGRA8Unorm, frame.width, frame.height);
@@ -322,53 +511,62 @@ private:
             break;
         case VideoFrameFormat::NV12:
             ensurePlane(tile, 0, MTLPixelFormatR8Unorm, frame.width, frame.height);
-            ensurePlane(tile, 1, MTLPixelFormatRG8Unorm, chromaWidth, chromaHeight);
+            ensurePlane(tile, 1, MTLPixelFormatRG8Unorm, cw, ch);
             uploadPlane(tile.plane[0], frame.width, frame.height, frame.planes[0], frame.strides[0]);
-            uploadPlane(tile.plane[1], chromaWidth, chromaHeight, frame.planes[1], frame.strides[1]);
+            uploadPlane(tile.plane[1], cw, ch, frame.planes[1], frame.strides[1]);
             break;
         case VideoFrameFormat::YUV420P:
             ensurePlane(tile, 0, MTLPixelFormatR8Unorm, frame.width, frame.height);
-            ensurePlane(tile, 1, MTLPixelFormatR8Unorm, chromaWidth, chromaHeight);
-            ensurePlane(tile, 2, MTLPixelFormatR8Unorm, chromaWidth, chromaHeight);
+            ensurePlane(tile, 1, MTLPixelFormatR8Unorm, cw, ch);
+            ensurePlane(tile, 2, MTLPixelFormatR8Unorm, cw, ch);
             uploadPlane(tile.plane[0], frame.width, frame.height, frame.planes[0], frame.strides[0]);
-            uploadPlane(tile.plane[1], chromaWidth, chromaHeight, frame.planes[1], frame.strides[1]);
-            uploadPlane(tile.plane[2], chromaWidth, chromaHeight, frame.planes[2], frame.strides[2]);
+            uploadPlane(tile.plane[1], cw, ch, frame.planes[1], frame.strides[1]);
+            uploadPlane(tile.plane[2], cw, ch, frame.planes[2], frame.strides[2]);
             break;
         case VideoFrameFormat::D3D11_NV12:
-            return; // never produced on macOS (hw path is Windows-only)
+            return;
         }
-
         tile.fullRange = frame.fullRange;
         tile.uploadedFrameIndex = frame.index;
     }
 
-    static MTLViewport computeVideoViewport(const gig::TileRect& cell, int textureWidth, int textureHeight)
+    // Letterbox a video of texW x texH into a points cell, returning a PIXEL viewport.
+    MTLViewport videoViewport(const gig::TileRect& cellPts, int texW, int texH) const
     {
-        MTLViewport viewport {};
-        viewport.znear = 0.0;
-        viewport.zfar = 1.0;
-        if (textureWidth <= 0 || textureHeight <= 0 || cell.width <= 0.0f || cell.height <= 0.0f) {
-            viewport.originX = cell.x;
-            viewport.originY = cell.y;
-            viewport.width = cell.width;
-            viewport.height = cell.height;
-            return viewport;
+        gig::TileRect c { cellPts.x * scale_, cellPts.y * scale_, cellPts.width * scale_, cellPts.height * scale_ };
+        MTLViewport vp {};
+        vp.znear = 0.0;
+        vp.zfar = 1.0;
+        if (texW <= 0 || texH <= 0 || c.width <= 0.0f || c.height <= 0.0f) {
+            vp.originX = c.x; vp.originY = c.y; vp.width = c.width; vp.height = c.height;
+            return vp;
         }
-
-        const float cellAspect = cell.width / cell.height;
-        const float videoAspect = static_cast<float>(textureWidth) / static_cast<float>(textureHeight);
+        const float cellAspect = c.width / c.height;
+        const float videoAspect = static_cast<float>(texW) / static_cast<float>(texH);
         if (cellAspect > videoAspect) {
-            viewport.height = cell.height;
-            viewport.width = cell.height * videoAspect;
-            viewport.originX = cell.x + (cell.width - viewport.width) * 0.5;
-            viewport.originY = cell.y;
+            vp.height = c.height;
+            vp.width = c.height * videoAspect;
+            vp.originX = c.x + (c.width - vp.width) * 0.5;
+            vp.originY = c.y;
         } else {
-            viewport.width = cell.width;
-            viewport.height = cell.width / videoAspect;
-            viewport.originX = cell.x;
-            viewport.originY = cell.y + (cell.height - viewport.height) * 0.5;
+            vp.width = c.width;
+            vp.height = c.width / videoAspect;
+            vp.originX = c.x;
+            vp.originY = c.y + (c.height - vp.height) * 0.5;
         }
-        return viewport;
+        return vp;
+    }
+
+    MTLViewport cellViewport(const gig::TileRect& cellPts) const
+    {
+        MTLViewport vp {};
+        vp.originX = cellPts.x * scale_;
+        vp.originY = cellPts.y * scale_;
+        vp.width = cellPts.width * scale_;
+        vp.height = cellPts.height * scale_;
+        vp.znear = 0.0;
+        vp.zfar = 1.0;
+        return vp;
     }
 
     void drawTile(id<MTLRenderCommandEncoder> encoder, const TileState& tile)
@@ -398,20 +596,429 @@ private:
         [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     }
 
-    void drawOne(id<MTLRenderCommandEncoder> encoder, std::size_t index,
-                 const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::TileRect& cell)
+    void drawSignal(id<MTLRenderCommandEncoder> encoder, const gig::TileRect& cellPts, std::size_t index, float energy, float alpha)
+    {
+        if (cellPts.width <= 0.0f || cellPts.height <= 0.0f) {
+            return;
+        }
+        [encoder setViewport:cellViewport(cellPts)];
+        SignalConstants c {};
+        c.time = animTime_;
+        c.energy = energy;
+        c.seed = static_cast<float>(index) * 2.39996f;
+        c.aspect = cellPts.width / cellPts.height;
+        c.alpha = alpha;
+        [encoder setRenderPipelineState:pipelineSignal_];
+        [encoder setFragmentBytes:&c length:sizeof(c) atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+
+    void drawHover(id<MTLRenderCommandEncoder> encoder, const gig::TileRect& cellPts)
+    {
+        if (cellPts.width <= 0.0f || cellPts.height <= 0.0f) {
+            return;
+        }
+        const MTLViewport vp = cellViewport(cellPts);
+        [encoder setViewport:vp];
+        HoverConstants c {};
+        c.sizePx[0] = static_cast<float>(vp.width);
+        c.sizePx[1] = static_cast<float>(vp.height);
+        c.borderPx = 2.0f * scale_;
+        c.color[0] = 0.80f; c.color[1] = 0.90f; c.color[2] = 1.0f; c.color[3] = 0.6f;
+        [encoder setRenderPipelineState:pipelineHover_];
+        [encoder setFragmentBytes:&c length:sizeof(c) atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+
+    void drawTileContentAt(id<MTLRenderCommandEncoder> encoder, std::size_t index, const gig::TileRect& rectPts)
+    {
+        if (index >= tiles_.size()) {
+            return;
+        }
+        const TileState& tile = tiles_[index];
+        if (tile.plane[0]) {
+            [encoder setViewport:videoViewport(rectPts, tile.texW, tile.texH)];
+            drawTile(encoder, tile);
+        } else {
+            drawSignal(encoder, rectPts, index, tile.signalEnergy, 1.0f);
+        }
+    }
+
+    void renderGridTiles(id<MTLRenderCommandEncoder> encoder,
+                         const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::GridLayout& layout)
+    {
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            TileState& tile = tiles_[i];
+            const VideoFrame* frame = frames[i].get();
+            const bool hasFrame = frame && !frame->planes[0].empty();
+            if (hasFrame) {
+                uploadFrame(tile, *frame);
+            } else if (tile.plane[0]) {
+                for (int p = 0; p < 3; ++p) { tile.plane[p] = nil; }
+            }
+            if (i >= layout.tiles.size()) {
+                continue;
+            }
+            const gig::TileRect& cell = layout.tiles[i];
+
+            if (!tile.plane[0]) {
+                drawSignal(encoder, cell, i, tile.signalEnergy, 1.0f);
+                sawAnimatedContent_ = true;
+                tile.showedSignal = true;
+                tile.frameFade = -1.0f;
+                continue;
+            }
+            if (tile.showedSignal) {
+                tile.frameFade = 0.0f;
+                tile.showedSignal = false;
+            }
+            [encoder setViewport:videoViewport(cell, tile.texW, tile.texH)];
+            drawTile(encoder, tile);
+            if (tile.frameFade >= 0.0f) {
+                sawAnimatedContent_ = true;
+                const float a = 1.0f - tile.frameFade / kFadeDur;
+                if (a > 0.0f) {
+                    drawSignal(encoder, cell, i, tile.signalEnergy, a);
+                }
+                tile.frameFade += lastDt_;
+                if (tile.frameFade >= kFadeDur) {
+                    tile.frameFade = -1.0f;
+                }
+            }
+        }
+    }
+
+    void renderSingleTile(id<MTLRenderCommandEncoder> encoder, std::size_t index,
+                          const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::TileRect& full)
     {
         TileState& tile = tiles_[index];
         const VideoFrame* frame = frames[index].get();
         const bool hasFrame = frame && !frame->planes[0].empty();
         if (hasFrame) {
             uploadFrame(tile, *frame);
+        } else if (tile.plane[0]) {
+            for (int p = 0; p < 3; ++p) { tile.plane[p] = nil; }
         }
         if (!tile.plane[0]) {
-            return; // no frame yet -> black cell in C1 (the signal scope arrives in C2)
+            drawSignal(encoder, full, index, tile.signalEnergy, 1.0f);
+            sawAnimatedContent_ = true;
+            tile.showedSignal = true;
+            tile.frameFade = -1.0f;
+            return;
         }
-        [encoder setViewport:computeVideoViewport(cell, tile.texW, tile.texH)];
+        if (tile.showedSignal) {
+            tile.frameFade = 0.0f;
+            tile.showedSignal = false;
+        }
+        [encoder setViewport:videoViewport(full, tile.texW, tile.texH)];
         drawTile(encoder, tile);
+        if (tile.frameFade >= 0.0f) {
+            sawAnimatedContent_ = true;
+            const float a = 1.0f - tile.frameFade / kFadeDur;
+            if (a > 0.0f) {
+                drawSignal(encoder, full, index, tile.signalEnergy, a);
+            }
+            tile.frameFade += lastDt_;
+            if (tile.frameFade >= kFadeDur) {
+                tile.frameFade = -1.0f;
+            }
+        }
+    }
+
+    void updateActivity(float dt)
+    {
+        constexpr float kSettleTau = 0.25f;
+        const float settle = std::exp(-dt / kSettleTau);
+        for (std::size_t i = 0; i < tiles_.size(); ++i) {
+            TileState& tile = tiles_[i];
+            const std::uint64_t bytes = (i < tileBytes_.size()) ? tileBytes_[i] : tile.signalLastBytes;
+            const bool gotData = bytes > tile.signalLastBytes;
+            tile.signalLastBytes = bytes;
+            tile.signalEnergy = gotData ? 1.0f : tile.signalEnergy * settle;
+        }
+    }
+
+    std::string labelFor(std::size_t index) const
+    {
+        return index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
+    }
+
+    bool labelVisible(std::size_t index) const
+    {
+        switch (labelMode_) {
+        case LabelMode::Hide: return false;
+        case LabelMode::Always: return true;
+        case LabelMode::ErrorOnly: return index < tiles_.size() && tiles_[index].showedSignal;
+        }
+        return false;
+    }
+
+    // ---- ImGui (toolbar / banner / log) + camera labels + diagnostics ----------
+
+    void renderImGui(id<MTLCommandBuffer> commandBuffer, id<MTLRenderCommandEncoder> encoder,
+                     MTLRenderPassDescriptor* pass, const std::vector<std::shared_ptr<VideoFrame>>& frames,
+                     const gig::GridLayout& layout, bool fullyFocused, const gig::TileRect& fullPts)
+    {
+        if (!imguiReady_) {
+            return;
+        }
+        ImGui_ImplMetal_NewFrame(pass);
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
+        // Camera labels + diagnostics tile via the background draw list (points; over
+        // the video, under the toolbar window).
+        ImDrawList* bg = ImGui::GetBackgroundDrawList();
+        if (fullyFocused) {
+            if (labelVisible(static_cast<std::size_t>(focusedTile_))) {
+                drawLabel(bg, fullPts, labelFor(static_cast<std::size_t>(focusedTile_)), 2.0f);
+            }
+        } else {
+            for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
+                if (labelVisible(i)) {
+                    drawLabel(bg, layout.tiles[i], labelFor(i), 1.0f);
+                }
+            }
+            if (overlayStats_.showDiagnostics && frames.size() < layout.tiles.size()) {
+                drawDiagnostics(bg, layout.tiles[frames.size()]);
+            }
+        }
+
+        buildToolbar();
+        buildStatusBanner();
+        if (logViewVisible_) {
+            buildLogWindow();
+        }
+
+        ImGui::Render();
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), commandBuffer, encoder);
+    }
+
+    void drawLabel(ImDrawList* dl, const gig::TileRect& cellPts, const std::string& label, float sizeScale)
+    {
+        if (label.empty() || cellPts.width <= 0.0f) {
+            return;
+        }
+        ImFont* font = ImGui::GetFont();
+        const float fontSize = ImGui::GetFontSize() * sizeScale;
+        const float pad = 4.0f;
+        std::string shown = label;
+        while (!shown.empty()
+               && font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, shown.c_str()).x + 2.0f * pad > cellPts.width) {
+            shown.pop_back();
+        }
+        if (shown.empty()) {
+            return;
+        }
+        const float textW = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, shown.c_str()).x;
+        const float stripW = std::min(cellPts.width, textW + 2.0f * pad);
+        const float stripH = fontSize + 2.0f * pad;
+        dl->AddRectFilled(ImVec2(cellPts.x, cellPts.y), ImVec2(cellPts.x + stripW, cellPts.y + stripH),
+                          IM_COL32(0, 0, 0, 140));
+        dl->AddText(font, fontSize, ImVec2(cellPts.x + pad, cellPts.y + pad), IM_COL32(230, 242, 255, 255),
+                    shown.c_str());
+    }
+
+    void drawDiagnostics(ImDrawList* dl, const gig::TileRect& cellPts)
+    {
+        if (cellPts.width <= 0.0f || cellPts.height <= 0.0f) {
+            return;
+        }
+        dl->AddRectFilled(ImVec2(cellPts.x, cellPts.y), ImVec2(cellPts.x + cellPts.width, cellPts.y + cellPts.height),
+                          IM_COL32(10, 13, 18, 235));
+        ImFont* font = ImGui::GetFont();
+        const float fontSize = ImGui::GetFontSize();
+        const float pad = 8.0f;
+        float y = cellPts.y + pad;
+        const float x = cellPts.x + pad;
+        const ImU32 heading = IM_COL32(166, 199, 255, 255);
+        const ImU32 body = IM_COL32(217, 230, 255, 255);
+        const float lh = fontSize + 4.0f;
+        char line[128] = {};
+
+        dl->AddText(font, fontSize, ImVec2(x, y), heading, "diagnostics");
+        y += lh * 1.4f;
+        std::snprintf(line, sizeof(line), "cams good: %d  bad: %d", overlayStats_.camerasOnline, overlayStats_.camerasOffline);
+        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
+        y += lh;
+        std::snprintf(line, sizeof(line), "frames: %d/s, %llu total", static_cast<int>(overlayStats_.fps + 0.5),
+                      static_cast<unsigned long long>(overlayStats_.framesTotal));
+        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
+        y += lh;
+        std::snprintf(line, sizeof(line), "bandwidth: %d kbps", overlayStats_.kbps);
+        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
+        y += lh;
+        std::snprintf(line, sizeof(line), "cpu: %.2f%%", overlayStats_.cpuPercent);
+        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
+    }
+
+    void buildToolbar()
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool active = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        toolbarIdle_ = active ? 0.0f : toolbarIdle_ + io.DeltaTime;
+        const bool focusView = focusedTile_ >= 0;
+        if (focusView && toolbarIdle_ >= kToolbarHideDelay) {
+            return;
+        }
+
+        const float height = kToolbarLogicalHeight;
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.07f, 0.08f, focusView ? 0.82f : 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 0.0f));
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        if (ImGui::Begin("##toolbar", nullptr, flags)) {
+            const float rowHeight = ImGui::GetFrameHeight();
+            ImGui::SetCursorPosY((height - rowHeight) * 0.5f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("gig");
+            ImGui::SameLine();
+
+            const int online = overlayStats_.camerasOnline;
+            const int total = overlayStats_.camerasOnline + overlayStats_.camerasOffline;
+            const ImVec4 green(0.40f, 0.85f, 0.40f, 1.0f), amber(0.90f, 0.70f, 0.20f, 1.0f), red(0.90f, 0.35f, 0.35f, 1.0f);
+            ImGui::AlignTextToFramePadding();
+            switch (overlayStats_.link) {
+            case OverlayStats::LinkState::Disconnected: ImGui::TextColored(red, "disconnected"); break;
+            case OverlayStats::LinkState::Reconnecting: ImGui::TextColored(amber, "reconnecting"); break;
+            case OverlayStats::LinkState::Ok: {
+                const ImVec4 c = (total > 0 && online == total) ? green : (online == 0 ? red : amber);
+                ImGui::TextColored(c, "%d/%d live", online, total);
+                break;
+            }
+            }
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%d fps   %.1f Mbps   cpu %.0f%%", static_cast<int>(overlayStats_.fps + 0.5),
+                                overlayStats_.kbps / 1000.0, overlayStats_.cpuPercent);
+
+            const ImGuiStyle& style = ImGui::GetStyle();
+            const auto buttonWidth = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
+            const float buttonsWidth = buttonWidth("Settings") + buttonWidth("Reconnect") + buttonWidth("Log") + style.ItemSpacing.x * 2.0f;
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
+            if (ImGui::Button("Settings")) { pendingToolbarAction_ = ToolbarAction::Settings; }
+            ImGui::SameLine();
+            if (ImGui::Button("Reconnect")) { pendingToolbarAction_ = ToolbarAction::Reconnect; }
+            ImGui::SameLine();
+            if (ImGui::Button("Log")) { logViewVisible_ = !logViewVisible_; }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+    }
+
+    void buildStatusBanner()
+    {
+        if (focusedTile_ >= 0) {
+            return;
+        }
+        const OverlayStats& s = overlayStats_;
+        if (s.link == OverlayStats::LinkState::Ok && !s.healthDegraded) {
+            return;
+        }
+        const std::string host = s.statusHost.empty() ? std::string("Frigate") : s.statusHost;
+        ImVec4 background;
+        std::string message;
+        if (s.link == OverlayStats::LinkState::Disconnected) {
+            background = ImVec4(0.42f, 0.10f, 0.10f, 0.94f);
+            message = "Not connected to " + host + "  --  press Reconnect (F5)";
+            if (!s.statusDetail.empty()) {
+                message += "   [" + s.statusDetail + "]";
+            }
+        } else if (s.link == OverlayStats::LinkState::Reconnecting) {
+            background = ImVec4(0.42f, 0.28f, 0.05f, 0.94f);
+            message = "Lost contact with " + host + "  --  reconnecting";
+            if (s.secondsSinceData > 0) {
+                message += " (last data " + std::to_string(s.secondsSinceData) + "s ago)";
+            }
+        } else {
+            background = ImVec4(0.42f, 0.28f, 0.05f, 0.94f);
+            message = "Camera health unreadable  --  go2rtc stream schema may have changed";
+        }
+
+        const float height = kBannerLogicalHeight;
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x, viewport->WorkPos.y + kToolbarLogicalHeight));
+        ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.95f, 0.92f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0.0f, 0.0f));
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus
+            | ImGuiWindowFlags_NoInputs;
+        if (ImGui::Begin("##statusbanner", nullptr, flags)) {
+            ImGui::SetCursorPosY((height - ImGui::GetFrameHeight()) * 0.5f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(message.c_str());
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+    }
+
+    void buildLogWindow()
+    {
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        bool open = true;
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings;
+        if (ImGui::Begin("Log", &open, flags)) {
+            gig::LogBuffer::instance().snapshot(logScratch_);
+            if (ImGui::Button("Copy")) {
+                std::string joined;
+                for (const std::string& entry : logScratch_) { joined += entry; joined.push_back('\n'); }
+                ImGui::SetClipboardText(joined.c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) { gig::LogBuffer::instance().clear(); }
+            ImGui::SameLine();
+            ImGui::TextDisabled("wheel / drag to scroll, Esc or X to close");
+            ImGui::Separator();
+            ImGui::BeginChild("log_scroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(logScratch_.size()));
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    ImGui::TextUnformatted(logScratch_[static_cast<std::size_t>(i)].c_str());
+                }
+            }
+            clipper.End();
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+                ImGui::SetScrollHereY(1.0f);
+            }
+            ImGui::EndChild();
+        }
+        ImGui::End();
+        if (!open) {
+            logViewVisible_ = false;
+        }
+    }
+
+    void loadImguiFont()
+    {
+        // ImGui works in points on macOS (imgui_impl_sdl3 sets DisplayFramebufferScale),
+        // so bake at the point size; the backend scales to pixels. (Retina sharpness --
+        // baking at size*scale + FontGlobalScale=1/scale -- is a later polish item.)
+        ImGuiIO& io = ImGui::GetIO();
+        io.Fonts->Clear();
+        if (io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Menlo.ttc", 14.0f) == nullptr) {
+            io.Fonts->AddFontDefault();
+        }
+    }
+
+    void applyImguiStyle()
+    {
+        // No ScaleAllSizes here (unlike the D3D11 path): on macOS ImGui is in points and
+        // imgui_impl_sdl3's DisplayFramebufferScale already handles the pixel scaling.
+        ImGui::GetStyle() = ImGuiStyle();
+        ImGui::StyleColorsDark();
     }
 
     SDL_Window* window_ = nullptr;
@@ -422,8 +1029,33 @@ private:
     id<MTLRenderPipelineState> pipelineBgra_ = nil;
     id<MTLRenderPipelineState> pipelineNv12_ = nil;
     id<MTLRenderPipelineState> pipelineYuv420_ = nil;
+    id<MTLRenderPipelineState> pipelineSignal_ = nil;
+    id<MTLRenderPipelineState> pipelineHover_ = nil;
+
     std::vector<TileState> tiles_;
+    std::vector<std::uint64_t> tileBytes_;
+    std::vector<std::string> cameraLabels_;
+    OverlayStats overlayStats_;
+    LabelMode labelMode_ = LabelMode::ErrorOnly;
+
     int focusedTile_ = -1;
+    int animTile_ = -1;
+    float animProgress_ = 0.0f;
+    int hoveredTile_ = -1;
+
+    float scale_ = 1.0f;
+    float animTime_ = 0.0f;
+    float lastDt_ = 0.0f;
+    std::chrono::steady_clock::time_point lastRenderTp_;
+    bool haveRenderTp_ = false;
+    bool animating_ = true;
+    bool sawAnimatedContent_ = false;
+
+    bool imguiReady_ = false;
+    bool logViewVisible_ = false;
+    std::vector<std::string> logScratch_;
+    ToolbarAction pendingToolbarAction_ = ToolbarAction::None;
+    float toolbarIdle_ = 0.0f;
 };
 
 } // namespace
