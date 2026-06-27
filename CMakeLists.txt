@@ -248,6 +248,7 @@ elseif(APPLE)
     find_library(METAL_FRAMEWORK Metal REQUIRED)
     find_library(METALKIT_FRAMEWORK MetalKit REQUIRED)       # imgui_impl_metal may reference it
     find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)   # CAMetalLayer
+    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)     # CVMetalTextureCache (VideoToolbox zero-copy)
     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
     target_link_libraries(gig PRIVATE
         ${FOUNDATION_FRAMEWORK}
@@ -256,6 +257,7 @@ elseif(APPLE)
         ${METAL_FRAMEWORK}
         ${METALKIT_FRAMEWORK}
         ${QUARTZCORE_FRAMEWORK}
+        ${COREVIDEO_FRAMEWORK}
         ${APPKIT_FRAMEWORK}
     )
 

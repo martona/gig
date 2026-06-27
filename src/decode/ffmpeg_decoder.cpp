@@ -104,6 +104,15 @@ using SwsContextPtr = std::unique_ptr<SwsContext, SwsContextDeleter>;
 using BufferRefPtr = std::unique_ptr<AVBufferRef, BufferRefDeleter>;
 using AvioContextPtr = std::unique_ptr<AVIOContext, AvioContextDeleter>;
 
+// Thrown by decodeOnce when a hardware decoder never produces a frame (it can't sync
+// to the stream); run() catches it and retries the decoder in software.
+struct HardwareDecodeUnavailable {};
+
+// How many consecutive packets a hardware decoder may reject before we conclude it
+// can't decode this stream and fall back to software. Generous so a normal mid-GOP
+// join (rejects until the first IDR) always resyncs well before the limit.
+constexpr int kHwSyncPacketLimit = 240;
+
 std::once_flag ffmpegLogInitOnce;
 
 // FFmpeg polls this during blocking I/O (open/read); returning non-zero aborts
@@ -169,6 +178,11 @@ bool isSpuriousDecodeMessage(const char* fmt)
         "left block unavailable",
         "top block unavailable",
         "corrupted",
+        // Hardware-accelerator (VideoToolbox/D3D11VA) decode errors while syncing to a
+        // keyframe after a mid-GOP join -- recoverable: we tolerate them in the decode
+        // loop and resync at the next IDR (else fall back to software).
+        "output image buffer is null",
+        "hardware accelerator failed to decode",
     };
     for (const char* pattern : patterns) {
         if (std::strstr(fmt, pattern) != nullptr) {
@@ -180,6 +194,10 @@ bool isSpuriousDecodeMessage(const char* fmt)
 
 void ffmpegLogCallback(void* avcl, int level, const char* fmt, va_list args)
 {
+    // FFmpeg severities are inverted (ERROR=16 < WARNING=24 < INFO=32), so ">=
+    // AV_LOG_ERROR" matches ERROR *and everything less severe* -- i.e. the spurious
+    // ERROR ("hardware accelerator failed to decode") and WARNING ("output image
+    // buffer is null") hwaccel-resync lines both fall in here.
     if (level >= AV_LOG_ERROR && isSpuriousDecodeMessage(fmt)) {
         return;
     }
@@ -224,7 +242,9 @@ void throwIfFailed(int code, const char* action)
     }
 }
 
-#ifdef _WIN32
+// get_format callback (both platforms): pick the hardware pixel format the decoder
+// was opened for -- D3D11 on Windows, VideoToolbox on macOS -- else fall back to the
+// first offered (software). hardwareState lives in AVCodecContext::opaque.
 AVPixelFormat chooseHardwarePixelFormat(AVCodecContext* context, const AVPixelFormat* formats)
 {
     const auto* hardwareState = static_cast<const HardwareDecodeState*>(context->opaque);
@@ -241,6 +261,25 @@ AVPixelFormat chooseHardwarePixelFormat(AVCodecContext* context, const AVPixelFo
     return formats[0];
 }
 
+#ifdef __APPLE__
+bool codecSupportsVideoToolbox(const AVCodec* decoder)
+{
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
+        if (!config) {
+            return false;
+        }
+
+        if (config->device_type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX
+            && config->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX
+            && (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+            return true;
+        }
+    }
+}
+#endif // __APPLE__ -- VideoToolbox capability probe
+
+#ifdef _WIN32
 void d3d11LockCallback(void* lockContext)
 {
     static_cast<std::recursive_mutex*>(lockContext)->lock();
@@ -385,15 +424,15 @@ bool emitD3D11Frame(
     }
 
     VideoFrame output;
-    output.format = VideoFrameFormat::D3D11_NV12;
+    output.format = VideoFrameFormat::GPU_NV12;
     output.width = cloned->width;
     output.height = cloned->height;
     output.fullRange = isFullRangeYuv(cloned);
     output.index = frameIndex;
-    output.d3d11Texture = reinterpret_cast<ID3D11Texture2D*>(cloned->data[0]);
-    output.d3d11ArraySlice = static_cast<int>(reinterpret_cast<std::intptr_t>(cloned->data[1]));
+    output.gpuTexture = cloned->data[0]; // ID3D11Texture2D* (NV12, in the decoder array)
+    output.gpuArraySlice = static_cast<int>(reinterpret_cast<std::intptr_t>(cloned->data[1]));
     if (d3d11Context) {
-        output.d3d11Lock = d3d11Context->lock;
+        output.gpuLock = d3d11Context->lock;
     }
     output.owner = makeFrameOwner(cloned);
 
@@ -401,6 +440,35 @@ bool emitD3D11Frame(
     return true;
 }
 #endif // _WIN32 -- D3D11 zero-copy frame emit
+
+#ifdef __APPLE__
+// VideoToolbox zero-copy: the decoded frame carries a CVPixelBufferRef (IOSurface-
+// backed NV12) in data[3]. Clone to keep it alive and hand the renderer the opaque
+// pixel-buffer pointer; the Metal renderer wraps its planes via CVMetalTextureCache.
+bool emitVideoToolboxFrame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegDecoder::FrameCallback& callback)
+{
+    if (!frame->data[3]) {
+        return false;
+    }
+
+    AVFrame* cloned = av_frame_clone(frame);
+    if (!cloned) {
+        throw std::runtime_error("Could not clone VideoToolbox hardware frame.");
+    }
+
+    VideoFrame output;
+    output.format = VideoFrameFormat::GPU_NV12;
+    output.width = cloned->width;
+    output.height = cloned->height;
+    output.fullRange = isFullRangeYuv(cloned);
+    output.index = frameIndex;
+    output.gpuTexture = cloned->data[3]; // CVPixelBufferRef
+    output.owner = makeFrameOwner(cloned);
+
+    callback(std::move(output));
+    return true;
+}
+#endif // __APPLE__ -- VideoToolbox zero-copy frame emit
 
 bool emitYuv420Frame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegDecoder::FrameCallback& callback)
 {
@@ -586,6 +654,47 @@ CodecContextPtr openCodecContext(
             hardwareState.deviceType = AV_HWDEVICE_TYPE_NONE;
         }
     }
+#elif defined(__APPLE__)
+    (void)d3d11Context;
+    if (!softwareOnly && codecSupportsVideoToolbox(decoder)) {
+        try {
+            CodecContextPtr candidate(avcodec_alloc_context3(decoder));
+            if (!candidate) {
+                throw std::runtime_error("Could not allocate AVCodecContext.");
+            }
+
+            throwIfFailed(avcodec_parameters_to_context(candidate.get(), videoStream->codecpar), "avcodec_parameters_to_context");
+            candidate->flags |= AV_CODEC_FLAG_LOW_DELAY;
+            candidate->thread_count = 1;
+            candidate->thread_type = 0;
+            candidate->opaque = &hardwareState;
+            candidate->get_format = chooseHardwarePixelFormat;
+
+            // VideoToolbox needs no shared device (CVPixelBuffers are IOSurface-backed
+            // and device-agnostic), so the decoder self-creates the hw device.
+            AVBufferRef* rawDevice = nullptr;
+            throwIfFailed(
+                av_hwdevice_ctx_create(&rawDevice, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nullptr, nullptr, 0),
+                "av_hwdevice_ctx_create(VideoToolbox)");
+            BufferRefPtr device(rawDevice);
+            candidate->hw_device_ctx = av_buffer_ref(device.get());
+            if (!candidate->hw_device_ctx) {
+                throw std::runtime_error("Could not reference VideoToolbox device context.");
+            }
+
+            hardwareState.pixelFormat = AV_PIX_FMT_VIDEOTOOLBOX;
+            hardwareState.deviceType = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+            throwIfFailed(avcodec_open2(candidate.get(), decoder, nullptr), "avcodec_open2(VideoToolbox)");
+
+            gig::logInfo() << "Hardware decode: videotoolbox";
+            hardwareDevice = std::move(device);
+            return candidate;
+        } catch (const std::exception& error) {
+            gig::logWarning() << "VideoToolbox decode unavailable; falling back: " << error.what();
+            hardwareState.pixelFormat = AV_PIX_FMT_NONE;
+            hardwareState.deviceType = AV_HWDEVICE_TYPE_NONE;
+        }
+    }
 #else
     (void)d3d11Context;
     (void)hardwareDevice;
@@ -696,6 +805,9 @@ void FfmpegDecoder::run()
     while (!stopRequested_) {
         try {
             decodeOnce();
+        } catch (const HardwareDecodeUnavailable&) {
+            gig::logWarning() << "hardware decode produced no frames; falling back to software for this camera";
+            forceSoftware_ = true;
         } catch (const std::exception& error) {
             gig::logError() << "Decoder error: " << error.what();
         }
@@ -792,7 +904,8 @@ void FfmpegDecoder::decodeOnce()
 
     HardwareDecodeState hardwareState;
     BufferRefPtr hardwareDevice(nullptr);
-    CodecContextPtr codecContext = openCodecContext(decoder, videoStream, hardwareState, hardwareDevice, d3d11Context_, softwareOnly_);
+    CodecContextPtr codecContext = openCodecContext(
+        decoder, videoStream, hardwareState, hardwareDevice, d3d11Context_, softwareOnly_ || forceSoftware_);
 
     gig::logInfo() << "Video: " << avcodec_get_name(videoStream->codecpar->codec_id)
                    << " " << codecContext->width << "x" << codecContext->height;
@@ -804,6 +917,13 @@ void FfmpegDecoder::decodeOnce()
     }
 
     SwsContextPtr swsContext(nullptr);
+
+    // Hardware decoders can reject packets until they sync to a keyframe; track that
+    // so we tolerate the errors (resync at the next IDR) yet still fall back to
+    // software if a frame never arrives.
+    const bool hardware = hardwareState.pixelFormat != AV_PIX_FMT_NONE;
+    bool producedFrame = false;
+    int framelessHwErrors = 0;
 
     while (!stopRequested_) {
         const int readResult = av_read_frame(formatContext.get(), packet.get());
@@ -831,7 +951,19 @@ void FfmpegDecoder::decodeOnce()
             // alive rather than tearing the whole decoder down and reconnecting.
             continue;
         }
-        throwIfFailed(sendResult, "avcodec_send_packet");
+        if (sendResult < 0) {
+            // A hardware decoder (notably VideoToolbox) reports a hard error -- not
+            // the software path's recoverable INVALIDDATA -- while it has yet to sync
+            // to a keyframe after joining mid-GOP. Tolerate it so the hwaccel resyncs
+            // at the next IDR; if it never produces a frame, fall back to software.
+            if (hardware) {
+                if (!producedFrame && ++framelessHwErrors > kHwSyncPacketLimit) {
+                    throw HardwareDecodeUnavailable {};
+                }
+                continue;
+            }
+            throwIfFailed(sendResult, "avcodec_send_packet");
+        }
 
         while (!stopRequested_) {
             const int receiveResult = avcodec_receive_frame(codecContext.get(), decodedFrame.get());
@@ -843,12 +975,28 @@ void FfmpegDecoder::decodeOnce()
                 // treating it as a fatal stream error.
                 break;
             }
-            throwIfFailed(receiveResult, "avcodec_receive_frame");
+            if (receiveResult < 0) {
+                if (hardware) {
+                    break; // tolerate; resync at the next IDR (see avcodec_send_packet)
+                }
+                throwIfFailed(receiveResult, "avcodec_receive_frame");
+            }
+
+            // A frame decoded successfully -- the hardware path (if any) is working.
+            producedFrame = true;
+            framelessHwErrors = 0;
 
             const std::uint64_t frameIndex = ++frameIndex_;
 #ifdef _WIN32
             if (decodedFrame->format == AV_PIX_FMT_D3D11
                 && emitD3D11Frame(decodedFrame.get(), frameIndex, d3d11Context_, frameCallback_)) {
+                av_frame_unref(decodedFrame.get());
+                continue;
+            }
+#endif
+#ifdef __APPLE__
+            if (decodedFrame->format == AV_PIX_FMT_VIDEOTOOLBOX
+                && emitVideoToolboxFrame(decodedFrame.get(), frameIndex, frameCallback_)) {
                 av_frame_unref(decodedFrame.get());
                 continue;
             }

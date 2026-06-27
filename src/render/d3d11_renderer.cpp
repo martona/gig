@@ -987,12 +987,13 @@ private:
 
     bool useD3D11FrameTexture(TileState& tile, const VideoFrame& frame)
     {
-        if (!frame.d3d11Texture) {
+        auto* gpuTexture = reinterpret_cast<ID3D11Texture2D*>(frame.gpuTexture);
+        if (!gpuTexture) {
             return false;
         }
 
         D3D11_TEXTURE2D_DESC textureDesc = {};
-        frame.d3d11Texture->GetDesc(&textureDesc);
+        gpuTexture->GetDesc(&textureDesc);
         if (textureDesc.Format != DXGI_FORMAT_NV12) {
             std::cerr << "D3D11 decoded frame is not NV12.\n";
             return false;
@@ -1003,8 +1004,8 @@ private:
             return false;
         }
 
-        if (tile.d3d11SourceTexture == frame.d3d11Texture
-            && tile.d3d11SourceSlice == frame.d3d11ArraySlice
+        if (tile.d3d11SourceTexture == gpuTexture
+            && tile.d3d11SourceSlice == frame.gpuArraySlice
             && tile.planeViews[0]
             && tile.planeViews[1]) {
             tile.activeFrameOwner = frame.owner;
@@ -1014,23 +1015,23 @@ private:
 
         resetFrameTextures(tile);
         if (!createD3D11FramePlaneView(
-                frame.d3d11Texture,
+                gpuTexture,
                 textureDesc,
-                frame.d3d11ArraySlice,
+                frame.gpuArraySlice,
                 DXGI_FORMAT_R8_UNORM,
                 tile.planeViews[0])
             || !createD3D11FramePlaneView(
-                frame.d3d11Texture,
+                gpuTexture,
                 textureDesc,
-                frame.d3d11ArraySlice,
+                frame.gpuArraySlice,
                 DXGI_FORMAT_R8G8_UNORM,
                 tile.planeViews[1])) {
             resetFrameTextures(tile);
             return false;
         }
 
-        tile.d3d11SourceTexture = frame.d3d11Texture;
-        tile.d3d11SourceSlice = frame.d3d11ArraySlice;
+        tile.d3d11SourceTexture = gpuTexture;
+        tile.d3d11SourceSlice = frame.gpuArraySlice;
         tile.activeFrameOwner = frame.owner;
         tile.textureWidth = frame.width;
         tile.textureHeight = frame.height;
@@ -1129,7 +1130,7 @@ private:
         }
 
         bool uploaded = false;
-        if (frame.format == VideoFrameFormat::D3D11_NV12) {
+        if (frame.format == VideoFrameFormat::GPU_NV12) {
             uploaded = useD3D11FrameTexture(tile, frame);
         } else if (frame.format == VideoFrameFormat::BGRA) {
             uploaded = uploadPlane(
@@ -1209,7 +1210,7 @@ private:
         };
         ID3D11SamplerState* samplers[] = { sampler_.Get() };
         UINT shaderResourceCount = 1;
-        if (tile.textureFormat == VideoFrameFormat::NV12 || tile.textureFormat == VideoFrameFormat::D3D11_NV12) {
+        if (tile.textureFormat == VideoFrameFormat::NV12 || tile.textureFormat == VideoFrameFormat::GPU_NV12) {
             updateColorMatrix(tile.textureFullRange);
             context_->PSSetShader(nv12PixelShader_.Get(), nullptr, 0);
             ID3D11Buffer* constantBuffers[] = { colorMatrixBuffer_.Get() };
@@ -1369,7 +1370,7 @@ private:
             TileState& tile = tiles_[i];
             const VideoFrame* frame = frames[i].get();
             const bool hasFrame = frame
-                && (frame->format == VideoFrameFormat::D3D11_NV12 || frame->planeData[0] != nullptr);
+                && (frame->format == VideoFrameFormat::GPU_NV12 || frame->planeData[0] != nullptr);
             if (hasFrame) {
                 uploadFrame(tile, *frame);
             } else if (tile.planeViews[0]) {
@@ -1421,7 +1422,7 @@ private:
         TileState& tile = tiles_[index];
         const VideoFrame* frame = frames[index].get();
         const bool hasFrame = frame
-            && (frame->format == VideoFrameFormat::D3D11_NV12 || frame->planeData[0] != nullptr);
+            && (frame->format == VideoFrameFormat::GPU_NV12 || frame->planeData[0] != nullptr);
         if (hasFrame) {
             uploadFrame(tile, *frame);
         } else if (tile.planeViews[0]) {

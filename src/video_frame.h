@@ -6,13 +6,13 @@
 #include <mutex>
 #include <vector>
 
-struct ID3D11Texture2D;
-
 enum class VideoFrameFormat {
     BGRA,
     NV12,
     YUV420P,
-    D3D11_NV12,
+    // Zero-copy GPU frame; gpuTexture is platform-specific (a D3D11 NV12 texture on
+    // Windows, a CVPixelBufferRef on macOS). Both renderers sample it as Y + CbCr.
+    GPU_NV12,
 };
 
 struct VideoFrame {
@@ -33,9 +33,14 @@ struct VideoFrame {
     std::array<const std::uint8_t*, 3> planeData = {};
     std::array<std::vector<std::uint8_t>, 3> planes;
 
-    ID3D11Texture2D* d3d11Texture = nullptr;
-    int d3d11ArraySlice = 0;
-    std::shared_ptr<std::recursive_mutex> d3d11Lock;
+    // Zero-copy GPU frame handle (format == GPU_NV12), interpreted by the platform
+    // renderer and kept alive by owner. Windows: gpuTexture is an ID3D11Texture2D*
+    // (NV12) at gpuArraySlice in the decoder's texture array, guarded by gpuLock (the
+    // shared D3D11 device lock). macOS: gpuTexture is a CVPixelBufferRef (IOSurface-
+    // backed NV12); gpuArraySlice is 0 and gpuLock is null. nullptr for CPU frames.
+    void* gpuTexture = nullptr;
+    int gpuArraySlice = 0;
+    std::shared_ptr<std::recursive_mutex> gpuLock;
     std::shared_ptr<void> owner;
 
     // Move-only: a borrowed frame's planeData[] points into owner (or into its own

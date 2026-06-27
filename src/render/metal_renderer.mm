@@ -18,6 +18,7 @@
 #include <SDL3/SDL_metal.h>
 
 #import <AppKit/AppKit.h>
+#import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -186,6 +187,14 @@ struct TileState {
     bool fullRange = false;
     std::uint64_t uploadedFrameIndex = 0;
 
+    // VideoToolbox zero-copy: CVMetalTextures wrapping the current CVPixelBuffer's
+    // Y + CbCr planes (plane[0]/plane[1] reference their MTLTextures), plus the frame
+    // owner keeping the pixel buffer (IOSurface) alive. Released when the next frame
+    // replaces them (the GPU has finished the prior draw by then).
+    CVMetalTextureRef cvY = nullptr;
+    CVMetalTextureRef cvCbCr = nullptr;
+    std::shared_ptr<void> gpuFrameOwner;
+
     float signalEnergy = 0.0f;
     std::uint64_t signalLastBytes = 0;
     bool showedSignal = false;
@@ -252,6 +261,15 @@ public:
         iconReconnect_ = makeSymbolTexture(@"arrow.clockwise");
         iconLog_ = makeSymbolTexture(@"list.bullet");
 
+        // VideoToolbox zero-copy: a texture cache that wraps decoded CVPixelBuffers'
+        // IOSurfaces as MTLTextures with no copy. Non-fatal on failure (hw frames just
+        // won't display; software decode is unaffected).
+        if (CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device_, nullptr, &cvTextureCache_)
+            != kCVReturnSuccess) {
+            cvTextureCache_ = nullptr;
+            gig::logWarning() << "CVMetalTextureCacheCreate failed; VideoToolbox frames will not display.";
+        }
+
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
@@ -279,6 +297,13 @@ public:
             SDL_Metal_DestroyView(metalView_);
             metalView_ = nullptr;
         }
+        for (TileState& tile : tiles_) {
+            releaseCvTextures(tile);
+        }
+        if (cvTextureCache_) {
+            CFRelease(cvTextureCache_);
+            cvTextureCache_ = nullptr;
+        }
     }
 
     void resize() override {}
@@ -300,6 +325,11 @@ public:
             layer_.drawableSize = CGSizeMake(pixelWidth, pixelHeight);
 
             if (tiles_.size() != frames.size()) {
+                // Release any VideoToolbox wrappers before tiles are dropped/realloc'd
+                // (a raw CVMetalTextureRef would otherwise leak); survivors re-upload.
+                for (TileState& tile : tiles_) {
+                    releaseCvTextures(tile);
+                }
                 tiles_.resize(frames.size());
             }
 
@@ -571,6 +601,73 @@ private:
                    bytesPerRow:static_cast<NSUInteger>(stride)];
     }
 
+    // Release the CVMetalTextures (and the pixel-buffer owner) a VideoToolbox tile was
+    // holding. Safe on a non-VT tile (the refs are null).
+    static void releaseCvTextures(TileState& tile)
+    {
+        if (tile.cvY || tile.cvCbCr) {
+            // plane[0]/plane[1] reference these CV textures; drop them together so a
+            // stale MTLTexture can't outlive its CVMetalTexture wrapper.
+            tile.plane[0] = nil;
+            tile.plane[1] = nil;
+        }
+        if (tile.cvY) {
+            CFRelease(tile.cvY);
+            tile.cvY = nullptr;
+        }
+        if (tile.cvCbCr) {
+            CFRelease(tile.cvCbCr);
+            tile.cvCbCr = nullptr;
+        }
+        tile.gpuFrameOwner.reset();
+    }
+
+    // Wrap a decoded CVPixelBuffer's Y (R8) + CbCr (RG8) planes as MTLTextures with no
+    // copy via the texture cache; plane[0]/plane[1] then feed the existing NV12 draw
+    // path. The previous frame's wrappers are released first, and the frame owner pins
+    // the pixel buffer (IOSurface) until the next upload replaces it.
+    void uploadVideoToolboxFrame(TileState& tile, const VideoFrame& frame)
+    {
+        releaseCvTextures(tile);
+        tile.plane[0] = nil;
+        tile.plane[1] = nil;
+        tile.plane[2] = nil;
+
+        CVPixelBufferRef pixelBuffer = static_cast<CVPixelBufferRef>(frame.gpuTexture);
+        if (!pixelBuffer || !cvTextureCache_) {
+            return;
+        }
+
+        const int w = frame.width;
+        const int h = frame.height;
+        const int cw = (w + 1) / 2;
+        const int ch = (h + 1) / 2;
+        CVMetalTextureRef yRef = nullptr;
+        CVMetalTextureRef cbcrRef = nullptr;
+        const CVReturn yResult = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault, cvTextureCache_, pixelBuffer, nullptr,
+            MTLPixelFormatR8Unorm, w, h, 0, &yRef);
+        const CVReturn cbcrResult = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault, cvTextureCache_, pixelBuffer, nullptr,
+            MTLPixelFormatRG8Unorm, cw, ch, 1, &cbcrRef);
+        if (yResult != kCVReturnSuccess || cbcrResult != kCVReturnSuccess || !yRef || !cbcrRef) {
+            if (yRef) {
+                CFRelease(yRef);
+            }
+            if (cbcrRef) {
+                CFRelease(cbcrRef);
+            }
+            gig::logWarning() << "videotoolbox: CVMetalTextureCache create failed";
+            return;
+        }
+
+        tile.cvY = yRef;
+        tile.cvCbCr = cbcrRef;
+        tile.gpuFrameOwner = frame.owner; // keep the CVPixelBuffer (IOSurface) alive
+        tile.plane[0] = CVMetalTextureGetTexture(yRef);
+        tile.plane[1] = CVMetalTextureGetTexture(cbcrRef);
+    }
+
     void uploadFrame(TileState& tile, const VideoFrame& frame)
     {
         if (tile.uploadedFrameIndex == frame.index && tile.plane[0]
@@ -578,6 +675,7 @@ private:
             return;
         }
         if (tile.format != frame.format || tile.texW != frame.width || tile.texH != frame.height) {
+            releaseCvTextures(tile); // drop any VideoToolbox wrappers from a prior format
             for (int i = 0; i < 3; ++i) {
                 tile.plane[i] = nil;
                 tile.planeW[i] = 0;
@@ -610,8 +708,9 @@ private:
             uploadPlane(tile.plane[1], cw, ch, frame.planeData[1], frame.strides[1]);
             uploadPlane(tile.plane[2], cw, ch, frame.planeData[2], frame.strides[2]);
             break;
-        case VideoFrameFormat::D3D11_NV12:
-            return;
+        case VideoFrameFormat::GPU_NV12:
+            uploadVideoToolboxFrame(tile, frame);
+            break;
         }
         tile.fullRange = frame.fullRange;
         tile.uploadedFrameIndex = frame.index;
@@ -668,6 +767,7 @@ private:
             [encoder setFragmentTexture:tile.plane[0] atIndex:0];
             break;
         case VideoFrameFormat::NV12:
+        case VideoFrameFormat::GPU_NV12: // VideoToolbox: same Y + CbCr sampling as NV12
             [encoder setRenderPipelineState:pipelineNv12_];
             [encoder setFragmentTexture:tile.plane[0] atIndex:0];
             [encoder setFragmentTexture:tile.plane[1] atIndex:1];
@@ -680,8 +780,6 @@ private:
             [encoder setFragmentTexture:tile.plane[2] atIndex:2];
             [encoder setFragmentBytes:&matrix length:sizeof(matrix) atIndex:0];
             break;
-        case VideoFrameFormat::D3D11_NV12:
-            return;
         }
         [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     }
@@ -740,11 +838,12 @@ private:
         for (std::size_t i = 0; i < frames.size(); ++i) {
             TileState& tile = tiles_[i];
             const VideoFrame* frame = frames[i].get();
-            const bool hasFrame = frame && frame->planeData[0] != nullptr;
+            const bool hasFrame = frame && (frame->planeData[0] != nullptr || frame->format == VideoFrameFormat::GPU_NV12);
             if (hasFrame) {
                 uploadFrame(tile, *frame);
             } else if (tile.plane[0]) {
                 for (int p = 0; p < 3; ++p) { tile.plane[p] = nil; }
+                releaseCvTextures(tile);
             }
             if (i >= layout.tiles.size()) {
                 continue;
@@ -783,11 +882,12 @@ private:
     {
         TileState& tile = tiles_[index];
         const VideoFrame* frame = frames[index].get();
-        const bool hasFrame = frame && frame->planeData[0] != nullptr;
+        const bool hasFrame = frame && (frame->planeData[0] != nullptr || frame->format == VideoFrameFormat::GPU_NV12);
         if (hasFrame) {
             uploadFrame(tile, *frame);
         } else if (tile.plane[0]) {
             for (int p = 0; p < 3; ++p) { tile.plane[p] = nil; }
+            releaseCvTextures(tile);
         }
         if (!tile.plane[0]) {
             drawSignal(encoder, full, index, tile.signalEnergy, 1.0f);
@@ -1145,6 +1245,7 @@ private:
     CAMetalLayer* layer_ = nil;
     id<MTLDevice> device_ = nil;
     id<MTLCommandQueue> queue_ = nil;
+    CVMetalTextureCacheRef cvTextureCache_ = nullptr;
     id<MTLRenderPipelineState> pipelineBgra_ = nil;
     id<MTLRenderPipelineState> pipelineNv12_ = nil;
     id<MTLRenderPipelineState> pipelineYuv420_ = nil;

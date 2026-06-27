@@ -55,6 +55,10 @@ private:
     std::atomic_bool stopRequested_ = false;
     std::thread worker_;
     std::uint64_t frameIndex_ = 0;
+    // Set when a hardware decoder repeatedly fails to produce a frame (e.g. a
+    // VideoToolbox stream it can't sync to); makes the next decodeOnce open a
+    // software codec instead. Worker-thread only.
+    bool forceSoftware_ = false;
 
     // The connection FFmpeg is currently reading from, so stop() can cancel an
     // in-flight read promptly. Guarded by streamMutex_.
