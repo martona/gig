@@ -159,11 +159,19 @@ if(MSVC)
     # Ship symbols: emit a PDB for optimized builds too (separate file). /DEBUG
     # disables the size optimizations, so re-enable /OPT:REF + /OPT:ICF to keep the
     # exe lean. Release CI zips the PDB into a -symbols.zip for crash symbolication.
-    target_compile_options(gig PRIVATE $<$<NOT:$<CONFIG:Debug>>:/Zi>)
+    #
+    # /GL + /LTCG: whole-program optimization. The decode/render/TLS TUs are
+    # separate, so this buys cross-TU inlining (a bit of runtime + some size) for
+    # longer link time only -- non-Debug, alongside the symbol/opt flags above.
+    # (/OPT:REF,ICF already make non-Debug links non-incremental, which /LTCG needs.)
+    target_compile_options(gig PRIVATE
+        $<$<NOT:$<CONFIG:Debug>>:/Zi>
+        $<$<NOT:$<CONFIG:Debug>>:/GL>)
     target_link_options(gig PRIVATE
         $<$<NOT:$<CONFIG:Debug>>:/DEBUG>
         $<$<NOT:$<CONFIG:Debug>>:/OPT:REF>
-        $<$<NOT:$<CONFIG:Debug>>:/OPT:ICF>)
+        $<$<NOT:$<CONFIG:Debug>>:/OPT:ICF>
+        $<$<NOT:$<CONFIG:Debug>>:/LTCG>)
 else()
     target_compile_options(gig PRIVATE -Wall -Wextra -Wpedantic)
 endif()

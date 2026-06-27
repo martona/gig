@@ -51,6 +51,15 @@ public:
     // blank (camera not yet live); slot order is the stable camera order.
     virtual void render(const std::vector<std::shared_ptr<VideoFrame>>& frames) = 0;
 
+    // Whether the last render had time-driven animation in flight: the zoom
+    // transition, the procedural "signal" scope on a frameless tile (or its
+    // resolve fade), or the focus-view toolbar still counting down to auto-hide.
+    // The run loop renders on demand -- it keeps drawing while this is true so
+    // those animations stay smooth, and otherwise draws only when a new decoded
+    // frame arrives or input/stats change. Default true = always render (safe for
+    // a renderer that doesn't track this yet).
+    virtual bool isAnimating() const { return true; }
+
     // Focus a single tile so it fills the window; -1 returns to the grid.
     virtual void setFocusedTile(int index) = 0;
     virtual int focusedTile() const = 0;

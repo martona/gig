@@ -448,6 +448,10 @@ public:
         {
             auto d3dLock = lockD3D11();
 
+            // Set true by the tile loops when a frameless tile's signal scope or a
+            // resolve fade draws this frame; folded into animating_ at the end.
+            sawAnimatedContent_ = false;
+
             if (dpiDirty_) {
                 dpiDirty_ = false;
                 applyDpiScale();
@@ -565,6 +569,15 @@ public:
 
             renderImGui();
 
+            // Record whether anything is still animating, so the run loop knows to
+            // keep rendering on demand: a zoom transition in flight, a frameless
+            // tile's signal scope / resolve fade (sawAnimatedContent_), or the
+            // focus-view toolbar still counting down to its auto-hide.
+            const float zoomTargetNow = (focusedTile_ >= 0) ? 1.0f : 0.0f;
+            const bool zoomAnimating = animProgress_ != zoomTargetNow;
+            const bool toolbarAnimating = focusedTile_ >= 0 && toolbarIdle_ < kToolbarHideDelay;
+            animating_ = sawAnimatedContent_ || zoomAnimating || toolbarAnimating;
+
             // Non-waiting Present: submits and returns immediately so the shared
             // D3D11 lock is never held across a vsync wait (which would starve
             // the decoder threads). The render loop paces itself instead.
@@ -663,6 +676,8 @@ public:
         // The toolbar reserves space only in the grid view; focus view is full-bleed.
         return focusedTile_ < 0 ? kToolbarLogicalHeight : 0.0f;
     }
+
+    bool isAnimating() const override { return animating_; }
 
 private:
     // Per-camera GPU state. One frame's worth of textures/views plus the cached
@@ -1355,6 +1370,7 @@ private:
                 // No displayable frame yet (waiting for a keyframe / reconnecting /
                 // offline): the data-driven signal animation IS the tile.
                 drawSignal(cell, i, tile.signalEnergy, 1.0f);
+                sawAnimatedContent_ = true; // scope animates -> keep rendering
                 tile.showedSignal = true;
                 tile.frameFade = -1.0f;
                 continue;
@@ -1371,6 +1387,7 @@ private:
             context_->RSSetViewports(1, &videoViewport);
             drawTile(tile);
             if (tile.frameFade >= 0.0f) {
+                sawAnimatedContent_ = true; // resolve crossfade in progress
                 const float a = 1.0f - tile.frameFade / kFadeDur;
                 if (a > 0.0f) {
                     drawSignal(cell, i, tile.signalEnergy, a);
@@ -1406,6 +1423,7 @@ private:
         if (!tile.planeViews[0]) {
             // No frame yet: fill the focused view with the signal animation too.
             drawSignal(full, index, tile.signalEnergy, 1.0f);
+            sawAnimatedContent_ = true; // scope animates -> keep rendering
             tile.showedSignal = true;
             tile.frameFade = -1.0f;
             return;
@@ -1419,6 +1437,7 @@ private:
         context_->RSSetViewports(1, &videoViewport);
         drawTile(tile);
         if (tile.frameFade >= 0.0f) {
+            sawAnimatedContent_ = true; // resolve crossfade in progress
             constexpr float kFadeDur = 0.22f;
             const float a = 1.0f - tile.frameFade / kFadeDur;
             if (a > 0.0f) {
@@ -1592,8 +1611,6 @@ private:
 
     void buildToolbar()
     {
-        constexpr float kToolbarHideDelay = 2.5f; // idle seconds before hiding in focus view
-
         const ImGuiIO& io = ImGui::GetIO();
         const bool active = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f
             || ImGui::IsMouseDown(ImGuiMouseButton_Left);
@@ -1843,8 +1860,18 @@ private:
     ToolbarAction pendingToolbarAction_ = ToolbarAction::None;
     float toolbarIdle_ = 0.0f;
 
+    // On-demand rendering: animating_ reports (to the run loop, via isAnimating())
+    // whether the last render left an animation in flight; sawAnimatedContent_ is
+    // the per-render scratch the tile loops set when a scope/fade drew. Start true
+    // so the very first loop iteration paints.
+    bool animating_ = true;
+    bool sawAnimatedContent_ = false;
+
     // Toolbar height in logical (DPI-independent) points; reserved above the grid.
     static constexpr float kToolbarLogicalHeight = 32.0f;
+    // Focus-view idle seconds before the (overlay) toolbar auto-hides. Read by
+    // render() too, so the run loop keeps drawing until the hide actually lands.
+    static constexpr float kToolbarHideDelay = 2.5f;
     // Status-banner height (logical points). Overlays the grid top transiently --
     // it does not reserve layout space, so the grid never reflows as it appears.
     static constexpr float kBannerLogicalHeight = 22.0f;

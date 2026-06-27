@@ -470,6 +470,17 @@ int main(int argc, char** argv)
         std::string lastConnectError = applied.ok ? std::string() : applied.error;
         constexpr auto frameInterval = std::chrono::milliseconds(16);
 
+        // On-demand rendering: only draw when something visibly changed -- a new
+        // decoded frame, an animation in flight (renderer->isAnimating()), recent
+        // input (so ImGui hover/tooltips settle), or a stats refresh -- and never
+        // while minimized. Steady live video advances totalDecodedFrames() every
+        // tick, so a full grid still renders ~as before; the savings are in focus
+        // view, idle/offline tiles, and a minimized/occluded window (where the
+        // decoders keep running for instant restore but nothing is presented).
+        constexpr auto inputRenderTail = std::chrono::milliseconds(1000);
+        std::uint64_t lastRenderedFrames = 0;
+        auto lastInteraction = std::chrono::steady_clock::now();
+
         // Reconnect with the given config (F5 / settings-apply): rebuild the
         // session, rebind the renderer's camera set, reset the running frame
         // deltas (the new supervisor counts from 0), report a failure.
@@ -534,8 +545,10 @@ int main(int argc, char** argv)
         while (running) {
             const auto frameStart = std::chrono::steady_clock::now();
 
+            bool sawEvent = false;
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
+                sawEvent = true;
                 const bool imguiUsed = renderer->handleEvent(event);
 
                 if (event.type == SDL_EVENT_QUIT) {
@@ -617,6 +630,11 @@ int main(int argc, char** argv)
                     }
                 }
             }
+            if (sawEvent) {
+                // Recent input: keep rendering briefly so ImGui hover/tooltip state
+                // and the focus-view toolbar settle even without further events.
+                lastInteraction = frameStart;
+            }
 
 #ifdef _WIN32
             // A cert that went untrusted mid-session (e.g. it changed under us) is
@@ -633,27 +651,12 @@ int main(int argc, char** argv)
             }
 #endif
 
-            const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
-            renderer->setTileActivity(session.tileByteCounts()); // drives the per-tile signal animation
-            renderer->render(frames);
-
-            // Toolbar buttons route through the same paths as F2 / F5.
-            switch (renderer->takeToolbarAction()) {
-            case VideoRenderer::ToolbarAction::Reconnect:
-                gig::logInfo() << "reconnect requested (toolbar)";
-                applyAndReport(cfg.session);
-                break;
-#ifdef _WIN32
-            case VideoRenderer::ToolbarAction::Settings:
-                gig::logInfo() << "settings dialog (toolbar)";
-                openSettings();
-                break;
-#endif
-            default:
-                break;
-            }
-
+            // Refresh the toolbar/banner stats first (1s cadence), before the draw
+            // decision, so a stats change can itself mark this tick dirty -- that
+            // keeps the live fps/cpu numbers moving even when no new frame arrives
+            // (e.g. a single focused low-fps camera).
             const auto now = std::chrono::steady_clock::now();
+            bool statsRefreshed = false;
             if (now - lastTitleUpdate > std::chrono::seconds(1)) {
                 const double elapsed = std::chrono::duration<double>(now - lastTitleUpdate).count();
                 lastTitleUpdate = now;
@@ -688,6 +691,7 @@ int main(int argc, char** argv)
 
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;
+                statsRefreshed = true;
                 // The OS title stays "gig"; live status shows in the toolbar.
             }
 
@@ -702,6 +706,42 @@ int main(int argc, char** argv)
                                << static_cast<int>(lastCpuPercent + 0.5) << "%";
                 lastStatsLog = now;
                 lastStatsFrames = total;
+            }
+
+            // Draw on demand. While minimized there's nothing to present, so skip
+            // the render (and the shared D3D11 lock it holds) entirely -- decoders
+            // keep running so restore is instant. Otherwise draw when a new frame
+            // arrived, an animation is in flight, input was recent, the stats just
+            // refreshed, or the log view is open.
+            const bool minimized = (SDL_GetWindowFlags(window.get()) & SDL_WINDOW_MINIMIZED) != 0;
+            const std::uint64_t decodedNow = session.totalDecodedFrames();
+            const bool newFrame = decodedNow != lastRenderedFrames;
+            const bool recentInput = (frameStart - lastInteraction) < inputRenderTail;
+            const bool dirty = !minimized
+                && (newFrame || statsRefreshed || recentInput
+                    || renderer->isAnimating() || renderer->logViewVisible());
+
+            if (dirty) {
+                const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
+                renderer->setTileActivity(session.tileByteCounts()); // drives the per-tile signal animation
+                renderer->render(frames);
+                lastRenderedFrames = decodedNow;
+
+                // Toolbar buttons route through the same paths as F2 / F5.
+                switch (renderer->takeToolbarAction()) {
+                case VideoRenderer::ToolbarAction::Reconnect:
+                    gig::logInfo() << "reconnect requested (toolbar)";
+                    applyAndReport(cfg.session);
+                    break;
+#ifdef _WIN32
+                case VideoRenderer::ToolbarAction::Settings:
+                    gig::logInfo() << "settings dialog (toolbar)";
+                    openSettings();
+                    break;
+#endif
+                default:
+                    break;
+                }
             }
 
             // Pace to ~60 fps outside any lock; the renderer uses a non-waiting
