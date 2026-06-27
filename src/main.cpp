@@ -172,9 +172,16 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 
     // The Windows certificate store is implicit when no PEM material is given:
     // store trust roots for server verification + a CurrentUser\MY client cert.
+    // Off-Windows there is no winstore provider, so never derive it -- otherwise
+    // configureSslContext would try to load "org.openssl.winstore://" and throw.
+    // PEM (ca/cert/key) or OpenSSL's default verify paths handle trust on macOS.
+#ifdef _WIN32
     s.tls.useWindowsStore = s.tls.caFile.empty()
         && s.tls.certFile.empty()
         && s.tls.keyFile.empty();
+#else
+    s.tls.useWindowsStore = false;
+#endif
 
     // Frigate login needs both credential halves and a base URL to POST to.
     if (s.user.empty() != s.password.empty()) {
@@ -337,12 +344,16 @@ int main(int argc, char** argv)
             gig::logInfo() << "saved window geometry is off-screen/invalid; using default";
         }
 
+        SDL_WindowFlags windowFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
+#ifdef __APPLE__
+        windowFlags |= SDL_WINDOW_METAL; // the Metal renderer attaches a CAMetalLayer via SDL_Metal_CreateView
+#endif
         auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(
             SDL_CreateWindow(
                 "gig",
                 useGeom ? geom.w : 1280,
                 useGeom ? geom.h : 720,
-                SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN),
+                windowFlags),
             SDL_DestroyWindow);
 
         if (!window) {
@@ -383,7 +394,7 @@ int main(int argc, char** argv)
 #endif
         (void)mainHwnd;
 
-        auto renderer = createD3D11Renderer();
+        auto renderer = createRenderer();
         if (!renderer->initialize(window.get())) {
             return 1;
         }

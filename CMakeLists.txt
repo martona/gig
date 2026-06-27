@@ -2,11 +2,47 @@ cmake_minimum_required(VERSION 3.24)
 
 cmake_policy(SET CMP0091 NEW)
 
+# Apple: derive the static vcpkg triplet, architecture, and deployment target
+# BEFORE project() so the vcpkg toolchain (invoked at project()) builds deps for
+# the right triplet. Mirrors clipp's proven setup. Overlay triplets live in
+# vcpkg-triplets/ (also registered in vcpkg-configuration.json for manual/CI runs).
+if(APPLE)
+    if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment version" FORCE)
+    endif()
+    set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg-triplets"
+        CACHE PATH "vcpkg overlay triplet directory")
+    if(NOT DEFINED VCPKG_TARGET_TRIPLET OR VCPKG_TARGET_TRIPLET STREQUAL "")
+        execute_process(COMMAND uname -m
+            OUTPUT_VARIABLE GIG_HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(GIG_HOST_ARCH STREQUAL "arm64")
+            set(VCPKG_TARGET_TRIPLET "arm64-osx-macos14" CACHE STRING "vcpkg target triplet" FORCE)
+        elseif(GIG_HOST_ARCH STREQUAL "x86_64")
+            set(VCPKG_TARGET_TRIPLET "x64-osx-macos14" CACHE STRING "vcpkg target triplet" FORCE)
+        else()
+            message(FATAL_ERROR "Unsupported macOS architecture: ${GIG_HOST_ARCH}")
+        endif()
+    endif()
+    if(NOT DEFINED CMAKE_OSX_ARCHITECTURES OR CMAKE_OSX_ARCHITECTURES STREQUAL "")
+        if(VCPKG_TARGET_TRIPLET MATCHES "^arm64-")
+            set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "macOS target architecture" FORCE)
+        elseif(VCPKG_TARGET_TRIPLET MATCHES "^x64-")
+            set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "macOS target architecture" FORCE)
+        endif()
+    endif()
+endif()
+
 project(gig LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -26,6 +62,7 @@ list(GET _gig_version_parts 0 GIG_VERSION_MAJOR)
 list(GET _gig_version_parts 1 GIG_VERSION_MINOR)
 list(GET _gig_version_parts 2 GIG_VERSION_PATCH)
 list(GET _gig_version_parts 3 GIG_VERSION_BUILD)
+set(GIG_VERSION_3PART "${GIG_VERSION_MAJOR}.${GIG_VERSION_MINOR}.${GIG_VERSION_PATCH}")
 message(STATUS "gig version: ${GIG_VERSION}")
 
 find_package(Boost REQUIRED COMPONENTS json)
@@ -33,9 +70,12 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(imgui CONFIG REQUIRED)
-find_package(umbra CONFIG REQUIRED)
+# umbra (Win32 dark mode) is Windows-only -- found inside the if(WIN32) block.
 
-add_executable(gig WIN32
+# Platform-neutral sources. WIN32 (GUI subsystem) is honored only on Windows;
+# MACOSX_BUNDLE (build a .app) only on Apple; each is ignored on the other. The
+# Windows- and macOS-specific sources are added per platform further below.
+add_executable(gig WIN32 MACOSX_BUNDLE
     src/main.cpp
     src/log.cpp
     src/log.hpp
@@ -68,16 +108,9 @@ add_executable(gig WIN32
     src/net/tls_session_cache.hpp
     src/net/url.h
     src/platform/settings_store.hpp
-    src/platform/settings_store_win.cpp
-    src/render/d3d11_renderer.cpp
     src/render/grid_layout.cpp
     src/render/grid_layout.h
-    src/render/text_overlay.cpp
-    src/render/text_overlay.h
     src/render/video_renderer.h
-    src/ui/resource.h
-    src/ui/settings_dialog.cpp
-    src/ui/settings_dialog.h
 )
 
 target_include_directories(gig PRIVATE
@@ -105,6 +138,8 @@ target_link_libraries(gig PRIVATE
 if(WIN32)
     enable_language(RC)
 
+    find_package(umbra CONFIG REQUIRED)
+
     # Stamp the version into a generated VERSIONINFO resource (kept separate from
     # gig.rc, which has no build-time tokens). Regenerated each configure, so a new
     # -DGIG_VERSION re-stamps the exe. No relative paths inside, so living under the
@@ -117,6 +152,15 @@ if(WIN32)
     target_sources(gig PRIVATE
         resources/gig.rc
         "${CMAKE_CURRENT_BINARY_DIR}/generated/version.rc"
+        # Windows renderer (D3D11 + GDI overlay), native settings dialog, and the
+        # registry settings backend -- all Windows-only, isolated here.
+        src/render/d3d11_renderer.cpp
+        src/render/text_overlay.cpp
+        src/render/text_overlay.h
+        src/ui/resource.h
+        src/ui/settings_dialog.cpp
+        src/ui/settings_dialog.h
+        src/platform/settings_store_win.cpp
         # Windows-only TLS client-cert path (CNG bridge + cert-store picker).
         # The lazy client-cert callback drops off-Windows; login auth is the
         # cross-platform replacement. See tls_context.cpp (#ifdef _WIN32).
@@ -150,6 +194,47 @@ if(WIN32)
     # v6 for umbra). Stop the linker generating a competing default manifest --
     # otherwise two RT_MANIFEST id 1 resources collide.
     target_link_options(gig PRIVATE /MANIFEST:NO)
+elseif(APPLE)
+    # macOS renderer (Metal stub for now) + Keychain/plist settings backend, both
+    # Objective-C++ (.mm). Software-decode target; the real Metal renderer and
+    # VideoToolbox come later. The window/event layer is SDL3 (cross-platform).
+    target_sources(gig PRIVATE
+        src/render/metal_renderer.mm
+        src/platform/settings_store_mac.mm
+    )
+
+    # The .mm sources use ARC (no manual retain/release). Set the Xcode build
+    # setting for the Xcode generator and the compile flag for Ninja/Make.
+    set_target_properties(gig PROPERTIES XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC "YES")
+    target_compile_options(gig PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+    # AppKit/Metal headers carry deprecations we don't act on yet.
+    target_compile_options(gig PRIVATE "-Wno-deprecated-declarations")
+
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(SECURITY_FRAMEWORK Security REQUIRED)       # Keychain (settings_store_mac)
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)   # CAMetalLayer
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+    target_link_libraries(gig PRIVATE
+        ${FOUNDATION_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK}
+        ${SECURITY_FRAMEWORK}
+        ${METAL_FRAMEWORK}
+        ${QUARTZCORE_FRAMEWORK}
+        ${APPKIT_FRAMEWORK}
+    )
+
+    # CMake substitutes these target properties into resources/Info.plist.in at
+    # build time (CFBundleShortVersionString = 3-part, CFBundleVersion = full).
+    set_target_properties(gig PROPERTIES
+        MACOSX_BUNDLE_BUNDLE_NAME "gig"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "stream.gig.app"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist.in"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${GIG_VERSION_3PART}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${GIG_VERSION}"
+        OUTPUT_NAME "gig"
+    )
 endif()
 
 if(MSVC)

@@ -37,7 +37,11 @@ void writeLog(LogLevel level, std::string_view message)
     const auto millis = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
 
     std::tm local {};
-    localtime_s(&local, &seconds);
+#ifdef _WIN32
+    localtime_s(&local, &seconds); // MSVC: (struct tm*, const time_t*)
+#else
+    localtime_r(&seconds, &local); // POSIX: (const time_t*, struct tm*) -- args swapped
+#endif
 
     char timestamp[20] = {};
     std::snprintf(

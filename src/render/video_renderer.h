@@ -100,4 +100,6 @@ public:
     virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };
 
-std::unique_ptr<VideoRenderer> createD3D11Renderer();
+// Platform renderer factory: D3D11 on Windows, Metal on macOS (a clear-only stub
+// for now). Exactly one definition is compiled per platform.
+std::unique_ptr<VideoRenderer> createRenderer();

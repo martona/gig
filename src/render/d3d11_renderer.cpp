@@ -1879,7 +1879,7 @@ private:
 
 } // namespace
 
-std::unique_ptr<VideoRenderer> createD3D11Renderer()
+std::unique_ptr<VideoRenderer> createRenderer()
 {
     return std::make_unique<D3D11Renderer>();
 }

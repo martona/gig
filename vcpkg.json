@@ -11,12 +11,24 @@
     },
     "boost-beast",
     "boost-json",
-    "umbra",
+    {
+      "name": "umbra",
+      "platform": "windows"
+    },
     "sdl3",
     {
       "name": "imgui",
+      "platform": "windows",
       "features": [
         "dx11-binding",
+        "sdl3-binding"
+      ]
+    },
+    {
+      "name": "imgui",
+      "platform": "osx",
+      "features": [
+        "metal-binding",
         "sdl3-binding"
       ]
     },

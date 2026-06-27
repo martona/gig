@@ -736,20 +736,31 @@ endif()
 
 # ---- gig overlay: minimal media surface (appended last so it wins) ----------
 # gig uses exactly: mpegts demux over custom AVIO (zero FFmpeg protocols, no
-# network), h264/hevc decode (shared-device D3D11VA hwaccel or software), and
+# network), h264/hevc decode (hardware where available, else software), and
 # swscale for the BGRA fallback. Everything else is stripped -- the codec and
 # demuxer registration tables otherwise reference every component, forcing the
 # linker to pull all of libavcodec/libavformat into the (static) exe.
 # --disable-everything only clears COMPONENTS; library selection (avcodec/
 # avformat/swscale) still comes from the vcpkg features above. configure
 # resolves each enabled component's internal _select dependencies itself.
+# --disable-network because all bytes arrive via our custom AVIO (we terminate
+# TLS ourselves), so no FFmpeg protocol/TLS backend is ever used on any platform.
 string(APPEND OPTIONS " --disable-everything\
- --disable-network --disable-schannel\
+ --disable-network\
  --enable-decoder=h264,hevc\
  --enable-parser=h264,hevc\
  --enable-demuxer=mpegts\
- --enable-bsf=extract_extradata\
+ --enable-bsf=extract_extradata")
+# Hardware decode is platform-specific. Windows keeps the shared-device D3D11VA
+# zero-copy path (the *_d3d11va2 variants are the AV_PIX_FMT_D3D11 + hw_device_ctx
+# path the decoder selects); --disable-schannel there since we do no FFmpeg
+# networking. Apple (the gig macOS port) targets software decode first -- enable
+# no hwaccel (VideoToolbox is a later phase); the d3d11va flags would make
+# FFmpeg's configure error out off-Windows.
+if(VCPKG_TARGET_IS_WINDOWS)
+    string(APPEND OPTIONS " --disable-schannel\
  --enable-hwaccel=h264_d3d11va,h264_d3d11va2,hevc_d3d11va,hevc_d3d11va2")
+endif()
 # ------------------------------------------------------------------------------
 
 message(STATUS "Building Options: ${OPTIONS}")

@@ -17,9 +17,11 @@
 #include <string>
 #include <utility>
 
+#ifdef _WIN32
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
+#endif
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -28,7 +30,9 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/log.h>
 #include <libavutil/hwcontext.h>
+#ifdef _WIN32
 #include <libavutil/hwcontext_d3d11va.h>
+#endif
 #include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
@@ -220,6 +224,7 @@ void throwIfFailed(int code, const char* action)
     }
 }
 
+#ifdef _WIN32
 AVPixelFormat chooseHardwarePixelFormat(AVCodecContext* context, const AVPixelFormat* formats)
 {
     const auto* hardwareState = static_cast<const HardwareDecodeState*>(context->opaque);
@@ -289,6 +294,7 @@ bool d3d11DeviceIsSoftwareAdapter(ID3D11Device* device)
     }
     return (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
 }
+#endif // _WIN32 -- D3D11VA hardware-decode helpers
 
 void copyPlane(
     const std::uint8_t* source,
@@ -355,6 +361,7 @@ bool emitNv12Frame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegD
     return true;
 }
 
+#ifdef _WIN32
 bool emitD3D11Frame(
     const AVFrame* frame,
     std::uint64_t frameIndex,
@@ -396,6 +403,7 @@ bool emitD3D11Frame(
     callback(std::move(output));
     return true;
 }
+#endif // _WIN32 -- D3D11 zero-copy frame emit
 
 bool emitYuv420Frame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegDecoder::FrameCallback& callback)
 {
@@ -499,6 +507,7 @@ void emitDecodedFrame(
     emitBgraFrame(frame, frameIndex, swsContext, callback);
 }
 
+#ifdef _WIN32
 BufferRefPtr createD3D11DeviceContext(const std::shared_ptr<D3D11DecodeContext>& d3d11Context)
 {
     if (!d3d11Context || !d3d11Context->device || !d3d11Context->lock) {
@@ -523,6 +532,7 @@ BufferRefPtr createD3D11DeviceContext(const std::shared_ptr<D3D11DecodeContext>&
     throwIfFailed(av_hwdevice_ctx_init(device.get()), "av_hwdevice_ctx_init(D3D11VA)");
     return device;
 }
+#endif // _WIN32 -- D3D11VA device context
 
 CodecContextPtr openCodecContext(
     const AVCodec* decoder,
@@ -532,6 +542,7 @@ CodecContextPtr openCodecContext(
     const std::shared_ptr<D3D11DecodeContext>& d3d11Context,
     bool softwareOnly)
 {
+#ifdef _WIN32
     const bool softwareAdapter = d3d11Context && d3d11Context->device
         && d3d11DeviceIsSoftwareAdapter(d3d11Context->device);
     if (softwareAdapter && !softwareOnly) {
@@ -571,6 +582,10 @@ CodecContextPtr openCodecContext(
             hardwareState.deviceType = AV_HWDEVICE_TYPE_NONE;
         }
     }
+#else
+    (void)d3d11Context;
+    (void)hardwareDevice;
+#endif
 
     // Deliberately no other-hardware fallback. On Windows the shared-device
     // D3D11VA path above is the only zero-copy option, and D3D11VA already
@@ -827,11 +842,13 @@ void FfmpegDecoder::decodeOnce()
             throwIfFailed(receiveResult, "avcodec_receive_frame");
 
             const std::uint64_t frameIndex = ++frameIndex_;
+#ifdef _WIN32
             if (decodedFrame->format == AV_PIX_FMT_D3D11
                 && emitD3D11Frame(decodedFrame.get(), frameIndex, d3d11Context_, frameCallback_)) {
                 av_frame_unref(decodedFrame.get());
                 continue;
             }
+#endif
 
             if (hardwareState.pixelFormat != AV_PIX_FMT_NONE && decodedFrame->format == hardwareState.pixelFormat) {
                 FramePtr transferredFrame(av_frame_alloc());

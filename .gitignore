@@ -1,5 +1,7 @@
 /.vcpkg/
 /build/
+/vcpkg_installed/
+.DS_Store
 .claude/settings.local.json
 HANDOFF.md
 PLAN.md
