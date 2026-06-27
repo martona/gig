@@ -296,23 +296,16 @@ bool d3d11DeviceIsSoftwareAdapter(ID3D11Device* device)
 }
 #endif // _WIN32 -- D3D11VA hardware-decode helpers
 
-void copyPlane(
-    const std::uint8_t* source,
-    int sourceStride,
-    int widthBytes,
-    int height,
-    std::vector<std::uint8_t>& destination,
-    int& destinationStride)
+// Keep a decoded AVFrame alive so a VideoFrame can borrow its plane pointers
+// instead of copying the pixels out. The shared_ptr<void> lands in
+// VideoFrame::owner; when the last reference drops, the frame (and its
+// reference-counted buffers) is freed. Mirrors the D3D11 zero-copy emit.
+std::shared_ptr<void> makeFrameOwner(AVFrame* cloned)
 {
-    destinationStride = widthBytes;
-    destination.resize(static_cast<std::size_t>(widthBytes) * static_cast<std::size_t>(height));
-
-    for (int y = 0; y < height; ++y) {
-        std::memcpy(
-            destination.data() + static_cast<std::size_t>(y) * destinationStride,
-            source + static_cast<std::size_t>(y) * sourceStride,
-            static_cast<std::size_t>(widthBytes));
-    }
+    return std::shared_ptr<void>(cloned, [](void* pointer) {
+        AVFrame* ownedFrame = static_cast<AVFrame*>(pointer);
+        av_frame_free(&ownedFrame);
+    });
 }
 
 bool isFullRangeYuv(const AVFrame* frame)
@@ -344,8 +337,13 @@ bool emitNv12Frame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegD
         return false;
     }
 
-    const int chromaWidthBytes = ((frame->width + 1) / 2) * 2;
-    const int chromaHeight = (frame->height + 1) / 2;
+    // Borrow the decoded planes: clone (a refcount bump, not a pixel copy), keep the
+    // clone alive in owner, and point planeData[] at its buffers. The renderer reads
+    // straight from here using the padded linesize as the row stride.
+    AVFrame* cloned = av_frame_clone(frame);
+    if (!cloned) {
+        throw std::runtime_error("Could not clone decoded NV12 frame.");
+    }
 
     VideoFrame output;
     output.format = VideoFrameFormat::NV12;
@@ -353,9 +351,11 @@ bool emitNv12Frame(const AVFrame* frame, std::uint64_t frameIndex, const FfmpegD
     output.height = frame->height;
     output.fullRange = isFullRangeYuv(frame);
     output.index = frameIndex;
-
-    copyPlane(frame->data[0], frame->linesize[0], frame->width, frame->height, output.planes[0], output.strides[0]);
-    copyPlane(frame->data[1], frame->linesize[1], chromaWidthBytes, chromaHeight, output.planes[1], output.strides[1]);
+    output.planeData[0] = cloned->data[0];
+    output.planeData[1] = cloned->data[1];
+    output.strides[0] = cloned->linesize[0];
+    output.strides[1] = cloned->linesize[1];
+    output.owner = makeFrameOwner(cloned);
 
     callback(std::move(output));
     return true;
@@ -395,10 +395,7 @@ bool emitD3D11Frame(
     if (d3d11Context) {
         output.d3d11Lock = d3d11Context->lock;
     }
-    output.owner = std::shared_ptr<void>(cloned, [](void* pointer) {
-        AVFrame* ownedFrame = static_cast<AVFrame*>(pointer);
-        av_frame_free(&ownedFrame);
-    });
+    output.owner = makeFrameOwner(cloned);
 
     callback(std::move(output));
     return true;
@@ -411,8 +408,11 @@ bool emitYuv420Frame(const AVFrame* frame, std::uint64_t frameIndex, const Ffmpe
         return false;
     }
 
-    const int chromaWidth = (frame->width + 1) / 2;
-    const int chromaHeight = (frame->height + 1) / 2;
+    // Borrow all three planes from a clone (see emitNv12Frame); no pixel copy.
+    AVFrame* cloned = av_frame_clone(frame);
+    if (!cloned) {
+        throw std::runtime_error("Could not clone decoded YUV420P frame.");
+    }
 
     VideoFrame output;
     output.format = VideoFrameFormat::YUV420P;
@@ -420,10 +420,11 @@ bool emitYuv420Frame(const AVFrame* frame, std::uint64_t frameIndex, const Ffmpe
     output.height = frame->height;
     output.fullRange = isFullRangeYuv(frame);
     output.index = frameIndex;
-
-    copyPlane(frame->data[0], frame->linesize[0], frame->width, frame->height, output.planes[0], output.strides[0]);
-    copyPlane(frame->data[1], frame->linesize[1], chromaWidth, chromaHeight, output.planes[1], output.strides[1]);
-    copyPlane(frame->data[2], frame->linesize[2], chromaWidth, chromaHeight, output.planes[2], output.strides[2]);
+    for (int i = 0; i < 3; ++i) {
+        output.planeData[i] = cloned->data[i];
+        output.strides[i] = cloned->linesize[i];
+    }
+    output.owner = makeFrameOwner(cloned);
 
     callback(std::move(output));
     return true;
@@ -474,6 +475,9 @@ void emitBgraFrame(
     output.strides[0] = output.width * 4;
     output.index = frameIndex;
     output.planes[0].resize(static_cast<std::size_t>(output.strides[0]) * static_cast<std::size_t>(output.height));
+    // Owned (not borrowed): swscale must write into our own buffer, so planeData
+    // points back into planes[0]. The vector's pointer survives the std::move below.
+    output.planeData[0] = output.planes[0].data();
 
     std::uint8_t* destinationData[4] = { output.planes[0].data(), nullptr, nullptr, nullptr };
     int destinationStride[4] = { output.strides[0], 0, 0, 0 };

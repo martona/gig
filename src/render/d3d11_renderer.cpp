@@ -1036,11 +1036,11 @@ private:
         DXGI_FORMAT format,
         int width,
         int height,
-        const std::vector<std::uint8_t>& source,
+        const std::uint8_t* source,
         int sourceStride,
         int copyBytes)
     {
-        if (planeIndex >= tile.planeTextures.size() || width <= 0 || height <= 0 || source.empty()) {
+        if (planeIndex >= tile.planeTextures.size() || width <= 0 || height <= 0 || !source) {
             return false;
         }
 
@@ -1087,7 +1087,7 @@ private:
             return false;
         }
 
-        const auto* sourceData = source.data();
+        const auto* sourceData = source;
         auto* destination = static_cast<std::uint8_t*>(mapped.pData);
         for (int y = 0; y < height; ++y) {
             std::memcpy(
@@ -1123,20 +1123,20 @@ private:
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 frame.width,
                 frame.height,
-                frame.planes[0],
+                frame.planeData[0],
                 frame.strides[0],
                 frame.width * 4);
         } else if (frame.format == VideoFrameFormat::NV12) {
-            const int chromaWidth = frame.strides[1] / 2;
+            const int chromaWidth = (frame.width + 1) / 2;
             const int chromaHeight = (frame.height + 1) / 2;
-            uploaded = uploadPlane(tile, 0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
-                && uploadPlane(tile, 1, DXGI_FORMAT_R8G8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], frame.strides[1]);
+            uploaded = uploadPlane(tile, 0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planeData[0], frame.strides[0], frame.width)
+                && uploadPlane(tile, 1, DXGI_FORMAT_R8G8_UNORM, chromaWidth, chromaHeight, frame.planeData[1], frame.strides[1], chromaWidth * 2);
         } else if (frame.format == VideoFrameFormat::YUV420P) {
             const int chromaWidth = (frame.width + 1) / 2;
             const int chromaHeight = (frame.height + 1) / 2;
-            uploaded = uploadPlane(tile, 0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planes[0], frame.strides[0], frame.width)
-                && uploadPlane(tile, 1, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[1], frame.strides[1], chromaWidth)
-                && uploadPlane(tile, 2, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planes[2], frame.strides[2], chromaWidth);
+            uploaded = uploadPlane(tile, 0, DXGI_FORMAT_R8_UNORM, frame.width, frame.height, frame.planeData[0], frame.strides[0], frame.width)
+                && uploadPlane(tile, 1, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planeData[1], frame.strides[1], chromaWidth)
+                && uploadPlane(tile, 2, DXGI_FORMAT_R8_UNORM, chromaWidth, chromaHeight, frame.planeData[2], frame.strides[2], chromaWidth);
         }
 
         if (uploaded) {
@@ -1354,7 +1354,7 @@ private:
             TileState& tile = tiles_[i];
             const VideoFrame* frame = frames[i].get();
             const bool hasFrame = frame
-                && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty());
+                && (frame->format == VideoFrameFormat::D3D11_NV12 || frame->planeData[0] != nullptr);
             if (hasFrame) {
                 uploadFrame(tile, *frame);
             } else if (tile.planeViews[0]) {
@@ -1406,7 +1406,7 @@ private:
         TileState& tile = tiles_[index];
         const VideoFrame* frame = frames[index].get();
         const bool hasFrame = frame
-            && (frame->format == VideoFrameFormat::D3D11_NV12 || !frame->planes[0].empty());
+            && (frame->format == VideoFrameFormat::D3D11_NV12 || frame->planeData[0] != nullptr);
         if (hasFrame) {
             uploadFrame(tile, *frame);
         } else if (tile.planeViews[0]) {

@@ -550,14 +550,14 @@ private:
     }
 
     static void uploadPlane(id<MTLTexture> texture, int width, int height,
-                            const std::vector<std::uint8_t>& source, int stride)
+                            const std::uint8_t* source, int stride)
     {
-        if (!texture || source.empty() || width <= 0 || height <= 0) {
+        if (!texture || !source || width <= 0 || height <= 0) {
             return;
         }
         [texture replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(width), static_cast<NSUInteger>(height))
                    mipmapLevel:0
-                     withBytes:source.data()
+                     withBytes:source
                    bytesPerRow:static_cast<NSUInteger>(stride)];
     }
 
@@ -584,21 +584,21 @@ private:
         switch (frame.format) {
         case VideoFrameFormat::BGRA:
             ensurePlane(tile, 0, MTLPixelFormatBGRA8Unorm, frame.width, frame.height);
-            uploadPlane(tile.plane[0], frame.width, frame.height, frame.planes[0], frame.strides[0]);
+            uploadPlane(tile.plane[0], frame.width, frame.height, frame.planeData[0], frame.strides[0]);
             break;
         case VideoFrameFormat::NV12:
             ensurePlane(tile, 0, MTLPixelFormatR8Unorm, frame.width, frame.height);
             ensurePlane(tile, 1, MTLPixelFormatRG8Unorm, cw, ch);
-            uploadPlane(tile.plane[0], frame.width, frame.height, frame.planes[0], frame.strides[0]);
-            uploadPlane(tile.plane[1], cw, ch, frame.planes[1], frame.strides[1]);
+            uploadPlane(tile.plane[0], frame.width, frame.height, frame.planeData[0], frame.strides[0]);
+            uploadPlane(tile.plane[1], cw, ch, frame.planeData[1], frame.strides[1]);
             break;
         case VideoFrameFormat::YUV420P:
             ensurePlane(tile, 0, MTLPixelFormatR8Unorm, frame.width, frame.height);
             ensurePlane(tile, 1, MTLPixelFormatR8Unorm, cw, ch);
             ensurePlane(tile, 2, MTLPixelFormatR8Unorm, cw, ch);
-            uploadPlane(tile.plane[0], frame.width, frame.height, frame.planes[0], frame.strides[0]);
-            uploadPlane(tile.plane[1], cw, ch, frame.planes[1], frame.strides[1]);
-            uploadPlane(tile.plane[2], cw, ch, frame.planes[2], frame.strides[2]);
+            uploadPlane(tile.plane[0], frame.width, frame.height, frame.planeData[0], frame.strides[0]);
+            uploadPlane(tile.plane[1], cw, ch, frame.planeData[1], frame.strides[1]);
+            uploadPlane(tile.plane[2], cw, ch, frame.planeData[2], frame.strides[2]);
             break;
         case VideoFrameFormat::D3D11_NV12:
             return;
@@ -727,7 +727,7 @@ private:
         for (std::size_t i = 0; i < frames.size(); ++i) {
             TileState& tile = tiles_[i];
             const VideoFrame* frame = frames[i].get();
-            const bool hasFrame = frame && !frame->planes[0].empty();
+            const bool hasFrame = frame && frame->planeData[0] != nullptr;
             if (hasFrame) {
                 uploadFrame(tile, *frame);
             } else if (tile.plane[0]) {
@@ -770,7 +770,7 @@ private:
     {
         TileState& tile = tiles_[index];
         const VideoFrame* frame = frames[index].get();
-        const bool hasFrame = frame && !frame->planes[0].empty();
+        const bool hasFrame = frame && frame->planeData[0] != nullptr;
         if (hasFrame) {
             uploadFrame(tile, *frame);
         } else if (tile.plane[0]) {
