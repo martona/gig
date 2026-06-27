@@ -92,6 +92,13 @@ struct MediaStream::Impl {
                     boost::system::error_code e, const tcp::endpoint&) mutable { c(e); });
         });
         if (ec) {
+            // Log the resolved addresses: async_connect tried them all, so each was
+            // unreachable -- surfaces an unroutable family (e.g. IPv6 with no route).
+            for (const auto& entry : endpoints) {
+                const auto address = entry.endpoint().address();
+                logWarning() << "  " << parsed.host << " resolved to " << address.to_string()
+                             << (address.is_v6() ? " [IPv6]" : " [IPv4]");
+            }
             throw std::runtime_error("connect " + parsed.host + ": " + ec.message());
         }
 

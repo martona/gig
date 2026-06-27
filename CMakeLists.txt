@@ -206,9 +206,9 @@ if(WIN32)
     # otherwise two RT_MANIFEST id 1 resources collide.
     target_link_options(gig PRIVATE /MANIFEST:NO)
 elseif(APPLE)
-    # macOS renderer (Metal stub for now) + Keychain/plist settings backend, both
-    # Objective-C++ (.mm). Software-decode target; the real Metal renderer and
-    # VideoToolbox come later. The window/event layer is SDL3 (cross-platform).
+    # macOS platform layer (Objective-C++ .mm): Metal renderer (software + VideoToolbox
+    # zero-copy), Keychain/plist settings, system trust, native dialogs + app menu. The
+    # window/event layer is SDL3 (cross-platform).
     target_sources(gig PRIVATE
         src/render/metal_renderer.mm
         src/platform/settings_store_mac.mm
@@ -218,6 +218,8 @@ elseif(APPLE)
         src/ui/settings_dialog.h
         src/ui/pin_prompt_mac.mm
         src/ui/pin_prompt.h
+        src/ui/app_menu_mac.mm
+        src/ui/app_menu.h
     )
 
     # App icon: generate gig.icns from the 1024^2 boat.png master at build time

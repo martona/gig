@@ -29,6 +29,7 @@
 #if defined(_WIN32) || defined(__APPLE__)
 #include "ui/settings_dialog.h" // native settings dialog (Win32 dialog / AppKit window)
 #include "ui/pin_prompt.h"      // cert-trust prompt (Win32 message box / AppKit NSAlert)
+#include "ui/app_menu.h"        // macOS application menu (About / Preferences / Quit)
 #endif
 
 namespace {
@@ -404,6 +405,12 @@ int main(int argc, char** argv)
             return 1;
         }
 
+#ifdef __APPLE__
+        // Native macOS menu bar: About / Preferences (Cmd-,) / Quit (Cmd-Q). The
+        // Preferences item pushes this SDL event; the run loop opens the dialog below.
+        const Uint32 prefsEventType = installAppMenu();
+#endif
+
         // The app-lifetime TLS resumption pool + cookie jar, shared across the
         // control plane and video and preserved across reconnects.
         auto sessionCache = std::make_shared<gig::TlsSessionCache>();
@@ -604,6 +611,13 @@ int main(int argc, char** argv)
 #if defined(_WIN32) || defined(__APPLE__)
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F2) {
                     gig::logInfo() << "settings dialog (F2)";
+                    openSettings();
+                    continue;
+                }
+#endif
+#ifdef __APPLE__
+                if (prefsEventType != 0 && event.type == prefsEventType) {
+                    gig::logInfo() << "settings dialog (menu)";
                     openSettings();
                     continue;
                 }

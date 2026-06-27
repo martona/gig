@@ -282,6 +282,7 @@ public:
             ImGui::DestroyContext();
         }
 
+        bakedScale_ = scale_; // the font + glyphs above were baked at this scale
         gig::logInfo() << "metal renderer ready: " << device_.name.UTF8String;
         return true;
     }
@@ -323,6 +324,7 @@ public:
             }
             scale_ = static_cast<float>(pixelHeight) / static_cast<float>(pointHeight);
             layer_.drawableSize = CGSizeMake(pixelWidth, pixelHeight);
+            applyDpiScale(); // rebake the font + glyphs if the display scale changed
 
             if (tiles_.size() != frames.size()) {
                 // Release any VideoToolbox wrappers before tiles are dropped/realloc'd
@@ -1240,6 +1242,33 @@ private:
         ImGui::StyleColorsDark();
     }
 
+    // Rebake the imgui font atlas + SF Symbol glyphs when the display scale changes
+    // (e.g. the window moved to a different-DPI monitor). scale_ is recomputed each
+    // render() from the backing size; bakedScale_ tracks what those were baked at. The
+    // Windows analog runs from SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED; here render()
+    // already recomputes scale_, so a self-detecting compare is enough.
+    void applyDpiScale()
+    {
+        if (scale_ == bakedScale_) {
+            return;
+        }
+        bakedScale_ = scale_;
+        gig::logInfo() << "display scale changed: " << scale_;
+
+        // SF Symbol toolbar glyphs are rasterized at device px; re-rasterize them.
+        iconSettings_ = makeSymbolTexture(@"gearshape");
+        iconReconnect_ = makeSymbolTexture(@"arrow.clockwise");
+        iconLog_ = makeSymbolTexture(@"list.bullet");
+
+        if (imguiReady_) {
+            // imgui (1.92+) owns font-texture lifecycle: rebuilding the atlas
+            // (loadImguiFont) marks it dirty and ImGui_ImplMetal_RenderDrawData
+            // re-uploads it on the next frame -- no manual texture create/destroy.
+            loadImguiFont();
+            applyImguiStyle();
+        }
+    }
+
     SDL_Window* window_ = nullptr;
     SDL_MetalView metalView_ = nullptr;
     CAMetalLayer* layer_ = nil;
@@ -1274,6 +1303,7 @@ private:
     int hoveredTile_ = -1;
 
     float scale_ = 1.0f;
+    float bakedScale_ = 0.0f; // display scale the imgui font + SF Symbol glyphs were baked at
     float animTime_ = 0.0f;
     float lastDt_ = 0.0f;
     std::chrono::steady_clock::time_point lastRenderTp_;

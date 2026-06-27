@@ -49,6 +49,19 @@ void applyTimeout(Stream& stream, std::int64_t rwTimeoutUs)
     beast::get_lowest_layer(stream).expires_after(micros);
 }
 
+// After a connect failure, log every address the host resolved to. async_connect
+// tries them all in order, so each one listed here was unreachable -- the fast way
+// to spot an unroutable family (e.g. an IPv6 address with no route on the box even
+// though IPv4 works, or the reverse).
+void logConnectCandidates(const std::string& host, const tcp::resolver::results_type& endpoints)
+{
+    for (const auto& entry : endpoints) {
+        const auto address = entry.endpoint().address();
+        logWarning() << "  " << host << " resolved to " << address.to_string()
+                     << (address.is_v6() ? " [IPv6]" : " [IPv4]");
+    }
+}
+
 // Run exactly one async op to completion, bounded by the rw timeout. Beast's
 // tcp_stream timer only fires for ASYNC operations (sync calls silently ignore
 // expires_after), so every I/O step goes through here -- this is what makes
@@ -236,6 +249,7 @@ struct HttpClient::Impl {
                 });
                 if (ec) {
                     result.error = "connect " + parsed.host + ": " + ec.message();
+                    logConnectCandidates(parsed.host, endpoints);
                     return result;
                 }
 
@@ -285,6 +299,7 @@ struct HttpClient::Impl {
             });
             if (ec) {
                 result.error = "connect " + parsed.host + ": " + ec.message();
+                logConnectCandidates(parsed.host, endpoints);
                 return result;
             }
 
