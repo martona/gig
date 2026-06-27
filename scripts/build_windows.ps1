@@ -168,15 +168,13 @@ function Invoke-VcpkgBootstrap {
         throw "Could not find vcpkg bootstrap script at $bootstrap."
     }
 
-    Push-Location $Root
-    try {
-        & cmd.exe /d /c "bootstrap-vcpkg.bat -disableMetrics"
-        if ($LASTEXITCODE -ne 0) {
-            throw "'$bootstrap' failed with exit code $LASTEXITCODE."
-        }
-    }
-    finally {
-        Pop-Location
+    # Invoke by absolute path -- bootstrap-vcpkg.bat locates its own sources via
+    # %~dp0, so it works from any working directory. (A relative `cmd /c
+    # bootstrap-vcpkg.bat` would resolve against the child process's CWD, which a
+    # PowerShell Push-Location does not change, so it'd fail "not recognized".)
+    & $bootstrap -disableMetrics
+    if ($LASTEXITCODE -ne 0) {
+        throw "'$bootstrap' failed with exit code $LASTEXITCODE."
     }
 }
 
@@ -203,11 +201,15 @@ function Resolve-VcpkgRoot {
 
         New-Item -ItemType Directory -Force -Path (Split-Path $root -Parent) | Out-Null
         Write-Host "Cloning private vcpkg root into $root..."
+        # Out-Host on the native-command calls below: their stdout would otherwise
+        # leak into this function's return value (PowerShell returns every
+        # uncaptured value), making $resolvedVcpkgRoot an array with blank-line
+        # elements that later break Join-Path. Out-Host keeps them in the log only.
         Invoke-NativeCommand -FilePath $gitExe -Arguments @(
             "clone",
             "https://github.com/microsoft/vcpkg.git",
             $root
-        )
+        ) | Out-Host
 
         $baseline = Get-VcpkgBaseline
         if ($baseline) {
@@ -217,14 +219,14 @@ function Resolve-VcpkgRoot {
                 "checkout",
                 "--detach",
                 $baseline
-            )
+            ) | Out-Host
         }
     }
 
     $vcpkgExe = Join-Path $root "vcpkg.exe"
     if (-not (Test-Path $vcpkgExe)) {
         Write-Host "Bootstrapping private vcpkg..."
-        Invoke-VcpkgBootstrap -Root $root
+        Invoke-VcpkgBootstrap -Root $root | Out-Host
     }
 
     if (-not (Test-Path $toolchain)) {
