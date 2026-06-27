@@ -214,6 +214,21 @@ elseif(APPLE)
         src/net/system_trust_mac.h
     )
 
+    # App icon: generate gig.icns from the 1024^2 boat.png master at build time
+    # (sips + iconutil, both preinstalled on macOS) -- no generated binary committed.
+    set(GIG_ICNS "${CMAKE_CURRENT_BINARY_DIR}/generated/gig.icns")
+    add_custom_command(
+        OUTPUT "${GIG_ICNS}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated"
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/make_icns.sh"
+                "${CMAKE_CURRENT_SOURCE_DIR}/resources/boat.png" "${GIG_ICNS}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/resources/boat.png"
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/make_icns.sh"
+        COMMENT "Generating gig.icns from boat.png (sips + iconutil)"
+        VERBATIM)
+    set_source_files_properties("${GIG_ICNS}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    target_sources(gig PRIVATE "${GIG_ICNS}")
+
     # The .mm sources use ARC (no manual retain/release). Set the Xcode build
     # setting for the Xcode generator and the compile flag for Ninja/Make.
     set_target_properties(gig PROPERTIES XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC "YES")
@@ -241,6 +256,7 @@ elseif(APPLE)
     set_target_properties(gig PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "gig"
         MACOSX_BUNDLE_GUI_IDENTIFIER "stream.gig.app"
+        MACOSX_BUNDLE_ICON_FILE "gig.icns"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist.in"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${GIG_VERSION_3PART}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${GIG_VERSION}"
