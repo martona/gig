@@ -1,6 +1,14 @@
 # gig
 
-Windows-native streaming client for Frigate: it discovers every camera from the Frigate API and renders them all in a live Direct3D 11 grid, with click-to-zoom.
+**gig** /ɡɪɡ/ *noun*
+1. a light, narrow boat carried aboard a larger vessel, such as a frigate.
+2. a small native client that rides alongside Frigate, streaming its cameras.
+
+<p align="center">
+  <img src="resources/screenshot.png" alt="gig screenshot">
+</p>
+
+Native C++ streaming client for Frigate: it discovers every camera from the Frigate API and renders them all in a live Direct3D 11 grid, with click-to-zoom. Live view only.
 
 The native pipeline:
 
@@ -62,3 +70,9 @@ Server certificates are also checked against the requested **hostname**, and a *
 
 - Justified/aspect-aware layout and a hero+spotters mode beyond the uniform grid.
 - A renderer abstraction for non-Windows backends.
+
+## Contributing
+
+Issues and PRs welcome.
+
+This is a personal, non-commercial project. Copyright (C) 2026 [Marton Anka](https://anka.me)
