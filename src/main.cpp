@@ -518,6 +518,12 @@ int main(int argc, char** argv)
         // grid (cameras + optional diagnostics cell, below the toolbar strip); the
         // diagnostics cell isn't a camera, so it's excluded here. Used for both the
         // click-to-focus hit-test and the hover affordance.
+        // Cached grid layout for the hit-test: recompute only when the camera count
+        // or window/grid size changes, not on every mouse-motion event.
+        int hitCacheEffective = -1;
+        int hitCacheWidth = -1;
+        int hitCacheHeight = -1;
+        gig::GridLayout hitLayout;
         auto cameraTileAt = [&](float x, float y) -> int {
             int windowWidth = 0;
             int windowHeight = 0;
@@ -528,9 +534,15 @@ int main(int argc, char** argv)
             const std::size_t cameraCount = session.cameraCount();
             const int effective = static_cast<int>(cameraCount) + (cfg.showOverlay ? 1 : 0);
             const int gridTop = static_cast<int>(renderer->reservedTopLogical());
-            gig::GridLayout layout = gig::computeGridLayout(effective, windowWidth, windowHeight - gridTop);
-            for (std::size_t t = 0; t < layout.tiles.size() && t < cameraCount; ++t) {
-                gig::TileRect cell = layout.tiles[t];
+            const int gridHeight = windowHeight - gridTop;
+            if (effective != hitCacheEffective || windowWidth != hitCacheWidth || gridHeight != hitCacheHeight) {
+                hitLayout = gig::computeGridLayout(effective, windowWidth, gridHeight);
+                hitCacheEffective = effective;
+                hitCacheWidth = windowWidth;
+                hitCacheHeight = gridHeight;
+            }
+            for (std::size_t t = 0; t < hitLayout.tiles.size() && t < cameraCount; ++t) {
+                gig::TileRect cell = hitLayout.tiles[t];
                 cell.y += static_cast<float>(gridTop);
                 if (x >= cell.x && x < cell.x + cell.width && y >= cell.y && y < cell.y + cell.height) {
                     return static_cast<int>(t);

@@ -520,13 +520,20 @@ public:
                 // Reserve one extra cell for the synthetic diagnostics tile.
                 const bool showDiagnostics = overlayStats_.showDiagnostics;
                 const int effectiveCount = static_cast<int>(frames.size()) + (showDiagnostics ? 1 : 0);
-                gig::GridLayout layout = gig::computeGridLayout(
-                    effectiveCount,
-                    static_cast<int>(backBufferWidth_),
-                    gridHeight);
-                for (gig::TileRect& tile : layout.tiles) {
-                    tile.y += static_cast<float>(toolbarTop);
+                // Cache the layout: it depends only on (count, width, height), so
+                // recompute only when one changes -- not every render.
+                const int gridWidth = static_cast<int>(backBufferWidth_);
+                if (effectiveCount != gridCacheCount_ || gridWidth != gridCacheWidth_
+                    || gridHeight != gridCacheHeight_) {
+                    gridLayoutCache_ = gig::computeGridLayout(effectiveCount, gridWidth, gridHeight);
+                    for (gig::TileRect& tile : gridLayoutCache_.tiles) {
+                        tile.y += static_cast<float>(toolbarTop);
+                    }
+                    gridCacheCount_ = effectiveCount;
+                    gridCacheWidth_ = gridWidth;
+                    gridCacheHeight_ = gridHeight;
                 }
+                const gig::GridLayout& layout = gridLayoutCache_;
                 renderGridTiles(frames, layout);
 
                 // Zoom transition: a tile growing out of (or shrinking back into)
@@ -922,8 +929,16 @@ private:
 
     void updateColorMatrix(bool fullRange)
     {
+        // The matrix depends only on fullRange (near-constant across tiles), and the
+        // constant buffer retains its last value, so re-upload only when it flips --
+        // not once per NV12/YUV tile per frame.
+        const int want = fullRange ? 1 : 0;
+        if (want == lastColorMatrixFullRange_) {
+            return;
+        }
         const ColorMatrixConstants constants = yuvToRgbMatrix(fullRange);
         context_->UpdateSubresource(colorMatrixBuffer_.Get(), 0, nullptr, &constants, 0, 0);
+        lastColorMatrixFullRange_ = want;
     }
 
     void resetFrameTextures(TileState& tile)
@@ -1832,6 +1847,13 @@ private:
     ComPtr<ID3D11Buffer> vertexBuffer_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11Buffer> colorMatrixBuffer_;
+    int lastColorMatrixFullRange_ = -1; // last value uploaded to colorMatrixBuffer_ (-1 = none yet)
+
+    // Cached grid layout (recomputed only when count/width/height change).
+    gig::GridLayout gridLayoutCache_;
+    int gridCacheCount_ = -1;
+    int gridCacheWidth_ = -1;
+    int gridCacheHeight_ = -1;
 
     // Per-tile signal-animation driving state.
     std::vector<std::uint64_t> tileBytes_;   // latest per-camera cumulative bytes (from setTileActivity)

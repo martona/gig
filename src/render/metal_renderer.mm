@@ -338,7 +338,8 @@ public:
             const bool fullyFocused = focusedTile_ >= 0 && animProgress_ >= 1.0f
                 && focusedTile_ < static_cast<int>(frames.size());
 
-            gig::GridLayout layout;
+            static const gig::GridLayout kEmptyLayout;
+            const gig::GridLayout* layout = &kEmptyLayout;
             if (fullyFocused) {
                 renderSingleTile(encoder, static_cast<std::size_t>(focusedTile_), frames, fullPts);
                 if (hoveredTile_ == focusedTile_) {
@@ -349,15 +350,24 @@ public:
                 const int gridHeight = std::max(1, pointHeight - static_cast<int>(toolbarTop));
                 const bool showDiag = overlayStats_.showDiagnostics;
                 const int effective = static_cast<int>(frames.size()) + (showDiag ? 1 : 0);
-                layout = gig::computeGridLayout(effective, pointWidth, gridHeight);
-                for (gig::TileRect& tile : layout.tiles) {
-                    tile.y += toolbarTop;
+                // Cache the layout: it depends only on (count, width, height), so
+                // recompute only when one changes -- not every render.
+                if (effective != gridCacheCount_ || pointWidth != gridCacheWidth_
+                    || gridHeight != gridCacheHeight_) {
+                    gridLayoutCache_ = gig::computeGridLayout(effective, pointWidth, gridHeight);
+                    for (gig::TileRect& tile : gridLayoutCache_.tiles) {
+                        tile.y += toolbarTop;
+                    }
+                    gridCacheCount_ = effective;
+                    gridCacheWidth_ = pointWidth;
+                    gridCacheHeight_ = gridHeight;
                 }
-                renderGridTiles(encoder, frames, layout);
+                layout = &gridLayoutCache_;
+                renderGridTiles(encoder, frames, *layout);
 
                 if (animProgress_ > 0.0f && animTile_ >= 0 && animTile_ < static_cast<int>(frames.size())
-                    && animTile_ < static_cast<int>(layout.tiles.size())) {
-                    const gig::TileRect& cell = layout.tiles[static_cast<std::size_t>(animTile_)];
+                    && animTile_ < static_cast<int>(layout->tiles.size())) {
+                    const gig::TileRect& cell = layout->tiles[static_cast<std::size_t>(animTile_)];
                     const float e = smoothstep01(animProgress_);
                     const gig::TileRect grown {
                         std::lerp(cell.x, 0.0f, e), std::lerp(cell.y, 0.0f, e),
@@ -367,12 +377,12 @@ public:
                     drawTileContentAt(encoder, static_cast<std::size_t>(animTile_), grown);
                 }
                 if (animProgress_ == 0.0f && hoveredTile_ >= 0 && hoveredTile_ < static_cast<int>(frames.size())
-                    && hoveredTile_ < static_cast<int>(layout.tiles.size())) {
-                    drawHover(encoder, layout.tiles[static_cast<std::size_t>(hoveredTile_)]);
+                    && hoveredTile_ < static_cast<int>(layout->tiles.size())) {
+                    drawHover(encoder, layout->tiles[static_cast<std::size_t>(hoveredTile_)]);
                 }
             }
 
-            renderImGui(commandBuffer, encoder, pass, frames, layout, fullyFocused, fullPts);
+            renderImGui(commandBuffer, encoder, pass, frames, *layout, fullyFocused, fullPts);
 
             const bool zoomAnimating = animProgress_ != zoomTarget;
             const bool toolbarAnimating = focusedTile_ >= 0 && toolbarIdle_ < kToolbarHideDelay;
@@ -648,7 +658,10 @@ private:
 
     void drawTile(id<MTLRenderCommandEncoder> encoder, const TileState& tile)
     {
-        ColorMatrix matrix = yuvToRgb(tile.fullRange);
+        // Both matrices are constants; compute once, not per tile per frame.
+        static const ColorMatrix kLimited = yuvToRgb(false);
+        static const ColorMatrix kFull = yuvToRgb(true);
+        const ColorMatrix& matrix = tile.fullRange ? kFull : kLimited;
         switch (tile.format) {
         case VideoFrameFormat::BGRA:
             [encoder setRenderPipelineState:pipelineBgra_];
@@ -1142,6 +1155,13 @@ private:
     id<MTLTexture> iconLog_ = nil;
 
     std::vector<TileState> tiles_;
+
+    // Cached grid layout (recomputed only when count/width/height change).
+    gig::GridLayout gridLayoutCache_;
+    int gridCacheCount_ = -1;
+    int gridCacheWidth_ = -1;
+    int gridCacheHeight_ = -1;
+
     std::vector<std::uint64_t> tileBytes_;
     std::vector<std::string> cameraLabels_;
     OverlayStats overlayStats_;
