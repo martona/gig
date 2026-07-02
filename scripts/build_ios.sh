@@ -89,10 +89,10 @@ fi
 echo "[*] Building iOS simulator app ($CONFIG)..."
 xcodebuild "${xcodebuild_args[@]}" build
 
-APP_PATH="$SYMROOT/$CONFIG-iphonesimulator/$SCHEME.app"
+APP_PATH="$SYMROOT/$CONFIG-iphonesimulator/$TARGET.app"
 if [[ -d "$APP_PATH" ]]; then
     echo "[*] Build complete: $APP_PATH"
 else
     echo "[*] Build complete. Expected app path not found; searching under $BUILD_DIR..."
-    find "$BUILD_DIR" -name "$SCHEME.app" -type d -print | sed -n '1,20p'
+    find "$BUILD_DIR" -name "$TARGET.app" -type d -print | sed -n '1,20p'
 fi
