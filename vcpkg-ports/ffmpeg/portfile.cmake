@@ -754,14 +754,15 @@ string(APPEND OPTIONS " --disable-everything\
 # Hardware decode is platform-specific. Windows keeps the shared-device D3D11VA
 # zero-copy path (the *_d3d11va2 variants are the AV_PIX_FMT_D3D11 + hw_device_ctx
 # path the decoder selects); --disable-schannel there since we do no FFmpeg
-# networking. Apple gets the VideoToolbox zero-copy path (h264/hevc -> CVPixelBuffer,
-# sampled into Metal via CVMetalTextureCache). --enable-videotoolbox is already in
-# the OSX base options above, but --disable-everything strips the hwaccel components,
-# so re-enable them explicitly here.
+# networking. Apple (macOS + iOS) gets the VideoToolbox zero-copy path (h264/hevc ->
+# CVPixelBuffer, sampled into Metal via CVMetalTextureCache). --enable-videotoolbox is
+# already in the OSX/iOS base options above, but --disable-everything strips the hwaccel
+# components, so re-enable them explicitly here. The VideoToolbox decode path is
+# identical on macOS and iOS (CVPixelBuffers are IOSurface-backed / device-agnostic).
 if(VCPKG_TARGET_IS_WINDOWS)
     string(APPEND OPTIONS " --disable-schannel\
  --enable-hwaccel=h264_d3d11va,h264_d3d11va2,hevc_d3d11va,hevc_d3d11va2")
-elseif(VCPKG_TARGET_IS_OSX)
+elseif(VCPKG_TARGET_IS_OSX OR VCPKG_TARGET_IS_IOS)
     string(APPEND OPTIONS " --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox")
 endif()
 # ------------------------------------------------------------------------------

@@ -1,0 +1,452 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		BBBB0000000000000000BB01 /* log.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF01 /* log.cpp */; };
+		BBBB0000000000000000BB02 /* app_session.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF02 /* app_session.cpp */; };
+		BBBB0000000000000000BB03 /* camera_supervisor.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF03 /* camera_supervisor.cpp */; };
+		BBBB0000000000000000BB04 /* ffmpeg_decoder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF04 /* ffmpeg_decoder.cpp */; };
+		BBBB0000000000000000BB05 /* frigate_discovery.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF05 /* frigate_discovery.cpp */; };
+		BBBB0000000000000000BB06 /* stream_health.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF06 /* stream_health.cpp */; };
+		BBBB0000000000000000BB07 /* cert_pin.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF07 /* cert_pin.cpp */; };
+		BBBB0000000000000000BB08 /* cookie_jar.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF08 /* cookie_jar.cpp */; };
+		BBBB0000000000000000BB09 /* frigate_auth.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF09 /* frigate_auth.cpp */; };
+		BBBB0000000000000000BB0A /* http_client.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0A /* http_client.cpp */; };
+		BBBB0000000000000000BB0B /* tls_client.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0B /* tls_client.cpp */; };
+		BBBB0000000000000000BB0C /* tls_context.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0C /* tls_context.cpp */; };
+		BBBB0000000000000000BB0D /* tls_session_cache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0D /* tls_session_cache.cpp */; };
+		BBBB0000000000000000BB0E /* system_trust_ios.mm in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0E /* system_trust_ios.mm */; };
+		BBBB0000000000000000BB0F /* settings_store_mac.mm in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0F /* settings_store_mac.mm */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AAAA0000000000000000AA10 /* gig.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = gig.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FFFF0000000000000000FF01 /* log.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = log.cpp; path = ../src/log.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF02 /* app_session.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = app_session.cpp; path = ../src/app/app_session.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF03 /* camera_supervisor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = camera_supervisor.cpp; path = ../src/app/camera_supervisor.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF04 /* ffmpeg_decoder.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = ffmpeg_decoder.cpp; path = ../src/decode/ffmpeg_decoder.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF05 /* frigate_discovery.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = frigate_discovery.cpp; path = ../src/discovery/frigate_discovery.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF06 /* stream_health.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = stream_health.cpp; path = ../src/health/stream_health.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF07 /* cert_pin.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = cert_pin.cpp; path = ../src/net/cert_pin.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF08 /* cookie_jar.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = cookie_jar.cpp; path = ../src/net/cookie_jar.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF09 /* frigate_auth.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = frigate_auth.cpp; path = ../src/net/frigate_auth.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF0A /* http_client.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = http_client.cpp; path = ../src/net/http_client.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF0B /* tls_client.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = tls_client.cpp; path = ../src/net/tls_client.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF0C /* tls_context.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = tls_context.cpp; path = ../src/net/tls_context.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF0D /* tls_session_cache.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = tls_session_cache.cpp; path = ../src/net/tls_session_cache.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF0E /* system_trust_ios.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = system_trust_ios.mm; path = ../src/net/system_trust_ios.mm; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF0F /* settings_store_mac.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = settings_store_mac.mm; path = ../src/platform/settings_store_mac.mm; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		AAAA0000000000000000AA05 /* gig */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = gig;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AAAA0000000000000000AA08 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AAAA0000000000000000AA02 = {
+			isa = PBXGroup;
+			children = (
+				AAAA0000000000000000AA05 /* gig */,
+				AAAA0000000000000000AA04 /* core */,
+				AAAA0000000000000000AA03 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AAAA0000000000000000AA03 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AAAA0000000000000000AA10 /* gig.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		AAAA0000000000000000AA04 /* core */ = {
+			isa = PBXGroup;
+			children = (
+				FFFF0000000000000000FF01 /* log.cpp */,
+				FFFF0000000000000000FF02 /* app_session.cpp */,
+				FFFF0000000000000000FF03 /* camera_supervisor.cpp */,
+				FFFF0000000000000000FF04 /* ffmpeg_decoder.cpp */,
+				FFFF0000000000000000FF05 /* frigate_discovery.cpp */,
+				FFFF0000000000000000FF06 /* stream_health.cpp */,
+				FFFF0000000000000000FF07 /* cert_pin.cpp */,
+				FFFF0000000000000000FF08 /* cookie_jar.cpp */,
+				FFFF0000000000000000FF09 /* frigate_auth.cpp */,
+				FFFF0000000000000000FF0A /* http_client.cpp */,
+				FFFF0000000000000000FF0B /* tls_client.cpp */,
+				FFFF0000000000000000FF0C /* tls_context.cpp */,
+				FFFF0000000000000000FF0D /* tls_session_cache.cpp */,
+				FFFF0000000000000000FF0E /* system_trust_ios.mm */,
+				FFFF0000000000000000FF0F /* settings_store_mac.mm */,
+			);
+			name = core;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AAAA0000000000000000AA06 /* gig */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AAAA0000000000000000AA0B /* Build configuration list for PBXNativeTarget "gig" */;
+			buildPhases = (
+				AAAA0000000000000000AA07 /* Sources */,
+				AAAA0000000000000000AA08 /* Frameworks */,
+				AAAA0000000000000000AA09 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				AAAA0000000000000000AA05 /* gig */,
+			);
+			name = gig;
+			packageProductDependencies = (
+			);
+			productName = gig;
+			productReference = AAAA0000000000000000AA10 /* gig.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AAAA0000000000000000AA01 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					AAAA0000000000000000AA06 = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+				};
+			};
+			buildConfigurationList = AAAA0000000000000000AA0A /* Build configuration list for PBXProject "gig" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = AAAA0000000000000000AA02;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = AAAA0000000000000000AA03 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AAAA0000000000000000AA06 /* gig */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AAAA0000000000000000AA09 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AAAA0000000000000000AA07 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BBBB0000000000000000BB01 /* log.cpp in Sources */,
+				BBBB0000000000000000BB02 /* app_session.cpp in Sources */,
+				BBBB0000000000000000BB03 /* camera_supervisor.cpp in Sources */,
+				BBBB0000000000000000BB04 /* ffmpeg_decoder.cpp in Sources */,
+				BBBB0000000000000000BB05 /* frigate_discovery.cpp in Sources */,
+				BBBB0000000000000000BB06 /* stream_health.cpp in Sources */,
+				BBBB0000000000000000BB07 /* cert_pin.cpp in Sources */,
+				BBBB0000000000000000BB08 /* cookie_jar.cpp in Sources */,
+				BBBB0000000000000000BB09 /* frigate_auth.cpp in Sources */,
+				BBBB0000000000000000BB0A /* http_client.cpp in Sources */,
+				BBBB0000000000000000BB0B /* tls_client.cpp in Sources */,
+				BBBB0000000000000000BB0C /* tls_context.cpp in Sources */,
+				BBBB0000000000000000BB0D /* tls_session_cache.cpp in Sources */,
+				BBBB0000000000000000BB0E /* system_trust_ios.mm in Sources */,
+				BBBB0000000000000000BB0F /* settings_store_mac.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AAAA0000000000000000AA0C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AAAA0000000000000000AA0D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		AAAA0000000000000000AA0E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2262A4CP8N;
+				ENABLE_PREVIEWS = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GENERATE_INFOPLIST_FILE = NO;
+				"HEADER_SEARCH_PATHS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../src",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios/include",
+				);
+				"HEADER_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../src",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios-simulator/include",
+				);
+				INFOPLIST_FILE = Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios/lib",
+				);
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios-simulator/lib",
+				);
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Foundation,
+					"-framework",
+					Security,
+					"-framework",
+					UIKit,
+					"-framework",
+					Metal,
+					"-framework",
+					MetalKit,
+					"-framework",
+					QuartzCore,
+					"-framework",
+					CoreVideo,
+					"-framework",
+					CoreMedia,
+					"-framework",
+					VideoToolbox,
+					"-lavformat",
+					"-lavcodec",
+					"-lavutil",
+					"-lswscale",
+					"-lssl",
+					"-lcrypto",
+					"-lboost_json",
+					"-liconv",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = stream.gig.app;
+				PRODUCT_NAME = gig;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_OBJC_BRIDGING_HEADER = gig/Bridge/GigBridge.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AAAA0000000000000000AA0F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2262A4CP8N;
+				ENABLE_PREVIEWS = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GENERATE_INFOPLIST_FILE = NO;
+				"HEADER_SEARCH_PATHS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../src",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios/include",
+				);
+				"HEADER_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../src",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios-simulator/include",
+				);
+				INFOPLIST_FILE = Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios/lib",
+				);
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../vcpkg-installed/arm64-ios-simulator/lib",
+				);
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Foundation,
+					"-framework",
+					Security,
+					"-framework",
+					UIKit,
+					"-framework",
+					Metal,
+					"-framework",
+					MetalKit,
+					"-framework",
+					QuartzCore,
+					"-framework",
+					CoreVideo,
+					"-framework",
+					CoreMedia,
+					"-framework",
+					VideoToolbox,
+					"-lavformat",
+					"-lavcodec",
+					"-lavutil",
+					"-lswscale",
+					"-lssl",
+					"-lcrypto",
+					"-lboost_json",
+					"-liconv",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = stream.gig.app;
+				PRODUCT_NAME = gig;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_OBJC_BRIDGING_HEADER = gig/Bridge/GigBridge.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AAAA0000000000000000AA0A /* Build configuration list for PBXProject "gig" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AAAA0000000000000000AA0C /* Debug */,
+				AAAA0000000000000000AA0D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AAAA0000000000000000AA0B /* Build configuration list for PBXNativeTarget "gig" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AAAA0000000000000000AA0E /* Debug */,
+				AAAA0000000000000000AA0F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AAAA0000000000000000AA01 /* Project object */;
+}

@@ -15,7 +15,10 @@
       "name": "umbra",
       "platform": "windows"
     },
-    "sdl3",
+    {
+      "name": "sdl3",
+      "platform": "!ios"
+    },
     {
       "name": "imgui",
       "platform": "windows",

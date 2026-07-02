@@ -1,9 +1,15 @@
 /.vcpkg/
 /build/
 /vcpkg_installed/
+/vcpkg-installed/
 .DS_Store
 .claude/settings.local.json
 /docs/HANDOFF.md
 /docs/PLAN.md
+/docs/README-IOS.md
+
+# iOS: ios/gig.xcodeproj is committed; ignore only per-user Xcode state.
+/ios/**/xcuserdata/
+/ios/**/*.xcworkspace/xcuserdata/
 
 *.log
