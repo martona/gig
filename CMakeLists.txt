@@ -211,6 +211,9 @@ elseif(APPLE)
     # window/event layer is SDL3 (cross-platform).
     target_sources(gig PRIVATE
         src/render/metal_renderer.mm
+        # Shared Metal video scene (also compiled into the iOS app by ios/gig.xcodeproj).
+        src/render/metal_scene.mm
+        src/render/metal_scene.h
         src/platform/settings_store_mac.mm
         src/net/system_trust_mac.mm
         src/net/system_trust_mac.h

@@ -2,58 +2,62 @@
 //  MetalVideoView.swift
 //  gig
 //
-//  Stub Metal video surface: a CAMetalLayer-backed view that clears to near-black,
-//  mirroring the macOS port's first milestone (a clear-only Metal stub before the
-//  real renderer). The per-tile camera grid — porting render/metal_renderer.mm off
-//  SDL to host its CAMetalLayer here, plus VideoToolbox zero-copy sampling — is the
-//  next chunk. See ios/README.md.
+//  Hosts the CAMetalLayer the shared C++ Metal scene renders into (via
+//  VideoHost / GigRenderer.mm, CADisplayLink-driven). SwiftUI owns everything
+//  around it: the toolbar, the camera-label overlay, and the sheets.
 //
 
 import SwiftUI
-import MetalKit
+import UIKit
 
-struct MetalVideoView: UIViewRepresentable {
-    func makeUIView(context: Context) -> MetalClearUIView { MetalClearUIView() }
-    func updateUIView(_ uiView: MetalClearUIView, context: Context) {}
+struct VideoSurfaceView: UIViewRepresentable {
+    func makeUIView(context: Context) -> VideoHostUIView { VideoHostUIView() }
+    func updateUIView(_ uiView: VideoHostUIView, context: Context) {}
 }
 
-final class MetalClearUIView: UIView {
+final class VideoHostUIView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
-    private let device = MTLCreateSystemDefaultDevice()
-    private lazy var queue = device?.makeCommandQueue()
-    private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+    private var attached = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = UIColor(white: 0.06, alpha: 1.0)
-        metalLayer.device = device
-        metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
+        backgroundColor = UIColor(white: 0.01, alpha: 1.0)
+        isOpaque = true
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(onTap(_:))))
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let scale = window?.screen.scale ?? UIScreen.main.scale
-        metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(width: bounds.width * scale,
-                                         height: bounds.height * scale)
-        render()
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        let host = VideoHost.shared()
+        if window != nil {
+            if !attached {
+                host.attach(layer as! CAMetalLayer)
+                attached = true
+            }
+            pushSize()
+            host.start()
+        } else {
+            // View left the hierarchy (not app lifecycle -- that's scenePhase in
+            // ContentView). Stop the display link; the layer stays attached.
+            host.stop()
+        }
     }
 
-    private func render() {
-        guard let queue, let drawable = metalLayer.nextDrawable() else { return }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.06, green: 0.06, blue: 0.07, alpha: 1.0)
-        pass.colorAttachments[0].storeAction = .store
-        guard let buffer = queue.makeCommandBuffer(),
-              let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
-        encoder.endEncoding()
-        buffer.present(drawable)
-        buffer.commit()
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        pushSize()
+    }
+
+    private func pushSize() {
+        let scale = window?.screen.scale ?? UIScreen.main.scale
+        (layer as! CAMetalLayer).contentsScale = scale
+        VideoHost.shared().setViewSize(bounds.size, scale: scale)
+    }
+
+    @objc private func onTap(_ gesture: UITapGestureRecognizer) {
+        VideoHost.shared().handleTap(at: gesture.location(in: self))
     }
 }

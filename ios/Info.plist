@@ -26,8 +26,12 @@
 	<string>gig connects to your Frigate server on your local network to stream camera video.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
+		<!-- Single-scene: the video host (CAMetalLayer + display link + Metal
+		     scene) is a process-wide singleton, so a second iPad window would
+		     steal the surface and freeze the first. Matches the one-window
+		     desktop shells; revisit only with a per-view host. -->
 		<key>UIApplicationSupportsMultipleScenes</key>
-		<true/>
+		<false/>
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>

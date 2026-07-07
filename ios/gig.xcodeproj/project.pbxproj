@@ -22,6 +22,8 @@
 		BBBB0000000000000000BB0D /* tls_session_cache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0D /* tls_session_cache.cpp */; };
 		BBBB0000000000000000BB0E /* system_trust_ios.mm in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0E /* system_trust_ios.mm */; };
 		BBBB0000000000000000BB0F /* settings_store_mac.mm in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF0F /* settings_store_mac.mm */; };
+		BBBB0000000000000000BB10 /* grid_layout.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF10 /* grid_layout.cpp */; };
+		BBBB0000000000000000BB11 /* metal_scene.mm in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF11 /* metal_scene.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +43,8 @@
 		FFFF0000000000000000FF0D /* tls_session_cache.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = tls_session_cache.cpp; path = ../src/net/tls_session_cache.cpp; sourceTree = SOURCE_ROOT; };
 		FFFF0000000000000000FF0E /* system_trust_ios.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = system_trust_ios.mm; path = ../src/net/system_trust_ios.mm; sourceTree = SOURCE_ROOT; };
 		FFFF0000000000000000FF0F /* settings_store_mac.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = settings_store_mac.mm; path = ../src/platform/settings_store_mac.mm; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF10 /* grid_layout.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = grid_layout.cpp; path = ../src/render/grid_layout.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF11 /* metal_scene.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = metal_scene.mm; path = ../src/render/metal_scene.mm; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -97,6 +101,8 @@
 				FFFF0000000000000000FF0D /* tls_session_cache.cpp */,
 				FFFF0000000000000000FF0E /* system_trust_ios.mm */,
 				FFFF0000000000000000FF0F /* settings_store_mac.mm */,
+				FFFF0000000000000000FF10 /* grid_layout.cpp */,
+				FFFF0000000000000000FF11 /* metal_scene.mm */,
 			);
 			name = core;
 			sourceTree = "<group>";
@@ -190,6 +196,8 @@
 				BBBB0000000000000000BB0D /* tls_session_cache.cpp in Sources */,
 				BBBB0000000000000000BB0E /* system_trust_ios.mm in Sources */,
 				BBBB0000000000000000BB0F /* settings_store_mac.mm in Sources */,
+				BBBB0000000000000000BB10 /* grid_layout.cpp in Sources */,
+				BBBB0000000000000000BB11 /* metal_scene.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

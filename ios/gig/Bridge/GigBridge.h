@@ -33,7 +33,11 @@ NS_SWIFT_NAME(Settings)
 
 NS_SWIFT_NAME(SettingsBridge)
 @interface GIGSettingsBridge : NSObject
-+ (GIGSettings *)load NS_SWIFT_NAME(load());
+// Deliberately avoids `load` on BOTH sides of the bridge: the bare ObjC selector
+// `load` is the runtime's pre-main hook (it would run the settings store + a
+// Keychain read at image load), and the Swift name `load()` is ambiguous with
+// NSObject's inherited class func load(). Hence loadSettings / current().
++ (GIGSettings *)loadSettings NS_SWIFT_NAME(current());
 + (void)save:(GIGSettings *)settings NS_SWIFT_NAME(save(_:));
 @end
 
@@ -62,9 +66,23 @@ NS_SWIFT_NAME(Engine)
 // Tear the session down (joins the worker threads).
 - (void)disconnect NS_SWIFT_NAME(disconnect());
 
-// Cheap to poll for a status/stats refresh while connected.
+// Non-blocking status poll: if the engine is busy (a connect in flight on
+// another thread), returns the last known snapshot instead of waiting.
 - (GIGEngineStatus *)status NS_SWIFT_NAME(status());
 
 @end
 
+#pragma mark - Log
+
+// Snapshot of the in-app log ring (the same gig::LogBuffer the desktop log
+// view reads) for the SwiftUI log sheet.
+NS_SWIFT_NAME(LogBridge)
+@interface GIGLogBridge : NSObject
++ (NSString *)snapshotText;
++ (void)clear;
+@end
+
 NS_ASSUME_NONNULL_END
+
+// The iOS video host rides in the same bridging header (pure ObjC).
+#import "GigRenderer.h"

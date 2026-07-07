@@ -8,8 +8,15 @@
 //  the engine drives gig::AppSession exactly as main.cpp does on the desktop, minus
 //  the renderer (AppSession takes a null decode context, as Apple already does).
 //
+//  Threading: connect()/disconnect() take _mutex for their whole (network-slow)
+//  duration and run off the main thread. Everything the UI polls at frame rate --
+//  status(), and the Internal-category snapshot accessors the display-link render
+//  tick uses -- is NON-blocking (try_lock): while the engine is busy they return
+//  the last known status / empty frames instead of stalling the main thread.
+//
 
 #import "GigBridge.h"
+#import "GigBridgeInternal.h"
 
 #include "app/app_session.h"
 #include "log.hpp"
@@ -22,6 +29,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -30,9 +38,11 @@ NSString *toNs(const std::optional<std::string> &value)
     if (!value) {
         return @"";
     }
+    // initWithBytes: returns nil on invalid UTF-8; never hand nil to a nonnull
+    // property (Swift imports them non-optional and would trap).
     return [[NSString alloc] initWithBytes:value->data()
                                    length:static_cast<NSUInteger>(value->size())
-                                 encoding:NSUTF8StringEncoding];
+                                 encoding:NSUTF8StringEncoding] ?: @"";
 }
 
 std::string toStd(NSString *_Nullable text)
@@ -80,7 +90,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 @implementation GIGSettingsBridge
 
-+ (GIGSettings *)load
++ (GIGSettings *)loadSettings
 {
     auto store = gig::openSettingsStore();
     GIGSettings *settings = [GIGSettings new];
@@ -134,7 +144,10 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 #pragma mark - Engine
 
-@implementation GIGEngine {
+// Ivars live in the class extension (not the @implementation block) so the
+// Internal category below can reach them from the same translation unit.
+@interface GIGEngine () {
+  @package
     std::mutex _mutex;
     std::shared_ptr<gig::SettingsStore> _store;
     std::shared_ptr<gig::TlsSessionCache> _sessionCache;
@@ -142,6 +155,12 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     std::unique_ptr<gig::CertPinStore> _pinStore;
     std::unique_ptr<gig::AppSession> _session;
 }
+// Last successfully built status, returned by status() when the engine is busy.
+// atomic: written under _mutex, read without it.
+@property (atomic, strong, nullable) GIGEngineStatus *lastStatus;
+@end
+
+@implementation GIGEngine
 
 + (instancetype)shared
 {
@@ -193,11 +212,22 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     }
     gig::setCertPinStore(nullptr);
     _pinStore.reset();
+    self.lastStatus = nil;
 }
 
 - (GIGEngineStatus *)status
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        GIGEngineStatus *last = self.lastStatus;
+        if (last) {
+            return last;
+        }
+        GIGEngineStatus *busy = [GIGEngineStatus new];
+        busy.connected = NO;
+        busy.message = @"working";
+        return busy;
+    }
     return [self statusLocked:std::string("ok")];
 }
 
@@ -211,10 +241,72 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     out.liveCameraCount = _session ? _session->liveCameraCount() : 0;
     out.decodedFrames = _session ? _session->totalDecodedFrames() : 0;
     out.ingestKbps = _session ? _session->ingestKbps() : 0;
+    // Error text can carry raw server bytes (HTTP reason phrase); on invalid
+    // UTF-8 fall back rather than putting nil into the nonnull property.
     out.message = [[NSString alloc] initWithBytes:message.data()
                                            length:static_cast<NSUInteger>(message.size())
-                                         encoding:NSUTF8StringEncoding];
+                                         encoding:NSUTF8StringEncoding]
+        ?: @"(non-UTF-8 error message)";
+    self.lastStatus = out;
     return out;
+}
+
+@end
+
+#pragma mark - Engine internals (renderer host)
+
+@implementation GIGEngine (Internal)
+
+- (std::vector<std::shared_ptr<VideoFrame>>)snapshotFramesInternal
+{
+    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !_session) {
+        return {};
+    }
+    return _session->snapshotFrames();
+}
+
+- (std::vector<std::uint64_t>)tileByteCountsInternal
+{
+    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !_session) {
+        return {};
+    }
+    return _session->tileByteCounts();
+}
+
+- (std::vector<std::string>)cameraLabelsInternal
+{
+    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !_session) {
+        return {};
+    }
+    return _session->cameraLabels();
+}
+
+@end
+
+#pragma mark - Log
+
+@implementation GIGLogBridge
+
++ (NSString *)snapshotText
+{
+    std::vector<std::string> lines;
+    gig::LogBuffer::instance().snapshot(lines);
+    std::string joined;
+    for (const std::string &line : lines) {
+        joined += line;
+        joined.push_back('\n');
+    }
+    return [[NSString alloc] initWithBytes:joined.data()
+                                   length:static_cast<NSUInteger>(joined.size())
+                                 encoding:NSUTF8StringEncoding] ?: @"";
+}
+
++ (void)clear
+{
+    gig::LogBuffer::instance().clear();
 }
 
 @end
