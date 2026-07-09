@@ -58,6 +58,15 @@
     NSArray<GIGTileLabel *> *_labels;
     std::string _overlayFingerprint;
     BOOL _zoomedFlag;
+
+    // Dirty-render gate (the desktop run loop's on-demand rendering, ported to
+    // the display-link tick): encode a pass only when a new decoded frame
+    // arrived, the scene reported an animation in flight last frame (signal
+    // scope / fade / zoom), or an input/layout change forced it. A static grid
+    // of low-fps cameras then costs GPU work only when pixels actually change.
+    std::uint64_t _lastFrameStamp;
+    BOOL _lastAnimating;
+    BOOL _needsRender;
 }
 
 + (instancetype)shared
@@ -73,6 +82,8 @@
     if ((self = [super init])) {
         _labels = @[];
         _scale = 1.0;
+        _lastAnimating = YES; // render until the first scene report says idle
+        _needsRender = YES;
     }
     return self;
 }
@@ -115,6 +126,9 @@
 
 - (void)setViewPointSize:(CGSize)size scale:(CGFloat)scale
 {
+    if (!CGSizeEqualToSize(size, _pointSize) || scale != _scale) {
+        _needsRender = YES;
+    }
     _pointSize = size;
     _scale = (scale > 0.0) ? scale : 1.0;
 }
@@ -127,7 +141,11 @@
     GIGDisplayLinkProxy *proxy = [GIGDisplayLinkProxy new];
     proxy.host = self;
     _displayLink = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(tick:)];
+    // Cap at 60: camera streams are <=30 fps, so a 120 Hz ProMotion cadence buys
+    // nothing; the low bound lets the display idle down between dirty frames.
+    _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(10, 60, 60);
     [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    _needsRender = YES; // fresh drawable after a resume
 }
 
 - (void)stop
@@ -141,6 +159,7 @@
     if (!_scene) {
         return;
     }
+    _needsRender = YES; // focus change animates from the next tick
     if (_scene->focusedTile() >= 0) {
         _scene->setFocusedTile(-1); // any tap returns to the grid
         return;
@@ -175,6 +194,18 @@
     @autoreleasepool {
         GIGEngine *engine = [GIGEngine shared];
         const std::vector<std::shared_ptr<VideoFrame>> frames = [engine snapshotFramesInternal];
+
+        // Dirty gate: skip the whole encode when nothing can have changed on
+        // screen. A frameless tile's signal scope keeps the scene animating, so
+        // idle here means genuinely static video (or disconnected + cleared).
+        std::uint64_t stamp = static_cast<std::uint64_t>(frames.size()) * 1000003ull;
+        for (const std::shared_ptr<VideoFrame> &frame : frames) {
+            stamp = stamp * 31ull + (frame ? frame->index + 1ull : 0ull);
+        }
+        if (!_needsRender && !_lastAnimating && stamp == _lastFrameStamp) {
+            return;
+        }
+
         _scene->setTileActivity([engine tileByteCountsInternal]);
 
         _layer.drawableSize = CGSizeMake(pixelW, pixelH);
@@ -201,6 +232,10 @@
         [encoder endEncoding];
         [commandBuffer presentDrawable:drawable];
         [commandBuffer commit];
+
+        _lastFrameStamp = stamp;
+        _lastAnimating = scene.animating ? YES : NO;
+        _needsRender = NO;
 
         [self updateOverlay:scene cameraCount:frames.size() engine:engine];
     }

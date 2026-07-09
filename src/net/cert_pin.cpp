@@ -9,6 +9,13 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include "net/system_trust_mac.h" // systemTrustEvaluateChain (iOS SecTrust fallback)
+#endif
+#endif
+
 namespace gig {
 namespace {
 
@@ -89,6 +96,14 @@ int hostExIndex()
     return index;
 }
 
+// Marks an SSL_CTX as trusting the OS store (vs an explicit PEM ca). Non-null =
+// system store. Read by the verify callback to gate the iOS SecTrust fallback.
+int systemStoreExIndex()
+{
+    static const int index = SSL_CTX_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+
 // Server-cert verify callback (network thread). Pinned leaf -> trust regardless
 // of chain/hostname; otherwise defer to normal verification, and on failure
 // stage the cert for the UI to offer pinning.
@@ -110,6 +125,22 @@ int pinVerifyCallback(int preverifyOk, X509_STORE_CTX* storeCtx)
     if (preverifyOk) {
         return 1; // normal verification (chain + hostname) passed
     }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // iOS, SYSTEM-STORE MODE ONLY: OpenSSL's store holds no OS roots (they can't
+    // be enumerated there), so a chain failure is the NORMAL case for a publicly-
+    // or user-profile-trusted cert. Ask the OS before treating it as pinnable:
+    // SecTrust evaluates the presented chain + hostname against iOS's system and
+    // user-installed roots. With an explicit PEM `ca` configured the fallback is
+    // OFF -- the private CA is authoritative and a mismatch must land in the pin
+    // prompt, exactly as on desktop (else an OS-trusted cert could silently
+    // bypass the CA restriction and the changed-pin warning).
+    SSL_CTX* sslCtx = SSL_get_SSL_CTX(ssl);
+    const bool useSystemStore = sslCtx && SSL_CTX_get_ex_data(sslCtx, systemStoreExIndex()) != nullptr;
+    if (useSystemStore && systemTrustEvaluateChain(storeCtx, *host)) {
+        return 1;
+    }
+#endif
 
     const int error = X509_STORE_CTX_get_error(storeCtx);
     pins->recordPending(*host, spki, error, subjectOf(leaf), notAfterOf(leaf));
@@ -165,6 +196,16 @@ std::optional<PendingPinDecision> CertPinStore::takePending()
     std::lock_guard<std::mutex> lock(mutex_);
     std::optional<PendingPinDecision> out = pending_;
     pending_.reset();
+    if (!out) {
+        return std::nullopt;
+    }
+    // Drop stale stagings: while an accept/decline was in flight, a concurrent
+    // failed handshake can have re-staged the SAME cert (recordPending's dedupe
+    // only sees the current -- already-taken -- slot). Surfacing it again reads
+    // as the user's decision not having worked.
+    if (isPinned(out->host, out->spki) || declined_.count(declinedKey(out->host, out->spki))) {
+        return std::nullopt;
+    }
     return out;
 }
 
@@ -181,6 +222,11 @@ void CertPinStore::declinePin(const PendingPinDecision& decision)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     declined_.insert(declinedKey(decision.host, decision.spki));
+    // A copy of this cert re-staged while the decision was pending must not
+    // resurface after the decline.
+    if (pending_ && pending_->host == decision.host && pending_->spki == decision.spki) {
+        pending_.reset();
+    }
 }
 
 void setCertPinStore(CertPinStore* store)
@@ -193,9 +239,11 @@ CertPinStore* certPinStore()
     return g_pinStore;
 }
 
-void installPinningVerify(SSL_CTX* ctx)
+void installPinningVerify(SSL_CTX* ctx, bool useSystemStore)
 {
     if (certPinStore()) {
+        // Non-null token = system-store mode (read by the iOS SecTrust fallback).
+        SSL_CTX_set_ex_data(ctx, systemStoreExIndex(), useSystemStore ? ctx : nullptr);
         SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, pinVerifyCallback);
     }
 }

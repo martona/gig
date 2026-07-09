@@ -43,7 +43,7 @@ struct SettingsView: View {
                 } header: {
                     Text("TLS")
                 } footer: {
-                    Text("iOS can't read the system trust store yet — for a self-signed Frigate use a PEM CA, a certificate pin, or Insecure.")
+                    Text("Certificates trusted by iOS (public CAs or an installed CA profile) work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
                 }
             }
             .navigationTitle("Settings")

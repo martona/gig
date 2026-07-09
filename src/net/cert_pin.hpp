@@ -61,7 +61,11 @@ CertPinStore* certPinStore();
 
 // Install the pinning server-verify callback on ctx (no-op if no store is
 // registered). Called from configureSslContext when server verification is on.
-void installPinningVerify(SSL_CTX* ctx);
+// `useSystemStore` records whether this context trusts the OS store (vs an
+// explicit PEM ca): on iOS the callback consults the OS trust (SecTrust) as a
+// fallback ONLY in system-store mode -- a user-configured private CA must stay
+// authoritative, exactly as on desktop.
+void installPinningVerify(SSL_CTX* ctx, bool useSystemStore);
 
 // Per-connection: turn on hostname verification (SSL_set1_host) and stash the
 // host so the callback can scope/label the pin. Call after SNI, before the

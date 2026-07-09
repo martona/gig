@@ -6,11 +6,17 @@
 //  the desktop imgui toolbar's replacement), the Metal video surface (the
 //  shared C++ scene: live grid, signal scope, tap-to-zoom), and the camera
 //  labels as SwiftUI overlays -- positioned from the scene's tile layout and
-//  hidden while the zoom animation runs (they can't track the in-scene
-//  transition). Settings and the log ring are sheets.
+//  hidden while the zoom animation runs. Settings and the log ring are sheets;
+//  an untrusted-certificate decision (trust-on-first-use pin) is an alert.
+//
+//  Lifecycle policy: on .background the session is torn down cleanly (iOS
+//  suspends the process anyway -- a deliberate disconnect beats frozen sockets)
+//  and reconnects automatically on return; the screen stays awake while
+//  connected and active (it's a camera wall).
 //
 
 import SwiftUI
+import UIKit
 
 @MainActor
 final class EngineModel: ObservableObject {
@@ -18,21 +24,100 @@ final class EngineModel: ObservableObject {
     @Published var connected = false
     @Published var live = 0
     @Published var total = 0
-    @Published var detail = ""   // failure reason ("" when healthy)
+    @Published var detail = ""            // failure reason ("" when healthy)
+    @Published var pendingPin: PendingPin? // untrusted cert awaiting a decision
+
+    private var resumeOnActive = false
+
+    // Engine lifecycle operations (connect / disconnect / pin decisions) run off
+    // the main thread AND strictly in submission order: each task awaits its
+    // predecessor. Without this, a background-disconnect and a foreground-
+    // reconnect race on the engine mutex (std::mutex is unfair), and the
+    // disconnect can tear down the session the reconnect just built.
+    private var lifecycleTask: Task<Void, Never>?
+    // Bumped by every state-changing operation; a finishing connect whose
+    // generation is stale (superseded by a background or a newer attempt) must
+    // not overwrite the UI state.
+    private var generation = 0
+
+    private func runExclusive(_ op: @escaping @Sendable () async -> Void) {
+        let previous = lifecycleTask
+        lifecycleTask = Task.detached(priority: .userInitiated) {
+            await previous?.value
+            await op()
+        }
+    }
 
     func connect() {
         guard !connecting else { return }
         connecting = true
         detail = ""
-        Task.detached(priority: .userInitiated) {
+        generation += 1
+        let gen = generation
+        runExclusive {
             let status = Engine.shared().connect()
-            await MainActor.run { self.apply(status, fromConnect: true) }
+            await MainActor.run { self.finishConnect(status, generation: gen) }
         }
     }
 
     func refresh() {
         guard !connecting else { return }
         apply(Engine.shared().status(), fromConnect: false)
+        checkPendingPin() // a cert can change mid-session (pinned cert rotated)
+    }
+
+    // MARK: certificate pin decision
+    // The pin identity comes from the alert's presented value, NOT from
+    // pendingPin: SwiftUI's isPresented write and the button action have no
+    // documented ordering, so the action must not depend on live state.
+
+    func acceptPendingPin(_ pin: PendingPin) {
+        pendingPin = nil
+        connecting = true
+        detail = ""
+        generation += 1
+        let gen = generation
+        runExclusive {
+            let status = Engine.shared().acceptPendingPin(host: pin.host, fingerprint: pin.fingerprint)
+            await MainActor.run { self.finishConnect(status, generation: gen) }
+        }
+    }
+
+    func declinePendingPin(_ pin: PendingPin) {
+        pendingPin = nil
+        runExclusive {
+            Engine.shared().declinePendingPin(host: pin.host, fingerprint: pin.fingerprint)
+        }
+    }
+
+    // MARK: scene-phase policy (background -> clean disconnect, resume on return)
+
+    func enterBackground() {
+        guard connected || connecting else { return }
+        resumeOnActive = true
+        generation += 1 // invalidate any in-flight connect's result
+        connecting = false
+        connected = false
+        live = 0
+        total = 0
+        runExclusive {
+            Engine.shared().disconnect()
+        }
+    }
+
+    func becomeActive() {
+        if resumeOnActive {
+            resumeOnActive = false
+            connect() // queued behind the background disconnect by runExclusive
+        }
+    }
+
+    // MARK: internals
+
+    private func finishConnect(_ status: EngineStatus, generation gen: Int) {
+        guard gen == generation else { return } // superseded; don't touch UI state
+        apply(status, fromConnect: true)
+        checkPendingPin()
     }
 
     private func apply(_ status: EngineStatus, fromConnect: Bool) {
@@ -45,6 +130,11 @@ final class EngineModel: ObservableObject {
         } else if status.connected {
             detail = ""
         }
+    }
+
+    private func checkPendingPin() {
+        guard pendingPin == nil else { return }
+        pendingPin = Engine.shared().takePendingPin()
     }
 }
 
@@ -103,17 +193,41 @@ struct ContentView: View {
         .sheet(isPresented: $showLog) {
             LogView()
         }
+        .alert(
+            engine.pendingPin?.changed == true ? "PINNED CERTIFICATE CHANGED" : "Untrusted certificate",
+            isPresented: Binding(
+                get: { engine.pendingPin != nil },
+                // Pure presentation state — NO decision side effect here. SwiftUI
+                // may write false BEFORE the tapped button's action runs, so a
+                // decline here would override a Trust & Pin tap. On iOS an alert
+                // is only dismissible via its buttons, which carry the decision.
+                set: { if !$0 { engine.pendingPin = nil } }
+            ),
+            presenting: engine.pendingPin
+        ) { pin in
+            // Decisions act on the presented value, not live state (see above).
+            Button("Trust & Pin", role: .destructive) { engine.acceptPendingPin(pin) }
+            Button("Don't Trust", role: .cancel) { engine.declinePendingPin(pin) }
+        } message: { pin in
+            Text(pinMessage(pin))
+        }
         .onAppear(perform: autoStart)
         .onReceive(ticker) { _ in engine.refresh() }
+        .onChange(of: engine.connected) { _ in updateIdleTimer() }
         .onChange(of: scenePhase) { phase in
-            // Render only while active; the session itself stays up (iOS suspends
-            // the process shortly after backgrounding anyway; the health poll
-            // self-heals on return). A deliberate pause-on-background policy for
-            // the decoders is a follow-up.
             switch phase {
-            case .active: VideoHost.shared().start()
-            default: VideoHost.shared().stop()
+            case .active:
+                VideoHost.shared().start()
+                engine.becomeActive()
+            case .background:
+                // Clean teardown beats iOS freezing threads mid-flight; the
+                // session auto-reconnects on return (see EngineModel).
+                VideoHost.shared().stop()
+                engine.enterBackground()
+            default: // .inactive: app switcher / Control Center -- just pause rendering
+                VideoHost.shared().stop()
             }
+            updateIdleTimer()
         }
     }
 
@@ -209,7 +323,30 @@ struct ContentView: View {
         .ignoresSafeArea(edges: .bottom)
     }
 
-    // MARK: startup
+    // MARK: helpers
+
+    private func pinMessage(_ pin: PendingPin) -> String {
+        var lines: [String] = []
+        if pin.changed {
+            lines.append("The pinned certificate for \(pin.host) has CHANGED. "
+                + "This happens on a key rotation — or interception.")
+            lines.append("was  \(String(pin.previousFingerprint.prefix(16)))…")
+            lines.append("now  \(String(pin.fingerprint.prefix(16)))…")
+        } else {
+            lines.append("\(pin.host) presented a certificate that can't be verified"
+                + (pin.reason.isEmpty ? "." : " (\(pin.reason))."))
+            lines.append("SPKI \(String(pin.fingerprint.prefix(16)))…")
+        }
+        if !pin.subject.isEmpty { lines.append(pin.subject) }
+        if !pin.expires.isEmpty { lines.append("Expires \(pin.expires)") }
+        lines.append("Pinning trusts this exact certificate from now on.")
+        return lines.joined(separator: "\n")
+    }
+
+    // Camera wall: keep the screen awake while actually showing video.
+    private func updateIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = engine.connected && scenePhase == .active
+    }
 
     private func autoStart() {
         guard !didAutoStart else { return }

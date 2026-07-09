@@ -126,6 +126,21 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 @end
 
+#pragma mark - Pending pin
+
+@interface GIGPendingPin ()
+@property (nonatomic, copy) NSString *host;
+@property (nonatomic, copy) NSString *subject;
+@property (nonatomic, copy) NSString *fingerprint;
+@property (nonatomic, copy) NSString *expires;
+@property (nonatomic, copy) NSString *reason;
+@property (nonatomic, assign) BOOL changed;
+@property (nonatomic, copy) NSString *previousFingerprint;
+@end
+
+@implementation GIGPendingPin
+@end
+
 #pragma mark - Engine status
 
 // Redeclare the header's readonly properties as readwrite so the engine can fill
@@ -173,24 +188,37 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 - (GIGEngineStatus *)connect
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    return [self connectLocked];
+}
 
+// Bring the session up from the persisted config. Caller holds _mutex.
+- (GIGEngineStatus *)connectLocked
+{
     // Fresh session each connect (mirrors a desktop reconnect).
     if (_session) {
         _session->stop();
         _session.reset();
     }
 
-    _store = gig::openSettingsStore();
+    if (!_store) {
+        _store = gig::openSettingsStore();
+    }
 
-    // Cert pinning is process-wide; the OpenSSL verify callback reaches it via
-    // certPinStore(). Register before any TLS connection. (Interactive pin prompts
-    // aren't wired into the iOS UI yet — a pending pin surfaces as a connect
-    // failure for now.)
-    _pinStore = std::make_unique<gig::CertPinStore>(_store);
-    gig::setCertPinStore(_pinStore.get());
-
-    _sessionCache = std::make_shared<gig::TlsSessionCache>();
-    _cookieJar = std::make_shared<gig::CookieJar>();
+    // App-lifetime singletons, created once (desktop parity): the pin store keeps
+    // the session-declined set across reconnects (its persisted pins live in the
+    // settings store either way), and the TLS session cache + cookie jar preserve
+    // resumption/auth across reconnects. Cert pinning is process-wide; the OpenSSL
+    // verify callback reaches it via certPinStore() — register before any TLS.
+    if (!_pinStore) {
+        _pinStore = std::make_unique<gig::CertPinStore>(_store);
+        gig::setCertPinStore(_pinStore.get());
+    }
+    if (!_sessionCache) {
+        _sessionCache = std::make_shared<gig::TlsSessionCache>();
+    }
+    if (!_cookieJar) {
+        _cookieJar = std::make_shared<gig::CookieJar>();
+    }
     // Null decode context: the VideoToolbox/software decode path needs nothing
     // from a renderer (same as Apple desktop — see main.cpp).
     _session = std::make_unique<gig::AppSession>(nullptr, _sessionCache, _cookieJar);
@@ -210,8 +238,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
         _session->stop();
         _session.reset();
     }
-    gig::setCertPinStore(nullptr);
-    _pinStore.reset();
+    // The pin store / session cache / cookie jar are app-lifetime (see
+    // connectLocked) and survive a disconnect — no TLS runs while stopped.
     self.lastStatus = nil;
 }
 
@@ -249,6 +277,64 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
         ?: @"(non-UTF-8 error message)";
     self.lastStatus = out;
     return out;
+}
+
+#pragma mark Pin flow
+
+- (nullable GIGPendingPin *)takePendingPin
+{
+    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !_pinStore) {
+        return nil; // busy (connect in flight) or pinning not initialized yet
+    }
+    std::optional<gig::PendingPinDecision> pending = _pinStore->takePending();
+    if (!pending) {
+        return nil;
+    }
+
+    NSString *(^ns)(const std::string &) = ^NSString *(const std::string &value) {
+        return [[NSString alloc] initWithBytes:value.data()
+                                       length:static_cast<NSUInteger>(value.size())
+                                     encoding:NSUTF8StringEncoding] ?: @"";
+    };
+    GIGPendingPin *out = [GIGPendingPin new];
+    out.host = ns(pending->host);
+    out.subject = ns(pending->subject);
+    out.fingerprint = ns(pending->spki);
+    out.expires = ns(pending->notAfter);
+    out.reason = ns(pending->errorText);
+    out.changed = pending->changed ? YES : NO;
+    out.previousFingerprint = ns(pending->previousSpki);
+    return out;
+}
+
+// acceptPin/declinePin only need the identity (host + SPKI), so the decision is
+// rebuilt from what the UI displayed — no state held here between take and
+// resolve, and a slot re-staged mid-alert can't redirect the user's decision.
+
+- (GIGEngineStatus *)acceptPendingPinForHost:(NSString *)host fingerprint:(NSString *)fingerprint
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_pinStore && host.length > 0 && fingerprint.length > 0) {
+        gig::PendingPinDecision decision;
+        decision.host = toStd(host);
+        decision.spki = toStd(fingerprint);
+        _pinStore->acceptPin(decision);
+        gig::logInfo() << "pinned certificate for " << decision.host;
+    }
+    return [self connectLocked]; // retry with the pin in place
+}
+
+- (void)declinePendingPinForHost:(NSString *)host fingerprint:(NSString *)fingerprint
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_pinStore && host.length > 0 && fingerprint.length > 0) {
+        gig::PendingPinDecision decision;
+        decision.host = toStd(host);
+        decision.spki = toStd(fingerprint);
+        _pinStore->declinePin(decision);
+        gig::logWarning() << "declined certificate for " << decision.host;
+    }
 }
 
 @end

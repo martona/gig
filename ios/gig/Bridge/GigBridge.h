@@ -43,6 +43,21 @@ NS_SWIFT_NAME(SettingsBridge)
 
 #pragma mark - Engine
 
+// An untrusted server certificate staged by the TLS layer, awaiting the user's
+// trust-on-first-use decision (the iOS analog of the desktop pin prompt).
+// `changed` means a DIFFERENT certificate is already pinned for this host --
+// a renewal, or interception; the UI warns louder.
+NS_SWIFT_NAME(PendingPin)
+@interface GIGPendingPin : NSObject
+@property (nonatomic, copy, readonly) NSString *host;
+@property (nonatomic, copy, readonly) NSString *subject;
+@property (nonatomic, copy, readonly) NSString *fingerprint;         // SPKI-SHA256, hex
+@property (nonatomic, copy, readonly) NSString *expires;             // cert notAfter
+@property (nonatomic, copy, readonly) NSString *reason;              // X509 error text
+@property (nonatomic, assign, readonly) BOOL changed;
+@property (nonatomic, copy, readonly) NSString *previousFingerprint; // when changed
+@end
+
 NS_SWIFT_NAME(EngineStatus)
 @interface GIGEngineStatus : NSObject
 @property (nonatomic, assign, readonly) BOOL connected;
@@ -69,6 +84,24 @@ NS_SWIFT_NAME(Engine)
 // Non-blocking status poll: if the engine is busy (a connect in flight on
 // another thread), returns the last known snapshot instead of waiting.
 - (GIGEngineStatus *)status NS_SWIFT_NAME(status());
+
+// Certificate-pin flow: poll after a failed connect (and on the status ticker,
+// for a mid-session cert change). Non-blocking (nil when busy). Resolve the
+// decision with exactly one of the two calls below, passing back the identity
+// (host + fingerprint) of the pin the user actually saw — the staged slot can
+// be re-staged/replaced while an alert is up, so the decision must not depend
+// on whatever is staged at resolve time.
+- (nullable GIGPendingPin *)takePendingPin;
+
+// Persist the pin and reconnect (slow, network — call off the main thread).
+- (GIGEngineStatus *)acceptPendingPinForHost:(NSString *)host
+                                 fingerprint:(NSString *)fingerprint
+    NS_SWIFT_NAME(acceptPendingPin(host:fingerprint:));
+
+// Decline: remembered for the session (no re-prompt for this exact cert).
+- (void)declinePendingPinForHost:(NSString *)host
+                     fingerprint:(NSString *)fingerprint
+    NS_SWIFT_NAME(declinePendingPin(host:fingerprint:));
 
 @end
 
