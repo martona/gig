@@ -37,6 +37,7 @@ public:
         float reservedTopPoints = 0.0f; // chrome strip above the grid (grid view only)
         bool extraCell = false;        // reserve one trailing grid cell (mac diagnostics tile)
         float dimFactor = 1.0f;        // idle-dim luminance multiplier (1 = normal)
+        float orbitStepSeconds = 40.0f; // burn-in pixel-orbit step interval (>= 1)
     };
 
     // Snapshot of what the scene drew, for the host's chrome pass. `layout` is in
@@ -163,6 +164,7 @@ private:
     std::size_t lastCameraCount_ = 0;
     std::chrono::steady_clock::time_point orbitEpoch_;
     bool haveOrbitEpoch_ = false;
+    double orbitStepSeconds_ = 40.0; // set each render() from Params
 
     std::vector<std::uint64_t> tileBytes_;
 

@@ -3,6 +3,7 @@
 #include "app/app_session.h"
 
 #include <algorithm>
+#include <functional>
 #include <string>
 
 #import <Cocoa/Cocoa.h>
@@ -59,6 +60,24 @@
 }
 @end
 
+// Idle-dim slider: updates its "NN%" label and live-previews the dim on the main
+// view (the block hops to the C++ preview callback) as the slider moves.
+@interface GigDimSliderHelper : NSObject
+@property (nonatomic, weak) NSTextField* valueLabel;
+@property (nonatomic, copy) void (^onChange)(int percent);
+@end
+
+@implementation GigDimSliderHelper
+- (void)changed:(NSSlider*)sender
+{
+    const int percent = static_cast<int>(std::lround(sender.doubleValue));
+    self.valueLabel.stringValue = [NSString stringWithFormat:@"%d%%", percent];
+    if (self.onChange) {
+        self.onChange(percent);
+    }
+}
+@end
+
 namespace gig {
 namespace {
 
@@ -92,12 +111,13 @@ static int dimDelayIndexFor(int seconds)
 }
 
 void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
-                        int& dimLevelPercent, int& dimDelaySeconds)
+                        int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        const std::function<void(int)>& onDimPreview)
 {
     @autoreleasepool {
         constexpr CGFloat kWidth = 560;
         constexpr CGFloat kRow = 30;
-        const CGFloat height = 560;
+        const CGFloat height = 620;
 
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWidth, height)
                                                        styleMask:NSWindowStyleMaskTitled
@@ -191,8 +211,22 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
         row();
 
         section(@"Screen protection");
-        label(@"Dim to (%):");
-        NSTextField* dimLevelField = field(std::to_string(dimLevelPercent), 80);
+        label(@"Dim to:");
+        NSSlider* dimSlider = [NSSlider sliderWithValue:std::clamp(dimLevelPercent, 10, 100)
+                                               minValue:10 maxValue:100 target:nil action:nil];
+        dimSlider.frame = NSMakeRect(174, y - 2, kWidth - 174 - 60, 24);
+        dimSlider.continuous = YES;
+        [content addSubview:dimSlider];
+        NSTextField* dimValueLabel =
+            [NSTextField labelWithString:[NSString stringWithFormat:@"%d%%", std::clamp(dimLevelPercent, 10, 100)]];
+        dimValueLabel.frame = NSMakeRect(kWidth - 52, y, 44, 20);
+        [content addSubview:dimValueLabel];
+        GigDimSliderHelper* dimHelper = [[GigDimSliderHelper alloc] init];
+        dimHelper.valueLabel = dimValueLabel;
+        dimHelper.onChange = ^(int pct) { if (onDimPreview) onDimPreview(pct); };
+        dimSlider.target = dimHelper;
+        dimSlider.action = @selector(changed:);
+        [browseHelpers addObject:dimHelper]; // keep alive for the modal's lifetime
         row();
         label(@"Dim after:");
         NSPopUpButton* dimDelayPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(174, y - 2, 220, 26) pullsDown:NO];
@@ -200,6 +234,14 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
         [dimDelayPopup selectItemAtIndex:dimDelayIndexFor(dimDelaySeconds)];
         [content addSubview:dimDelayPopup];
         row();
+        label(@"Pixel-shift step (s):");
+        NSTextField* orbitField = field(std::to_string(orbitStepSeconds), 80);
+        row();
+        NSTextField* orbitNote = [NSTextField labelWithString:@"The image nudges ~1px every N s to spread OLED wear (lower = more motion)."];
+        orbitNote.frame = NSMakeRect(16, y, kWidth - 32, 16);
+        orbitNote.textColor = [NSColor secondaryLabelColor];
+        [content addSubview:orbitNote];
+        y -= 22;
 
         section(@"Advanced connection");
         label(@"Stream template:");
@@ -232,13 +274,14 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
         config.softwareDecode = (softwareCheck.state == NSControlStateValueOn);
         showOverlay = (overlayCheck.state == NSControlStateValueOn);
         labelMode = static_cast<int>(labelPopup.indexOfSelectedItem);
-        dimLevelPercent = std::clamp(static_cast<int>(dimLevelField.intValue), 10, 100);
+        dimLevelPercent = std::clamp(static_cast<int>(std::lround(dimSlider.doubleValue)), 10, 100);
         {
             const NSInteger i = dimDelayPopup.indexOfSelectedItem;
             if (i >= 0 && i < static_cast<NSInteger>(sizeof(kDimDelaySeconds) / sizeof(int))) {
                 dimDelaySeconds = kDimDelaySeconds[i];
             }
         }
+        orbitStepSeconds = std::clamp(static_cast<int>(orbitField.intValue), 1, 600);
         config.streamUrlTemplate = fromField(streamField);
     }
 }
@@ -246,8 +289,9 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
 } // namespace
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
-                        int& dimLevelPercent, int& dimDelaySeconds,
-                        bool& forgetRequested, const std::string& statusMessage)
+                        int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        bool& forgetRequested, const std::string& statusMessage,
+                        const std::function<void(int)>& onDimPreview)
 {
     (void)parent; // macOS modal has no owner window to thread through
     forgetRequested = false;
@@ -260,6 +304,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         int workingLabelMode = labelMode;
         int workingDimLevel = dimLevelPercent;
         int workingDimDelay = dimDelaySeconds;
+        int workingOrbitStep = orbitStepSeconds;
 
         constexpr CGFloat kWidth = 520;
         const CGFloat height = 196;
@@ -327,8 +372,10 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         int* labelPtr = &workingLabelMode;
         int* dimLevelPtr = &workingDimLevel;
         int* dimDelayPtr = &workingDimDelay;
+        int* orbitStepPtr = &workingOrbitStep;
         controller.onAdvanced = ^{
-            showAdvancedDialog(*workingPtr, *overlayPtr, *labelPtr, *dimLevelPtr, *dimDelayPtr);
+            showAdvancedDialog(*workingPtr, *overlayPtr, *labelPtr, *dimLevelPtr, *dimDelayPtr,
+                               *orbitStepPtr, onDimPreview);
         };
 
         [window center];
@@ -352,6 +399,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         labelMode = workingLabelMode;
         dimLevelPercent = workingDimLevel;
         dimDelaySeconds = workingDimDelay;
+        orbitStepSeconds = workingOrbitStep;
         return true;
     }
 }

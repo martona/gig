@@ -102,6 +102,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.insecure = store->getBool("insecure").value_or(false);
     settings.dimLevelPercent = static_cast<NSInteger>(store->getInt("dim-level").value_or(60));
     settings.dimDelaySeconds = static_cast<NSInteger>(store->getInt("dim-delay").value_or(600));
+    settings.orbitStepSeconds = static_cast<NSInteger>(store->getInt("orbit-step").value_or(40));
     return settings;
 }
 
@@ -127,6 +128,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setBool("insecure", settings.insecure);
     store->setInt("dim-level", std::clamp<NSInteger>(settings.dimLevelPercent, 10, 100));
     store->setInt("dim-delay", std::max<NSInteger>(settings.dimDelaySeconds, 0));
+    store->setInt("orbit-step", std::clamp<NSInteger>(settings.orbitStepSeconds, 1, 600));
 }
 
 // TODO(onboarding-project): temporary; remove with the Forget Settings UI.

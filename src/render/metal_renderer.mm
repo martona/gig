@@ -158,6 +158,7 @@ public:
             // the imgui-drawn labels/diagnostics would stay bright over a dimmed
             // video. So the scene renders undimmed; the shell dims.
             params.dimFactor = 1.0f;
+            params.orbitStepSeconds = orbitStepSeconds_;
             const gig::MetalScene::Frame scene = scene_->render(encoder, frames, params);
 
             // Focused-view label anchors to the rect the scene actually drew into
@@ -231,6 +232,7 @@ public:
     }
 
     void setDimFactor(float factor) override { dimFactor_ = factor; }
+    void setOrbitStepSeconds(float seconds) override { orbitStepSeconds_ = seconds; }
 
     bool wantsRepaint() const override { return scene_->wantsOrbitRepaint(); }
 
@@ -701,6 +703,7 @@ private:
     id<MTLTexture> iconLog_ = nil;
     id<MTLTexture> iconFullscreen_ = nil;
     float dimFactor_ = 1.0f;
+    float orbitStepSeconds_ = 40.0f;
 
     std::unique_ptr<gig::MetalScene> scene_;
 

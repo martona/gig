@@ -66,6 +66,7 @@
     float _dimFactor;
     NSInteger _dimLevelPercent;
     NSInteger _dimDelaySeconds;
+    NSInteger _orbitStepSeconds;
     CGFloat _dimPreview;  // >=0 forces the factor (settings preview); <0 = idle-driven
     BOOL _chromeHiddenFlag;
 
@@ -97,6 +98,7 @@
         _dimFactor = 1.0f;
         _dimLevelPercent = 60;
         _dimDelaySeconds = 600;
+        _orbitStepSeconds = 40;
         _dimPreview = -1.0;
         _lastInteraction = CACurrentMediaTime();
     }
@@ -114,6 +116,11 @@
     _dimLevelPercent = std::clamp<NSInteger>(levelPercent, 10, 100);
     _dimDelaySeconds = std::max<NSInteger>(delaySeconds, 0);
     _lastInteraction = CACurrentMediaTime();
+}
+
+- (void)setOrbitStepSeconds:(NSInteger)seconds
+{
+    _orbitStepSeconds = std::clamp<NSInteger>(seconds, 1, 600);
 }
 
 - (void)setDimPreview:(CGFloat)factor
@@ -300,6 +307,7 @@
         params.reservedTopPoints = 0.0f; // the SwiftUI toolbar lives OUTSIDE the Metal view
         params.extraCell = false;        // no diagnostics tile on iOS (dropped by decision)
         params.dimFactor = _dimFactor;
+        params.orbitStepSeconds = static_cast<float>(_orbitStepSeconds);
         const gig::MetalScene::Frame scene = _scene->render(encoder, frames, params);
 
         [encoder endEncoding];

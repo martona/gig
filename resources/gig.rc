@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h> // TBS_* trackbar styles for the dim slider
 #include "ui/resource.h"
 
 // Numeric ID 1 makes this the executable's default shell icon, and SDL also
@@ -27,7 +28,7 @@ BEGIN
     PUSHBUTTON      "Cancel",               IDCANCEL,        244,  98,  48, 14
 END
 
-IDD_SETTINGS_ADVANCED DIALOGEX 0, 0, 300, 300
+IDD_SETTINGS_ADVANCED DIALOGEX 0, 0, 300, 344
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Advanced settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -54,15 +55,19 @@ BEGIN
     LTEXT           "Camera labels:",       IDC_STATIC,        8, 181,  74, 10
     COMBOBOX                                IDC_LABELMODE,    86, 179, 120, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Screen protection",    IDC_STATIC,        8, 200, 280, 10
-    LTEXT           "Dim to (%):",          IDC_STATIC,        8, 216,  74, 10
-    EDITTEXT                                IDC_DIM_LEVEL,    86, 214,  50, 12, ES_AUTOHSCROLL | ES_NUMBER
-    LTEXT           "Dim after:",           IDC_STATIC,        8, 233,  74, 10
-    COMBOBOX                                IDC_DIM_DELAY,    86, 231, 120, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Advanced connection",  IDC_STATIC,        8, 252, 280, 10
-    LTEXT           "Stream template:",     IDC_STATIC,        8, 268,  74, 10
-    EDITTEXT                                IDC_STREAM_URL,   86, 266, 206, 12, ES_AUTOHSCROLL
-    DEFPUSHBUTTON   "OK",                   IDOK,            190, 282,  48, 14
-    PUSHBUTTON      "Cancel",               IDCANCEL,        244, 282,  48, 14
+    LTEXT           "Dim to:",              IDC_STATIC,        8, 216,  40, 10
+    CONTROL         "", IDC_DIM_LEVEL, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 48, 214, 198, 14
+    LTEXT           "60%",                  IDC_DIM_LEVEL_VAL, 250, 216, 42, 10
+    LTEXT           "Dim after:",           IDC_STATIC,        8, 235,  74, 10
+    COMBOBOX                                IDC_DIM_DELAY,    86, 233, 120, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Pixel-shift step (s):", IDC_STATIC,       8, 254,  90, 10
+    EDITTEXT                                IDC_ORBIT_STEP,  100, 252,  40, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "The image nudges ~1px every N seconds to spread OLED wear (lower = more motion).", IDC_STATIC, 8, 270, 284, 16
+    LTEXT           "Advanced connection",  IDC_STATIC,        8, 294, 280, 10
+    LTEXT           "Stream template:",     IDC_STATIC,        8, 310,  74, 10
+    EDITTEXT                                IDC_STREAM_URL,   86, 308, 206, 12, ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "OK",                   IDOK,            190, 324,  48, 14
+    PUSHBUTTON      "Cancel",               IDCANCEL,        244, 324,  48, 14
 END
 
 // Application manifest (Common Controls v6 for umbra theming + supportedOS).

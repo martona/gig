@@ -2,6 +2,7 @@
 
 #include "app/app_session.h" // AppConfig
 
+#include <functional>
 #include <string>
 
 namespace gig {
@@ -17,8 +18,13 @@ namespace gig {
 // `forgetRequested` (TODO(onboarding-project): temporary) is set when the user
 // confirmed the "Forget..." button: the dialog closes returning false (no values
 // to save) and the caller wipes the settings store and restarts onboarding.
+// `onDimPreview` (optional) is invoked live while the idle-dim slider moves, with
+// the previewed luminance percent, so the caller can apply it to the main view
+// behind the modal dialog. It is transient -- the caller restores/re-derives the
+// dim state after the dialog closes (Cancel discards it like any other edit).
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
-                        int& dimLevelPercent, int& dimDelaySeconds,
-                        bool& forgetRequested, const std::string& statusMessage = {});
+                        int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        bool& forgetRequested, const std::string& statusMessage = {},
+                        const std::function<void(int dimPercent)>& onDimPreview = {});
 
 } // namespace gig

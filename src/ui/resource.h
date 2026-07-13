@@ -32,3 +32,5 @@
 #define IDC_FORGET          2021
 #define IDC_DIM_LEVEL       2022
 #define IDC_DIM_DELAY       2023
+#define IDC_DIM_LEVEL_VAL   2024
+#define IDC_ORBIT_STEP      2025

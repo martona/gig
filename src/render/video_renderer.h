@@ -120,6 +120,10 @@ public:
     // and status screens stay readable.
     virtual void setDimFactor(float factor) { (void)factor; }
 
+    // Seconds between burn-in pixel-orbit steps (config; default 40, ~1 rev/hour).
+    // Lower = the image nudges 1px more often.
+    virtual void setOrbitStepSeconds(float seconds) { (void)seconds; }
+
     // The renderer wants a repaint even though nothing else changed -- currently
     // the burn-in orbit stepping to a new position. The on-demand run loop ORs
     // this into its dirty check so a static image still orbits (the very case

@@ -33,6 +33,8 @@ NS_SWIFT_NAME(Settings)
 // of no interaction (0 = never dim).
 @property (nonatomic, assign) NSInteger dimLevelPercent;
 @property (nonatomic, assign) NSInteger dimDelaySeconds;
+// Seconds between burn-in pixel-orbit steps (>= 1; default 40).
+@property (nonatomic, assign) NSInteger orbitStepSeconds;
 @end
 
 NS_SWIFT_NAME(SettingsBridge)

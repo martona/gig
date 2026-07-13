@@ -58,6 +58,9 @@ NS_SWIFT_NAME(VideoHost)
 - (void)setDimLevelPercent:(NSInteger)levelPercent delaySeconds:(NSInteger)delaySeconds
     NS_SWIFT_NAME(setDim(levelPercent:delaySeconds:));
 
+// Seconds between burn-in pixel-orbit steps (>= 1; lower = more motion).
+- (void)setOrbitStepSeconds:(NSInteger)seconds NS_SWIFT_NAME(setOrbitStep(seconds:));
+
 // Live idle-dim preview: force the dim factor to `factor` (0..1) NOW, ignoring
 // the idle timer, for the settings preview slider. Pass a negative value to
 // resume normal idle-driven dimming.

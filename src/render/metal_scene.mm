@@ -164,7 +164,8 @@ constexpr float kFadeDur = 0.22f;
 // sides so the orbit never crops content.
 constexpr float kOrbitRadiusPts = 16.0f;
 constexpr int kOrbitPositions = 100;          // ~2*pi*16 -> ~1px per step
-constexpr double kOrbitStepSeconds = 40.0;    // full revolution ~67 min
+// The seconds-between-steps is configurable (Params.orbitStepSeconds); at the
+// default 40s a full revolution is ~67 min.
 
 // Frame.layout points here when there is nothing grid-shaped to report (early
 // out, or fully-focused view), so hosts can dereference it unconditionally.
@@ -272,7 +273,8 @@ void MetalScene::currentOrbitOffset(int& dx, int& dy) const
     }
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - orbitEpoch_).count();
-    const long step = static_cast<long>(elapsed / kOrbitStepSeconds);
+    const double stepSecs = orbitStepSeconds_ >= 1.0 ? orbitStepSeconds_ : 1.0;
+    const long step = static_cast<long>(elapsed / stepSecs);
     const double angle = (static_cast<double>(step % kOrbitPositions) / kOrbitPositions) * 2.0 * M_PI;
     dx = static_cast<int>(std::lround(std::cos(angle) * kOrbitRadiusPts));
     dy = static_cast<int>(std::lround(std::sin(angle) * kOrbitRadiusPts));
@@ -287,6 +289,7 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
     const int pointWidth = static_cast<int>(params.pointWidth);
     const int pointHeight = static_cast<int>(params.pointHeight);
     scale_ = params.scale;
+    orbitStepSeconds_ = params.orbitStepSeconds;
     lastCameraCount_ = frames.size();
     if (!encoder || pointWidth <= 0 || pointHeight <= 0) {
         return out;

@@ -28,6 +28,7 @@ struct SettingsView: View {
     @State private var insecure = false
     @State private var dimLevel: Double = 60
     @State private var dimDelay = 600
+    @State private var orbitStep: Double = 40
     @State private var confirmForget = false
 
     // Delay choices (seconds); matches the desktop dropdown.
@@ -79,10 +80,18 @@ struct SettingsView: View {
                     Picker("Dim after", selection: $dimDelay) {
                         ForEach(Self.dimDelays, id: \.0) { Text($0.1).tag($0.0) }
                     }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Pixel-shift step")
+                            Spacer()
+                            Text("\(Int(orbitStep)) s").foregroundStyle(.secondary)
+                        }
+                        Slider(value: $orbitStep, in: 1...120, step: 1)
+                    }
                 } header: {
                     Text("Screen protection")
                 } footer: {
-                    Text("Reduces brightness when idle to limit OLED burn-in. The image also drifts slowly (pixel shift) to spread wear.")
+                    Text("Reduces brightness when idle to limit OLED burn-in. The image also drifts ~1px every few seconds (pixel shift) to spread wear — lower step = more motion.")
                 }
 
                 // TODO(onboarding-project): temporary section; remove when done.
@@ -130,6 +139,7 @@ struct SettingsView: View {
         insecure = s.insecure
         dimLevel = Double(s.dimLevelPercent)
         dimDelay = s.dimDelaySeconds
+        orbitStep = Double(s.orbitStepSeconds)
     }
 
     private func save() {
@@ -141,6 +151,7 @@ struct SettingsView: View {
         s.insecure = insecure
         s.dimLevelPercent = Int(dimLevel)
         s.dimDelaySeconds = dimDelay
+        s.orbitStepSeconds = Int(orbitStep)
         SettingsBridge.save(s)
     }
 }

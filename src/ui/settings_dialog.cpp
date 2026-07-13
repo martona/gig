@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <string>
 
 #include <windows.h>
+#include <commctrl.h> // trackbar messages (TBM_*)
 #include <shobjidl.h> // IFileOpenDialog (Common Item Dialog)
 #include <umbra.h>
 
@@ -94,8 +96,18 @@ struct DialogState {
     int* labelMode; // 0 hide / 1 show-on-error-only / 2 always
     int* dimLevel;  // idle-dim luminance percent (10..100)
     int* dimDelay;  // idle-dim delay seconds (0 = never)
+    int* orbitStep; // pixel-orbit step seconds (>= 1)
     std::string status;
+    std::function<void(int)> onDimPreview; // live dim preview while the slider moves
 };
+
+// Update the "NN%" label next to the dim slider.
+void setDimValueLabel(HWND dlg, int percent)
+{
+    wchar_t text[16];
+    wsprintfW(text, L"%d%%", percent);
+    SetDlgItemTextW(dlg, IDC_DIM_LEVEL_VAL, text);
+}
 
 // Idle-dim delay choices (seconds; 0 = Never), shared by both dialogs.
 struct DimDelayChoice { int seconds; const wchar_t* label; };
@@ -166,8 +178,11 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     }
     SendMessageW(labelCombo, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
 
-    // Screen protection: dim level (%) + delay dropdown.
-    SetDlgItemInt(dlg, IDC_DIM_LEVEL, static_cast<UINT>(state.dimLevel ? *state.dimLevel : 60), FALSE);
+    // Screen protection: dim level (%) slider + delay dropdown + orbit step.
+    const int dimLevel = state.dimLevel ? std::clamp(*state.dimLevel, 10, 100) : 60;
+    SendDlgItemMessageW(dlg, IDC_DIM_LEVEL, TBM_SETRANGE, TRUE, MAKELPARAM(10, 100));
+    SendDlgItemMessageW(dlg, IDC_DIM_LEVEL, TBM_SETPOS, TRUE, dimLevel);
+    setDimValueLabel(dlg, dimLevel);
     HWND dimCombo = GetDlgItem(dlg, IDC_DIM_DELAY);
     SendMessageW(dimCombo, CB_RESETCONTENT, 0, 0);
     for (const DimDelayChoice& choice : kDimDelays) {
@@ -175,6 +190,7 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     }
     SendMessageW(dimCombo, CB_SETCURSEL,
                  static_cast<WPARAM>(dimDelayIndex(state.dimDelay ? *state.dimDelay : 600)), 0);
+    SetDlgItemInt(dlg, IDC_ORBIT_STEP, static_cast<UINT>(state.orbitStep ? *state.orbitStep : 40), FALSE);
 
     setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
 }
@@ -197,13 +213,17 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
         }
     }
     if (state.dimLevel) {
-        *state.dimLevel = std::clamp(static_cast<int>(GetDlgItemInt(dlg, IDC_DIM_LEVEL, nullptr, FALSE)), 10, 100);
+        *state.dimLevel = std::clamp(
+            static_cast<int>(SendDlgItemMessageW(dlg, IDC_DIM_LEVEL, TBM_GETPOS, 0, 0)), 10, 100);
     }
     if (state.dimDelay) {
         const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_DIM_DELAY), CB_GETCURSEL, 0, 0);
         if (sel != CB_ERR && sel < static_cast<LRESULT>(std::size(kDimDelays))) {
             *state.dimDelay = kDimDelays[sel].seconds;
         }
+    }
+    if (state.orbitStep) {
+        *state.orbitStep = std::clamp(static_cast<int>(GetDlgItemInt(dlg, IDC_ORBIT_STEP, nullptr, FALSE)), 1, 600);
     }
     c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
     // tls.useSystemStore is re-derived from ca/cert/key on reload; rwTimeoutUs
@@ -218,6 +238,19 @@ INT_PTR CALLBACK advancedDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM l
         SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         umbra::setDarkWndNotifySafe(dlg); // dark title bar + themed controls
         populateAdvanced(dlg, *state);
+        return TRUE;
+    }
+    case WM_HSCROLL: {
+        // Dim-level trackbar moved: update the "NN%" label and live-preview the
+        // dim on the main view behind the dialog.
+        if (reinterpret_cast<HWND>(lParam) == GetDlgItem(dlg, IDC_DIM_LEVEL)) {
+            const int pos = static_cast<int>(SendDlgItemMessageW(dlg, IDC_DIM_LEVEL, TBM_GETPOS, 0, 0));
+            setDimValueLabel(dlg, pos);
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (state && state->onDimPreview) {
+                state->onDimPreview(pos);
+            }
+        }
         return TRUE;
     }
     case WM_COMMAND:
@@ -318,9 +351,15 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 } // namespace
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
-                        int& dimLevelPercent, int& dimDelaySeconds,
-                        bool& forgetRequested, const std::string& statusMessage)
+                        int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        bool& forgetRequested, const std::string& statusMessage,
+                        const std::function<void(int)>& onDimPreview)
 {
+    // Register the trackbar (slider) window class for the Advanced dialog's dim
+    // control. Idempotent + process-wide; comctl32 v6 comes from the app manifest.
+    const INITCOMMONCONTROLSEX icc { sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES };
+    InitCommonControlsEx(&icc);
+
     // Edit a working copy so a Cancel in either the primary or the nested advanced
     // dialog leaves the caller's config untouched; commit only on primary OK.
     forgetRequested = false;
@@ -329,8 +368,10 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     int workingLabelMode = labelMode;
     int workingDimLevel = dimLevelPercent;
     int workingDimDelay = dimDelaySeconds;
+    int workingOrbitStep = orbitStepSeconds;
     DialogState state { &working, &workingOverlay, &workingLabelMode,
-                        &workingDimLevel, &workingDimDelay, statusMessage };
+                        &workingDimLevel, &workingDimDelay, &workingOrbitStep,
+                        statusMessage, onDimPreview };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
         primaryDlgProc, reinterpret_cast<LPARAM>(&state));
@@ -346,6 +387,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     labelMode = workingLabelMode;
     dimLevelPercent = workingDimLevel;
     dimDelaySeconds = workingDimDelay;
+    orbitStepSeconds = workingOrbitStep;
     return true;
 }
 

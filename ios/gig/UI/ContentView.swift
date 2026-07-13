@@ -518,10 +518,11 @@ struct ContentView: View {
         }
     }
 
-    // Push the persisted idle-dim config into the video host (burn-in).
+    // Push the persisted burn-in config into the video host.
     private func applyDimSettings() {
         let s = SettingsBridge.current()
         VideoHost.shared().setDim(levelPercent: s.dimLevelPercent, delaySeconds: s.dimDelaySeconds)
+        VideoHost.shared().setOrbitStep(seconds: s.orbitStepSeconds)
     }
 }
 

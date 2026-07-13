@@ -160,6 +160,7 @@ struct StartupConfig {
     // ramps to dimLevelPercent luminance (0 delay = never dim).
     int dimLevelPercent = 60;
     int dimDelaySeconds = 600;
+    int orbitStepSeconds = 40; // burn-in pixel-orbit step interval
 };
 
 // Read all settings from the platform store, applying the same derivation +
@@ -184,6 +185,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.labelMode = static_cast<LabelMode>((labelMode >= 0 && labelMode <= 2) ? labelMode : 1);
     cfg.dimLevelPercent = std::clamp(static_cast<int>(store.getInt("dim-level").value_or(60)), 10, 100);
     cfg.dimDelaySeconds = std::max(0, static_cast<int>(store.getInt("dim-delay").value_or(600)));
+    cfg.orbitStepSeconds = std::clamp(static_cast<int>(store.getInt("orbit-step").value_or(40)), 1, 600);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -219,10 +221,11 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // The password is DPAPI-encrypted; an empty password removes the value rather
 // than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode,
-                int dimLevelPercent, int dimDelaySeconds)
+                int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds)
 {
     store.setInt("dim-level", dimLevelPercent);
     store.setInt("dim-delay", dimDelaySeconds);
+    store.setInt("orbit-step", orbitStepSeconds);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
     store.setString("stream-url", s.streamUrlTemplate);
@@ -617,10 +620,20 @@ int main(int argc, char** argv)
             int labelMode = static_cast<int>(cfg.labelMode);
             int dimLevel = cfg.dimLevelPercent;
             int dimDelay = cfg.dimDelaySeconds;
+            int orbitStep = cfg.orbitStepSeconds;
             bool forget = false;
+            // Live idle-dim preview: while the slider moves, apply the previewed
+            // luminance to the main view behind the modal dialog by rendering one
+            // frame (the run loop is suspended during the modal, so we drive it).
+            auto onDimPreview = [&](int pct) {
+                currentDim = std::clamp(pct, 10, 100) / 100.0f;
+                renderer->setDimFactor(currentDim);
+                renderer->render(session.snapshotFrames());
+            };
             if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, dimLevel, dimDelay,
-                                        forget, lastConnectError)) {
-                saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode), dimLevel, dimDelay);
+                                        orbitStep, forget, lastConnectError, onDimPreview)) {
+                saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode),
+                           dimLevel, dimDelay, orbitStep);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 OverlayStats overlayStats;
@@ -849,6 +862,7 @@ int main(int argc, char** argv)
                                                       : std::max(dimTarget, currentDim - stepD);
             }
             renderer->setDimFactor(currentDim);
+            renderer->setOrbitStepSeconds(static_cast<float>(cfg.orbitStepSeconds));
 
             // Draw on demand. While minimized there's nothing to present, so skip
             // the render (and the shared D3D11 lock it holds) entirely -- decoders

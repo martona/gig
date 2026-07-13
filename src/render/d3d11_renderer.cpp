@@ -723,6 +723,7 @@ public:
     }
 
     void setDimFactor(float factor) override { dimFactor_ = factor; }
+    void setOrbitStepSeconds(float seconds) override { orbitStepSeconds_ = seconds; }
 
     bool wantsRepaint() const override
     {
@@ -1423,7 +1424,8 @@ private:
         }
         const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - orbitEpoch_).count();
-        const long step = static_cast<long>(elapsed / kOrbitStepSeconds);
+        const double stepSecs = orbitStepSeconds_ >= 1.0 ? orbitStepSeconds_ : 1.0;
+        const long step = static_cast<long>(elapsed / stepSecs);
         const double angle =
             (static_cast<double>(step % kOrbitPositions) / kOrbitPositions) * 2.0 * 3.14159265358979323846;
         const double radiusPx = kOrbitRadiusLogical * dpiScale_;
@@ -1998,6 +2000,7 @@ private:
     std::chrono::steady_clock::time_point orbitEpoch_;
     bool haveOrbitEpoch_ = false;
     float dimFactor_ = 1.0f;
+    double orbitStepSeconds_ = 40.0;
 
     // Per-tile signal-animation driving state.
     std::vector<std::uint64_t> tileBytes_;   // latest per-camera cumulative bytes (from setTileActivity)
@@ -2041,7 +2044,7 @@ private:
     // are inset by the radius so nothing crops. ~1 revolution per hour.
     static constexpr float kOrbitRadiusLogical = 16.0f;
     static constexpr int kOrbitPositions = 100;
-    static constexpr double kOrbitStepSeconds = 40.0;
+    // Seconds-between-steps is configurable (setOrbitStepSeconds); default 40.
     // Focus-view idle seconds before the (overlay) toolbar auto-hides. Read by
     // render() too, so the run loop keeps drawing until the hide actually lands.
     static constexpr float kToolbarHideDelay = 2.5f;
