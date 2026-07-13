@@ -229,6 +229,19 @@ void CertPinStore::declinePin(const PendingPinDecision& decision)
     }
 }
 
+void CertPinStore::clearSessionDeclines()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    declined_.clear();
+}
+
+void CertPinStore::reset()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_.reset();
+    declined_.clear();
+}
+
 void setCertPinStore(CertPinStore* store)
 {
     g_pinStore = store;

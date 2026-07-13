@@ -2,17 +2,18 @@
 //  ContentView.swift
 //  gig
 //
-//  The iOS shell: a native SwiftUI toolbar (status + Settings/Reconnect/Log,
-//  the desktop imgui toolbar's replacement), the Metal video surface (the
-//  shared C++ scene: live grid, signal scope, tap-to-zoom), and the camera
-//  labels as SwiftUI overlays -- positioned from the scene's tile layout and
-//  hidden while the zoom animation runs. Settings and the log ring are sheets;
-//  an untrusted-certificate decision (trust-on-first-use pin) is an alert.
+//  The iOS shell: a native SwiftUI toolbar (status + Settings/Reconnect/Log),
+//  the Metal video surface (the shared C++ scene: live grid, signal scope,
+//  tap-to-zoom), camera labels as SwiftUI overlays, and the full-screen
+//  onboarding/status states (OnboardingViews.swift): first-run welcome ->
+//  Local Network permission step -> settings; connection failures land on the
+//  error screen with room for the reason and one-tap fixes -- including the
+//  Local-Network-denied case, which raw sockets can't distinguish from an
+//  unreachable host but the Bonjour probe can.
 //
 //  Lifecycle policy: on .background the session is torn down cleanly (iOS
-//  suspends the process anyway -- a deliberate disconnect beats frozen sockets)
-//  and reconnects automatically on return; the screen stays awake while
-//  connected and active (it's a camera wall).
+//  suspends the process anyway) and reconnects automatically on return; the
+//  screen stays awake while connected and active (it's a camera wall).
 //
 
 import SwiftUI
@@ -55,6 +56,38 @@ final class EngineModel: ObservableObject {
         generation += 1
         let gen = generation
         runExclusive {
+            let status = Engine.shared().connect()
+            await MainActor.run { self.finishConnect(status, generation: gen) }
+        }
+    }
+
+    // A deliberate user retry (Reconnect button / Try Again) is a fresh trust
+    // decision: a previously declined certificate may prompt again.
+    func retry() {
+        guard !connecting else { return }
+        connecting = true
+        detail = ""
+        generation += 1
+        let gen = generation
+        runExclusive {
+            Engine.shared().resetDeclinedPins()
+            let status = Engine.shared().connect()
+            await MainActor.run { self.finishConnect(status, generation: gen) }
+        }
+    }
+
+    // Settings were just saved: reconnect with the new config, SUPERSEDING any
+    // in-flight attempt (no !connecting guard — the guarded connect() would
+    // silently drop a save made while a slow connect runs; the generation bump
+    // invalidates the old attempt's result and runExclusive keeps order). Also
+    // desktop parity: a save-and-reconnect clears session pin declines.
+    func applySettingsAndReconnect() {
+        connecting = true
+        detail = ""
+        generation += 1
+        let gen = generation
+        runExclusive {
+            Engine.shared().resetDeclinedPins()
             let status = Engine.shared().connect()
             await MainActor.run { self.finishConnect(status, generation: gen) }
         }
@@ -112,6 +145,24 @@ final class EngineModel: ObservableObject {
         }
     }
 
+    // TODO(onboarding-project): temporary, pairs with Forget Settings.
+    func resetAfterForget() {
+        generation += 1
+        resumeOnActive = false
+        connecting = false
+        connected = false
+        live = 0
+        total = 0
+        detail = ""
+        pendingPin = nil
+        runExclusive {
+            // Full runtime wipe (session + auth cookie + TLS tickets + pin
+            // session state), not just a disconnect — nothing from the
+            // forgotten identity may leak into the fresh onboarding.
+            Engine.shared().forgetRuntimeState()
+        }
+    }
+
     // MARK: internals
 
     private func finishConnect(_ status: EngineStatus, generation gen: Int) {
@@ -130,7 +181,10 @@ final class EngineModel: ObservableObject {
         } else if status.connected {
             detail = ""
         }
+        configError = status.configError && !status.connected
     }
+
+    @Published var configError = false // last failure was structural (Settings is the fix)
 
     private func checkPendingPin() {
         guard pendingPin == nil else { return }
@@ -151,8 +205,6 @@ final class OverlayModel: ObservableObject {
 
     init() {
         VideoHost.shared().onOverlayChanged = { [weak self] in
-            // The display link runs on the main thread; hop anyway so this stays
-            // correct if that ever changes.
             DispatchQueue.main.async { self?.reload() }
         }
         reload()
@@ -168,10 +220,17 @@ final class OverlayModel: ObservableObject {
 }
 
 struct ContentView: View {
+    // The first-run corridor: welcome -> permission step -> (settings sheet).
+    // After that everything is stateless: config-empty shows welcome again,
+    // failures show the error screen, a session shows video.
+    private enum OnboardPhase { case welcome, permission, ready }
+
     @StateObject private var engine = EngineModel()
     @StateObject private var overlay = OverlayModel()
+    @StateObject private var probe = LocalNetworkProbe()
     @Environment(\.scenePhase) private var scenePhase
 
+    @State private var phase: OnboardPhase = .ready
     @State private var showSettings = false
     @State private var showLog = false
     @State private var didAutoStart = false
@@ -181,14 +240,20 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            if !engine.connected && !engine.detail.isEmpty {
-                banner
-            }
             videoArea
         }
         .background(Color(white: 0.03))
         .sheet(isPresented: $showSettings) {
-            SettingsView { engine.connect() }
+            SettingsView(onSave: {
+                if !SettingsBridge.current().baseURL.isEmpty {
+                    engine.applySettingsAndReconnect()
+                }
+            }, onForget: {
+                // TODO(onboarding-project): temporary. Store already wiped by the
+                // sheet; reset the engine and restart first-run onboarding.
+                engine.resetAfterForget()
+                phase = .welcome
+            })
         }
         .sheet(isPresented: $showLog) {
             LogView()
@@ -197,7 +262,7 @@ struct ContentView: View {
             engine.pendingPin?.changed == true ? "PINNED CERTIFICATE CHANGED" : "Untrusted certificate",
             isPresented: Binding(
                 get: { engine.pendingPin != nil },
-                // Pure presentation state — NO decision side effect here. SwiftUI
+                // Pure presentation state -- NO decision side effect here. SwiftUI
                 // may write false BEFORE the tapped button's action runs, so a
                 // decline here would override a Trust & Pin tap. On iOS an alert
                 // is only dismissible via its buttons, which carry the decision.
@@ -205,7 +270,6 @@ struct ContentView: View {
             ),
             presenting: engine.pendingPin
         ) { pin in
-            // Decisions act on the presented value, not live state (see above).
             Button("Trust & Pin", role: .destructive) { engine.acceptPendingPin(pin) }
             Button("Don't Trust", role: .cancel) { engine.declinePendingPin(pin) }
         } message: { pin in
@@ -214,14 +278,29 @@ struct ContentView: View {
         .onAppear(perform: autoStart)
         .onReceive(ticker) { _ in engine.refresh() }
         .onChange(of: engine.connected) { _ in updateIdleTimer() }
-        .onChange(of: scenePhase) { phase in
-            switch phase {
+        .onChange(of: engine.connecting) { connecting in
+            // Entering an error state: re-probe so a Local-Network denial shows
+            // as itself instead of a generic "unreachable host".
+            if !connecting && !engine.connected && phase == .ready && !engine.detail.isEmpty {
+                probe.start()
+            }
+        }
+        .onChange(of: probe.outcome) { outcome in
+            // Permission step auto-advances on grant (or no-signal, e.g. simulator).
+            guard phase == .permission, let outcome, outcome != .denied else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                if phase == .permission {
+                    phase = .ready
+                    showSettings = true
+                }
+            }
+        }
+        .onChange(of: scenePhase) { newPhase in
+            switch newPhase {
             case .active:
                 VideoHost.shared().start()
                 engine.becomeActive()
             case .background:
-                // Clean teardown beats iOS freezing threads mid-flight; the
-                // session auto-reconnects on return (see EngineModel).
                 VideoHost.shared().stop()
                 engine.enterBackground()
             default: // .inactive: app switcher / Control Center -- just pause rendering
@@ -247,11 +326,11 @@ struct ContentView: View {
             }
             .accessibilityLabel("Settings")
             Button {
-                engine.connect()
+                engine.retry()
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .disabled(engine.connecting)
+            .disabled(engine.connecting || phase != .ready)
             .accessibilityLabel("Reconnect")
             Button {
                 showLog = true
@@ -267,7 +346,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var statusText: some View {
-        if engine.connecting {
+        if phase != .ready {
+            Text("not configured")
+                .foregroundStyle(.secondary)
+        } else if engine.connecting {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text("connecting")
@@ -283,18 +365,7 @@ struct ContentView: View {
         }
     }
 
-    private var banner: some View {
-        Text(engine.detail)
-            .font(.caption)
-            .lineLimit(2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .background(Color(red: 0.42, green: 0.10, blue: 0.10))
-            .foregroundStyle(Color(red: 1.0, green: 0.95, blue: 0.92))
-    }
-
-    // MARK: video + label overlay
+    // MARK: video + overlays + full-screen states
 
     private var videoArea: some View {
         ZStack(alignment: .topLeading) {
@@ -309,18 +380,47 @@ struct ContentView: View {
                     .offset(x: label.rect.minX + 4, y: label.rect.minY + 4)
                     .allowsHitTesting(false)
             }
-            if !engine.connected && !engine.connecting {
-                VStack(spacing: 8) {
-                    Image(systemName: "video.slash")
-                        .font(.largeTitle)
-                    Text("Not connected")
-                }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .allowsHitTesting(false)
-            }
+            statusScreen
         }
         .ignoresSafeArea(edges: .bottom)
+    }
+
+    @ViewBuilder
+    private var statusScreen: some View {
+        switch phase {
+        case .welcome:
+            WelcomeView { phase = .permission }
+        case .permission:
+            PermissionStepView(probe: probe) {
+                phase = .ready
+                showSettings = true
+            }
+        case .ready:
+            if engine.connecting {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Connecting…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+            } else if !engine.connected {
+                if SettingsBridge.current().baseURL.isEmpty {
+                    // Config was emptied (e.g. saved blank): back to welcome, statelessly.
+                    WelcomeView { showSettings = true }
+                } else {
+                    ErrorStateView(
+                        detail: engine.detail,
+                        configError: engine.configError,
+                        localNetworkDenied: probe.outcome == .denied,
+                        onRetry: { engine.retry() },
+                        onOpenSettings: { showSettings = true },
+                        onViewLog: { showLog = true }
+                    )
+                }
+            }
+        }
     }
 
     // MARK: helpers
@@ -351,11 +451,10 @@ struct ContentView: View {
     private func autoStart() {
         guard !didAutoStart else { return }
         didAutoStart = true
-        // Desktop parity: connect at startup when configured; first run (no base
-        // URL yet) opens settings instead of failing.
         if SettingsBridge.current().baseURL.isEmpty {
-            showSettings = true
+            phase = .welcome // first run: welcome -> permission -> settings
         } else {
+            phase = .ready
             engine.connect()
         }
     }

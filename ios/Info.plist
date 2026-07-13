@@ -22,6 +22,12 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<!-- The Local Network permission probe (LocalNetworkProbe.swift) browses
+		     this throwaway type to trigger + verify the grant deterministically. -->
+		<string>_gigprobe._tcp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>gig connects to your Frigate server on your local network to stream camera video.</string>
 	<key>UIApplicationSceneManifest</key>

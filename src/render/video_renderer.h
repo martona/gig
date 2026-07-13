@@ -19,6 +19,16 @@ struct OverlayStats {
     int kbps = 0;
     double cpuPercent = 0.0;
 
+    // Full-window status screen over the (empty) grid area when there is no
+    // running session -- the onboarding/error surface. None = normal video UI.
+    // Welcome: nothing configured yet (first run / after Forget Settings).
+    // Connecting: a connect is in flight (drawn before the blocking apply).
+    // Error: the last connect failed; statusDetail carries the reason and
+    // errorIsConfig picks the primary CTA (Settings vs Try Again).
+    enum class StatusScreen { None, Welcome, Connecting, Error };
+    StatusScreen screen = StatusScreen::None;
+    bool errorIsConfig = false;
+
     // Connection status, derived each refresh by the run loop. LinkState::Ok with
     // healthDegraded == false means nothing is wrong (no banner). Reconnecting =
     // a live session whose control-plane poll is failing (it is self-healing);

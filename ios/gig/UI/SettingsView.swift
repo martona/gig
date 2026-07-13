@@ -12,6 +12,9 @@ import SwiftUI
 struct SettingsView: View {
     /// Called after a successful save; the caller reconnects with the new config.
     var onSave: () -> Void
+    /// TODO(onboarding-project): temporary. Called after Forget Settings wiped the
+    /// store; the caller resets the engine and restarts onboarding.
+    var onForget: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
 
@@ -20,6 +23,7 @@ struct SettingsView: View {
     @State private var password = ""
     @State private var caPath = ""
     @State private var insecure = false
+    @State private var confirmForget = false
 
     var body: some View {
         NavigationStack {
@@ -45,6 +49,23 @@ struct SettingsView: View {
                 } footer: {
                     Text("Certificates trusted by iOS (public CAs or an installed CA profile) work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
                 }
+
+                // TODO(onboarding-project): temporary section; remove when done.
+                Section {
+                    Button("Forget Settings…", role: .destructive) { confirmForget = true }
+                } footer: {
+                    Text("Erases everything and restarts first-run setup.")
+                }
+            }
+            .confirmationDialog("Forget ALL settings?", isPresented: $confirmForget, titleVisibility: .visible) {
+                Button("Forget Settings", role: .destructive) {
+                    SettingsBridge.forgetAll()
+                    dismiss()
+                    onForget()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This erases the server, credentials and certificate pins, and restarts first-run setup.")
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

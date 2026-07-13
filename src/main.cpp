@@ -417,66 +417,68 @@ int main(int argc, char** argv)
         auto cookieJar = std::make_shared<gig::CookieJar>();
 
         // The reconfigurable subsystem (login -> discover -> supervisor). Bring it
-        // up once here; F5 / the settings dialog re-apply it live. A structural
-        // config error opens the settings dialog (Win + macOS); a transient failure
-        // comes up disconnected.
+        // up once here; F5 / the settings dialog re-apply it live. There is no
+        // modal-settings loop anymore: first run (nothing configured) lands on the
+        // welcome screen, any connect failure lands on the error screen -- both
+        // drawn full-window by the renderer's status panel, with Settings / Try
+        // Again CTAs. Only the certificate pin decision stays a modal prompt.
         gig::AppSession session(renderer->d3d11DecodeContext(), sessionCache, cookieJar);
-        gig::ApplyResult applied = session.applyConfig(cfg.session);
+        auto configEmpty = [&]() { return cfg.session.baseUrl.empty() && cfg.session.url.empty(); };
+        bool lastFailureWasConfig = false;
+        gig::ApplyResult applied;
+        if (!configEmpty()) {
+            applied = session.applyConfig(cfg.session);
 #if defined(_WIN32) || defined(__APPLE__)
-        while (!applied.ok) {
-            // A certificate-trust failure is a pin decision, not a config problem.
-            if (auto pending = pinStore.takePending()) {
-                if (gig::promptPinDecision(mainHwnd, *pending)) {
-                    pinStore.acceptPin(*pending);
-                    gig::logInfo() << "pinned certificate for " << pending->host;
-                } else {
+            while (!applied.ok) {
+                // A certificate-trust failure is a pin decision, not a config problem.
+                if (auto pending = pinStore.takePending()) {
+                    if (gig::promptPinDecision(mainHwnd, *pending)) {
+                        pinStore.acceptPin(*pending);
+                        gig::logInfo() << "pinned certificate for " << pending->host;
+                        applied = session.applyConfig(cfg.session);
+                        continue;
+                    }
+                    // Declined: come up on the error screen (Try Again offers a
+                    // fresh decision -- it clears the session declines).
                     pinStore.declinePin(*pending);
-                    throw std::runtime_error("certificate for " + pending->host + " was not trusted");
+                    applied.error = "certificate for " + pending->host + " was not trusted";
+                    applied.failure = gig::ApplyFailure::Transient;
                 }
-                applied = session.applyConfig(cfg.session);
-                continue;
-            }
-            // A transient connection failure (host down, login/discovery) must not
-            // trap the user in a modal: come up disconnected and let the status
-            // banner + Reconnect handle it. Only a structural/local config problem
-            // opens the settings dialog.
-            if (applied.failure != gig::ApplyFailure::Config) {
-                gig::logWarning() << "initial connect failed (" << applied.error
-                                  << "); starting disconnected -- use Reconnect to retry";
                 break;
             }
-            // First run / unusable config: let the user fix it in the settings
-            // dialog instead of dying. Keep offering until it applies or cancel.
-            gig::logWarning() << "config not usable (" << applied.error << "); opening settings";
-            gig::AppConfig edited = cfg.session;
-            bool overlay = cfg.showOverlay;
-            int labelMode = static_cast<int>(cfg.labelMode);
-            if (!gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, applied.error)) {
-                throw std::runtime_error(applied.error); // cancelled -> nothing to show
-            }
-            saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
-            cfg = loadConfig(*settings);
-            applied = session.applyConfig(cfg.session);
-        }
-#else
-        // No native settings dialog on this platform: a structural config error is
-        // fatal; a transient connection failure still comes up (disconnected).
-        if (!applied.ok && applied.failure == gig::ApplyFailure::Config) {
-            throw std::runtime_error(applied.error);
-        }
 #endif
+            if (!applied.ok) {
+                gig::logWarning() << "initial connect failed (" << applied.error
+                                  << "); starting on the error screen";
+                lastFailureWasConfig = (applied.failure == gig::ApplyFailure::Config);
+            }
+        }
         renderer->setCameraLabels(session.cameraLabels());
         renderer->setLabelMode(cfg.labelMode);
+
+        // Derive the full-window status screen (status panel) from session/config
+        // state. None while a session is up -- the slim banner handles in-session
+        // degradation; the panel only replaces dead air.
+        auto applyScreenState = [&](OverlayStats& stats) {
+            if (session.running()) {
+                stats.screen = OverlayStats::StatusScreen::None;
+            } else if (configEmpty()) {
+                stats.screen = OverlayStats::StatusScreen::Welcome;
+            } else {
+                stats.screen = OverlayStats::StatusScreen::Error;
+                stats.errorIsConfig = lastFailureWasConfig;
+            }
+        };
 
         OverlayStats initialStats;
         initialStats.showDiagnostics = cfg.showOverlay;
         if (!applied.ok) {
-            // Came up without a session (transient connect failure): show the
-            // disconnected banner immediately, before the first stats tick.
+            // Came up without a session: welcome or error screen, immediately.
             initialStats.link = OverlayStats::LinkState::Disconnected;
             initialStats.statusDetail = applied.error;
             initialStats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
         }
+        applyScreenState(initialStats);
         renderer->setDiagnostics(initialStats);
 
         // Keep the grid reflowing while the window is actively resized.
@@ -504,21 +506,43 @@ int main(int argc, char** argv)
         std::uint64_t lastRenderedFrames = 0;
         auto lastInteraction = std::chrono::steady_clock::now();
 
-        // Reconnect with the given config (F5 / settings-apply): rebuild the
-        // session, rebind the renderer's camera set, reset the running frame
-        // deltas (the new supervisor counts from 0), report a failure.
+        // Reconnect with the given config (F5 / settings-apply / Try Again):
+        // rebuild the session, rebind the renderer's camera set, reset the running
+        // frame deltas (the new supervisor counts from 0), report a failure.
         auto applyAndReport = [&](const gig::AppConfig& connConfig) {
             renderer->setFocusedTile(-1);
+            // An explicit retry is a fresh trust decision: a previously declined
+            // certificate may prompt again.
+            pinStore.clearSessionDeclines();
+            {
+                // applyConfig blocks this thread (login/discovery); put the
+                // connecting screen up for the duration by rendering one frame.
+                OverlayStats connecting;
+                connecting.showDiagnostics = cfg.showOverlay;
+                connecting.screen = OverlayStats::StatusScreen::Connecting;
+                connecting.statusHost = connConfig.baseUrl.empty() ? connConfig.url : connConfig.baseUrl;
+                renderer->setDiagnostics(connecting);
+                renderer->render(session.snapshotFrames());
+            }
             const gig::ApplyResult result = session.applyConfig(connConfig);
             renderer->setCameraLabels(session.cameraLabels());
             lastTitleFrames = 0;
             lastStatsFrames = 0;
             lastConnectError = result.ok ? std::string() : result.error;
+            lastFailureWasConfig = !result.ok && result.failure == gig::ApplyFailure::Config;
             if (!result.ok) {
-                // Surfaced non-modally via the status banner -- no messagebox to
-                // dismiss. The user can adjust settings or Reconnect.
+                // Surfaced non-modally via the error screen -- no messagebox.
                 gig::logError() << "connect failed: " << result.error;
             }
+            // Reflect the outcome immediately (don't wait for the 1s stats tick).
+            OverlayStats after;
+            after.showDiagnostics = cfg.showOverlay;
+            after.link = session.running() ? OverlayStats::LinkState::Ok
+                                           : OverlayStats::LinkState::Disconnected;
+            after.statusDetail = lastConnectError;
+            after.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
+            applyScreenState(after);
+            renderer->setDiagnostics(after);
         };
 
         // Camera tile under a window-space point, or -1. Mirrors the renderer's
@@ -560,12 +584,13 @@ int main(int argc, char** argv)
 
 #if defined(_WIN32) || defined(__APPLE__)
         // Open the settings dialog, persist, and reconnect with the new config.
-        // Shared by F2 and the toolbar's Settings button.
+        // Shared by F2, the toolbar's Settings button, and the status panel's CTAs.
         auto openSettings = [&]() {
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
             int labelMode = static_cast<int>(cfg.labelMode);
-            if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode)) {
+            bool forget = false;
+            if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, forget, lastConnectError)) {
                 saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
@@ -573,6 +598,35 @@ int main(int argc, char** argv)
                 overlayStats.showDiagnostics = cfg.showOverlay;
                 renderer->setDiagnostics(overlayStats);
                 applyAndReport(cfg.session);
+            } else if (forget) {
+                // TODO(onboarding-project): temporary. Wipe everything and restart
+                // first-run onboarding on the welcome screen. "Everything" includes
+                // the in-memory runtime state a wipe must not leak through: the
+                // auth cookie + TLS resumption tickets (they embody the forgotten
+                // credentials), the pin store's staged/declined session state, the
+                // renderer's focus, and the frame-delta latches (a dead session's
+                // counters would wrap the next fps calculation).
+                gig::logWarning() << "forgetting all settings (user request)";
+                session.stop();
+                settings->clear();
+                settings->setInt("schema-version", 1);
+                cookieJar->clear();
+                sessionCache->clear();
+                pinStore.reset();
+                cfg = loadConfig(*settings);
+                renderer->setFocusedTile(-1);
+                renderer->setHoveredTile(-1);
+                renderer->setCameraLabels(session.cameraLabels());
+                renderer->setLabelMode(cfg.labelMode);
+                lastConnectError.clear();
+                lastFailureWasConfig = false;
+                lastTitleFrames = 0;
+                lastStatsFrames = 0;
+                lastRenderedFrames = 0;
+                OverlayStats welcome;
+                welcome.showDiagnostics = cfg.showOverlay;
+                applyScreenState(welcome);
+                renderer->setDiagnostics(welcome);
             }
         };
 #endif
@@ -730,6 +784,7 @@ int main(int argc, char** argv)
                 }
                 stats.healthDegraded = cp.schemaError;
                 stats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
+                applyScreenState(stats);
 
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;

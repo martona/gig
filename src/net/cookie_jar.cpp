@@ -66,4 +66,10 @@ std::string CookieJar::headerFor(const std::string& origin) const
     return header.str();
 }
 
+void CookieJar::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    cookies_.clear();
+}
+
 } // namespace gig

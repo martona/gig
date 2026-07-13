@@ -46,6 +46,15 @@ public:
     std::optional<PendingPinDecision> takePending(); // returns + clears the slot
     void acceptPin(const PendingPinDecision& decision);  // persist the pin
     void declinePin(const PendingPinDecision& decision); // remember for this session
+    // Forget session declines so a previously-declined cert can prompt again.
+    // Called on an EXPLICIT user retry (Reconnect / Try Again) -- a deliberate
+    // retry is a fresh trust decision; auto-reconnects must NOT call this.
+    void clearSessionDeclines();
+
+    // Drop ALL in-memory session state (staged pending decision + declines).
+    // Used by Forget Settings: nothing from the pre-wipe trust session may leak
+    // into the fresh onboarding (persisted pins are wiped with the store).
+    void reset();
 
 private:
     std::shared_ptr<SettingsStore> store_;

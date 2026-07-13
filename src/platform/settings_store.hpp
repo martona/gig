@@ -40,6 +40,11 @@ public:
     // Remove a single value. Missing is not an error.
     virtual void remove(std::string_view key) = 0;
 
+    // Wipe EVERYTHING this store holds -- config, cert pins, window geometry,
+    // secrets. Backs the (temporary) "Forget Settings" onboarding-reset
+    // affordance; the store remains usable afterwards (empty).
+    virtual void clear() = 0;
+
     // Value names directly under `subkey` (e.g. "pins"), oldest-first is not
     // guaranteed. Empty if the subkey doesn't exist.
     virtual std::vector<std::string> listKeys(std::string_view subkey) const = 0;

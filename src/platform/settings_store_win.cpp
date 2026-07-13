@@ -173,6 +173,24 @@ public:
         RegDeleteKeyValueW(root_, subpath.empty() ? nullptr : subpath.c_str(), value.c_str());
     }
 
+    void clear() override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Drop the whole HKCU\Software\gig tree (values, pins subkey, geometry)
+        // and re-create it empty so the open handle stays valid for later writes.
+        if (root_) {
+            RegCloseKey(root_);
+            root_ = nullptr;
+        }
+        RegDeleteTreeW(HKEY_CURRENT_USER, kRootSubkey);
+        const LSTATUS status = RegCreateKeyExW(
+            HKEY_CURRENT_USER, kRootSubkey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WRITE, nullptr, &root_, nullptr);
+        if (status != ERROR_SUCCESS) {
+            throw std::runtime_error("failed to re-create HKCU\\Software\\gig (error " + std::to_string(status) + ")");
+        }
+    }
+
     std::vector<std::string> listKeys(std::string_view subkey) const override
     {
         std::lock_guard<std::mutex> lock(mutex_);

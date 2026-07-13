@@ -32,6 +32,10 @@ public:
     SslSessionPtr pop();
     std::size_t size() const;
 
+    // Drop every cached session. Used when credentials are wiped (Forget
+    // Settings): resumption tickets bound to the old identity must not survive.
+    void clear();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

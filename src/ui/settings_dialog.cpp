@@ -91,6 +91,10 @@ struct DialogState {
     std::string status;
 };
 
+// Custom dialog result: the user confirmed "Forget..." (wipe settings + restart
+// onboarding). TODO(onboarding-project): temporary; remove with IDC_FORGET.
+constexpr INT_PTR kDialogResultForget = 100;
+
 // Primary dialog: the base URL + credentials most users touch.
 void populatePrimary(HWND dlg, const DialogState& state)
 {
@@ -230,6 +234,18 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
             }
             return TRUE;
         }
+        case IDC_FORGET: {
+            // TODO(onboarding-project): temporary. Confirm, then close with the
+            // forget result; the caller wipes the store and restarts onboarding.
+            const int answer = umbra::DarkMessageBox(dlg,
+                L"Forget ALL settings?\n\nThis erases the server, credentials, certificate pins "
+                L"and window state, and restarts first-run setup.",
+                L"gig", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (answer == IDYES) {
+                EndDialog(dlg, kDialogResultForget);
+            }
+            return TRUE;
+        }
         case IDOK: {
             auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
             if (state) {
@@ -253,10 +269,11 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 } // namespace
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
-                        const std::string& statusMessage)
+                        bool& forgetRequested, const std::string& statusMessage)
 {
     // Edit a working copy so a Cancel in either the primary or the nested advanced
     // dialog leaves the caller's config untouched; commit only on primary OK.
+    forgetRequested = false;
     AppConfig working = config;
     bool workingOverlay = showOverlay;
     int workingLabelMode = labelMode;
@@ -264,6 +281,10 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
         primaryDlgProc, reinterpret_cast<LPARAM>(&state));
+    if (result == kDialogResultForget) {
+        forgetRequested = true;
+        return false;
+    }
     if (result != IDOK) {
         return false;
     }

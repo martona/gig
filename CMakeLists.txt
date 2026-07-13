@@ -164,6 +164,9 @@ if(WIN32)
         # Windows renderer (D3D11 + GDI overlay), native settings dialog, and the
         # registry settings backend -- all Windows-only, isolated here.
         src/render/d3d11_renderer.cpp
+        # Shared desktop imgui welcome/error panel (also in the APPLE block).
+        src/render/status_panel.cpp
+        src/render/status_panel.h
         src/render/text_overlay.cpp
         src/render/text_overlay.h
         src/ui/resource.h
@@ -214,6 +217,9 @@ elseif(APPLE)
         # Shared Metal video scene (also compiled into the iOS app by ios/gig.xcodeproj).
         src/render/metal_scene.mm
         src/render/metal_scene.h
+        # Shared desktop imgui welcome/error panel (also in the WIN32 block).
+        src/render/status_panel.cpp
+        src/render/status_panel.h
         src/platform/settings_store_mac.mm
         src/net/system_trust_mac.mm
         src/net/system_trust_mac.h

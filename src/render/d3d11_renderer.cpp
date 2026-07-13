@@ -1,4 +1,5 @@
 #include "render/grid_layout.h"
+#include "render/status_panel.h"
 #include "render/text_overlay.h"
 #include "render/video_renderer.h"
 
@@ -1609,8 +1610,23 @@ private:
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+        if (overlayStats_.screen != OverlayStats::StatusScreen::None) {
+            // Full-window welcome/connecting/error panel (no running session). It
+            // carries the status message, so the slim banner is suppressed.
+            const gig::StatusPanelAction panel =
+                gig::buildStatusPanel(overlayStats_, toolbarHeightPx());
+            if (panel.openSettings) {
+                pendingToolbarAction_ = ToolbarAction::Settings;
+            } else if (panel.retry) {
+                pendingToolbarAction_ = ToolbarAction::Reconnect;
+            } else if (panel.viewLog) {
+                logViewVisible_ = true;
+            }
+        }
         buildToolbar();
-        buildStatusBanner();
+        if (overlayStats_.screen == OverlayStats::StatusScreen::None) {
+            buildStatusBanner();
+        }
         if (logViewVisible_) {
             buildLogWindow();
         }
@@ -1668,18 +1684,24 @@ private:
             ImGui::AlignTextToFramePadding();
             // The live count is only trustworthy while the control plane is up;
             // when it isn't, show the link state instead of a stale "N/N live".
-            switch (overlayStats_.link) {
-            case OverlayStats::LinkState::Disconnected:
-                ImGui::TextColored(red, "disconnected");
-                break;
-            case OverlayStats::LinkState::Reconnecting:
-                ImGui::TextColored(amber, "reconnecting");
-                break;
-            case OverlayStats::LinkState::Ok: {
-                const ImVec4 statusColor = (total > 0 && online == total) ? green : (online == 0 ? red : amber);
-                ImGui::TextColored(statusColor, "%d/%d live", online, total);
-                break;
-            }
+            if (overlayStats_.screen == OverlayStats::StatusScreen::Welcome) {
+                ImGui::TextDisabled("not configured"); // first run: nothing scary
+            } else if (overlayStats_.screen == OverlayStats::StatusScreen::Connecting) {
+                ImGui::TextDisabled("connecting...");
+            } else {
+                switch (overlayStats_.link) {
+                case OverlayStats::LinkState::Disconnected:
+                    ImGui::TextColored(red, "disconnected");
+                    break;
+                case OverlayStats::LinkState::Reconnecting:
+                    ImGui::TextColored(amber, "reconnecting");
+                    break;
+                case OverlayStats::LinkState::Ok: {
+                    const ImVec4 statusColor = (total > 0 && online == total) ? green : (online == 0 ? red : amber);
+                    ImGui::TextColored(statusColor, "%d/%d live", online, total);
+                    break;
+                }
+                }
             }
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();

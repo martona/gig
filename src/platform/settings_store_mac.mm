@@ -105,6 +105,21 @@ public:
         keychainDelete(key);
     }
 
+    void clear() override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Whole defaults domain (config, pins/*, window geometry) ...
+        NSString* domain = [[NSBundle mainBundle] bundleIdentifier];
+        if (domain.length > 0) {
+            [defaults() removePersistentDomainForName:domain];
+        }
+        // ... plus every Keychain item under gig's service (secrets).
+        NSMutableDictionary* query = [NSMutableDictionary dictionary];
+        query[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+        query[(__bridge id)kSecAttrService] = keychainService();
+        SecItemDelete((__bridge CFDictionaryRef)query);
+    }
+
     std::vector<std::string> listKeys(std::string_view subkey) const override
     {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -25,6 +25,10 @@ public:
     // True if a cookie with this name is stored for origin.
     bool contains(const std::string& origin, const std::string& name) const;
 
+    // Drop every stored cookie (all origins). Used when credentials are wiped
+    // (Forget Settings): a live auth token must not survive the wipe in memory.
+    void clear();
+
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::map<std::string, std::string>> cookies_;

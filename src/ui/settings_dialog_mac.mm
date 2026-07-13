@@ -22,6 +22,22 @@
 - (void)ok:(id)sender { (void)sender; [NSApp stopModalWithCode:NSModalResponseOK]; }
 - (void)cancel:(id)sender { (void)sender; [NSApp stopModalWithCode:NSModalResponseCancel]; }
 - (void)advanced:(id)sender { (void)sender; if (self.onAdvanced) self.onAdvanced(); }
+// TODO(onboarding-project): temporary Forget Settings affordance; remove when done.
+// NSModalResponseAbort = the confirmed "forget" outcome (distinct from OK/Cancel).
+- (void)forget:(id)sender
+{
+    (void)sender;
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.messageText = @"Forget ALL settings?";
+    alert.informativeText = @"This erases the server, credentials, certificate pins and "
+                            @"window state, and restarts first-run setup.";
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert addButtonWithTitle:@"Forget Settings"];
+    if ([alert runModal] == NSAlertSecondButtonReturn) {
+        [NSApp stopModalWithCode:NSModalResponseAbort];
+    }
+}
 @end
 
 // Opens an NSOpenPanel and writes the chosen file path into its target field.
@@ -193,9 +209,10 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
 } // namespace
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
-                        const std::string& statusMessage)
+                        bool& forgetRequested, const std::string& statusMessage)
 {
     (void)parent; // macOS modal has no owner window to thread through
+    forgetRequested = false;
 
     @autoreleasepool {
         // Edit a working copy so Cancel (in either window) leaves the caller's config
@@ -252,6 +269,10 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         NSButton* advancedButton = [NSButton buttonWithTitle:@"Advanced..." target:controller action:@selector(advanced:)];
         advancedButton.frame = NSMakeRect(16, 16, 110, 30);
         [content addSubview:advancedButton];
+        // TODO(onboarding-project): temporary Forget Settings affordance.
+        NSButton* forgetButton = [NSButton buttonWithTitle:@"Forget..." target:controller action:@selector(forget:)];
+        forgetButton.frame = NSMakeRect(130, 16, 96, 30);
+        [content addSubview:forgetButton];
         NSButton* okButton = [NSButton buttonWithTitle:@"OK" target:controller action:@selector(ok:)];
         okButton.frame = NSMakeRect(kWidth - 110, 16, 94, 30);
         okButton.keyEquivalent = @"\r";
@@ -271,6 +292,10 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         [NSApp activateIgnoringOtherApps:YES];
         const NSModalResponse response = [NSApp runModalForWindow:window];
         [window orderOut:nil];
+        if (response == NSModalResponseAbort) {
+            forgetRequested = true; // confirmed "Forget..." -- caller wipes the store
+            return false;
+        }
         if (response != NSModalResponseOK) {
             return false;
         }

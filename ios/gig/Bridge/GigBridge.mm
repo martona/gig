@@ -124,6 +124,12 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setBool("insecure", settings.insecure);
 }
 
+// TODO(onboarding-project): temporary; remove with the Forget Settings UI.
++ (void)forgetAll
+{
+    gig::openSettingsStore()->clear();
+}
+
 @end
 
 #pragma mark - Pending pin
@@ -152,6 +158,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 @property (nonatomic, assign) unsigned long long decodedFrames;
 @property (nonatomic, assign) NSInteger ingestKbps;
 @property (nonatomic, copy) NSString *message;
+@property (nonatomic, assign) BOOL configError;
 @end
 
 @implementation GIGEngineStatus
@@ -169,6 +176,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     std::shared_ptr<gig::CookieJar> _cookieJar;
     std::unique_ptr<gig::CertPinStore> _pinStore;
     std::unique_ptr<gig::AppSession> _session;
+    // The last connect failure's classification (drives the error screen's CTA).
+    bool _lastConfigError;
 }
 // Last successfully built status, returned by status() when the engine is busy.
 // atomic: written under _mutex, read without it.
@@ -225,6 +234,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
     const gig::AppConfig cfg = loadAppConfig(*_store);
     const gig::ApplyResult result = _session->applyConfig(cfg);
+    _lastConfigError = !result.ok && result.failure == gig::ApplyFailure::Config;
     if (!result.ok) {
         gig::logError() << "iOS connect failed: " << result.error;
     }
@@ -275,8 +285,36 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
                                            length:static_cast<NSUInteger>(message.size())
                                          encoding:NSUTF8StringEncoding]
         ?: @"(non-UTF-8 error message)";
+    out.configError = _lastConfigError ? YES : NO;
     self.lastStatus = out;
     return out;
+}
+
+- (void)resetDeclinedPins
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_pinStore) {
+        _pinStore->clearSessionDeclines();
+    }
+}
+
+// TODO(onboarding-project): temporary, pairs with Forget Settings.
+- (void)forgetRuntimeState
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_session) {
+        _session->stop();
+        _session.reset();
+    }
+    // The jar/cache are create-once (connectLocked); dropping them here means the
+    // next connect starts from a clean slate -- no auth cookie or resumption
+    // ticket from the forgotten credentials survives in memory.
+    _cookieJar.reset();
+    _sessionCache.reset();
+    if (_pinStore) {
+        _pinStore->reset(); // staged pending + session declines
+    }
+    self.lastStatus = nil;
 }
 
 #pragma mark Pin flow

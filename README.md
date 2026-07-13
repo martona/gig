@@ -66,6 +66,18 @@ Server certificates are also checked against the requested **hostname**, and a *
 
 `base`, `user`, `password` (encrypted), `login-refresh` (`REG_QWORD`); `ca`, `cert`, `key`, `url` (single-stream mode without discovery), `stream-url` (override the discovered stream URL template) — all `REG_SZ`; `software` (force software decode; decode already auto-falls-back when no hardware path is usable), `overlay` (diagnostics tile on/off), `insecure` (skip server-cert verification, testing only) — `REG_DWORD` 0/1; `poll-interval` (health poll seconds), `rw-timeout-us` (per-connection I/O timeout) — `REG_QWORD`.
 
+## iOS
+
+Set up Guided Access if the device is meant to display a permanent video wall:
+
+- Go to Settings > Accessibility > Guided Access and turn it on.
+- Set a passcode (different from the device unlock PIN, if you want).
+- Open your Gig. 
+- Triple-click the side/power button.
+- Hit Start.
+
+The result: The device is now locked into Gig. Swiping up doesn't work, the control center is disabled, and notifications are hidden. The only way to exit back to the home screen (or access any other data) is to triple-click the hardware button and enter the Guided Access PIN.
+
 ## Next Steps
 
 - Justified/aspect-aware layout and a hero+spotters mode beyond the uniform grid.

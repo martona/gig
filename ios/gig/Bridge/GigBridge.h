@@ -39,6 +39,10 @@ NS_SWIFT_NAME(SettingsBridge)
 // NSObject's inherited class func load(). Hence loadSettings / current().
 + (GIGSettings *)loadSettings NS_SWIFT_NAME(current());
 + (void)save:(GIGSettings *)settings NS_SWIFT_NAME(save(_:));
+
+// TODO(onboarding-project): temporary Forget Settings affordance; remove when
+// done. Wipes EVERYTHING (config, cert pins, secrets) so onboarding restarts.
++ (void)forgetAll;
 @end
 
 #pragma mark - Engine
@@ -66,6 +70,9 @@ NS_SWIFT_NAME(EngineStatus)
 @property (nonatomic, assign, readonly) unsigned long long decodedFrames;
 @property (nonatomic, assign, readonly) NSInteger ingestKbps;
 @property (nonatomic, copy, readonly) NSString *message;   // "ok" or the failure reason
+// The last connect failure was structural (bad/missing config -> Settings is the
+// fix) rather than transient (host unreachable -> retry is the fix).
+@property (nonatomic, assign, readonly) BOOL configError;
 @end
 
 NS_SWIFT_NAME(Engine)
@@ -102,6 +109,16 @@ NS_SWIFT_NAME(Engine)
 - (void)declinePendingPinForHost:(NSString *)host
                      fingerprint:(NSString *)fingerprint
     NS_SWIFT_NAME(declinePendingPin(host:fingerprint:));
+
+// Forget session pin declines. Call before a USER-initiated retry (a deliberate
+// retry is a fresh trust decision); auto-reconnects must not.
+- (void)resetDeclinedPins;
+
+// TODO(onboarding-project): temporary, pairs with Forget Settings. Tears the
+// session down AND drops the in-memory runtime state a settings wipe must not
+// leak through: the auth cookie + TLS resumption tickets (they embody the
+// forgotten credentials) and the pin store's staged/declined session state.
+- (void)forgetRuntimeState;
 
 @end
 

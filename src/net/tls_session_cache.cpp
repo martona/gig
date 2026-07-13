@@ -140,6 +140,12 @@ std::size_t TlsSessionCache::size() const
     return impl_->sessions.size();
 }
 
+void TlsSessionCache::clear()
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->sessions.clear();
+}
+
 void enableSessionCache(SSL_CTX* context)
 {
     SSL_CTX_set_session_cache_mode(
