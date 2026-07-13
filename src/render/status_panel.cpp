@@ -104,9 +104,11 @@ StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLog
         case OverlayStats::StatusScreen::Error: {
             ImGui::SetCursorPosY(panelHeight * 0.28f);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.55f, 1.0f));
-            centerNextText(panelWidth, stats.errorIsConfig
-                ? "The connection settings need attention."
-                : "Can't reach the Frigate server.");
+            centerNextText(panelWidth, stats.errorIsAuth
+                ? "Frigate rejected the login."
+                : (stats.errorIsConfig
+                    ? "The connection settings need attention."
+                    : "Can't reach the Frigate server."));
             ImGui::PopStyleColor();
             if (!stats.statusHost.empty()) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.70f, 0.78f, 1.0f));
@@ -141,14 +143,23 @@ StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLog
             }
 #endif
 
+            if (stats.autoRetryPending) {
+                ImGui::Dummy(ImVec2(0.0f, lineHeight * 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.62f, 0.72f, 1.0f));
+                centerNextText(panelWidth, "Retrying automatically...");
+                ImGui::PopStyleColor();
+            }
+
             ImGui::Dummy(ImVec2(0.0f, lineHeight * 1.5f));
-            const int pressed = stats.errorIsConfig
+            // Settings is the fix for config AND auth failures; retry for network.
+            const bool settingsPrimary = stats.errorIsConfig || stats.errorIsAuth;
+            const int pressed = settingsPrimary
                 ? centeredButtons(panelWidth, "Open Settings", "Try Again", "View Log")
                 : centeredButtons(panelWidth, "Try Again", "Open Settings", "View Log");
             if (pressed == 1) {
-                (stats.errorIsConfig ? action.openSettings : action.retry) = true;
+                (settingsPrimary ? action.openSettings : action.retry) = true;
             } else if (pressed == 2) {
-                (stats.errorIsConfig ? action.retry : action.openSettings) = true;
+                (settingsPrimary ? action.retry : action.openSettings) = true;
             } else if (pressed == 3) {
                 action.viewLog = true;
             }

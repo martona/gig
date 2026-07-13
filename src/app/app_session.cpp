@@ -57,10 +57,13 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
             authConfig.tls = cfg.tls;
             auto auth = std::make_unique<FrigateAuth>(authConfig, sessionCache_, cookieJar_);
             std::string loginError;
-            if (!auth->login(&loginError)) {
-                // Reaching/authenticating to Frigate failed -- transient (host
-                // down, blip, or wrong creds the user can fix via Reconnect).
-                return { false, "login failed: " + loginError, ApplyFailure::Transient };
+            bool serverRejected = false;
+            if (!auth->login(&loginError, &serverRejected)) {
+                // The server answering with a 4xx is an app-level rejection (bad
+                // credentials -> Settings, no auto-retry); anything network-level
+                // (unreachable, timeout, TLS, 5xx) is transient and auto-retried.
+                return { false, "login failed: " + loginError,
+                         serverRejected ? ApplyFailure::Auth : ApplyFailure::Transient };
             }
             logInfo() << "frigate auth: logged in to " << cfg.baseUrl << " as '" << cfg.user << "'";
             auth_ = std::move(auth);

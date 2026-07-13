@@ -157,6 +157,15 @@ float smoothstep01(float x)
 constexpr float kZoomDuration = 0.30f;
 constexpr float kFadeDur = 0.22f;
 
+// Burn-in pixel orbit (the OLED-TV "pixel shift"): the whole scene drifts on a
+// small circle in integer steps -- 1 step every kOrbitStepSeconds, one position
+// per ~pixel of circumference, so a revolution takes about an hour and each
+// step is an invisible 1px hop. The grid area is inset by the radius on all
+// sides so the orbit never crops content.
+constexpr float kOrbitRadiusPts = 16.0f;
+constexpr int kOrbitPositions = 100;          // ~2*pi*16 -> ~1px per step
+constexpr double kOrbitStepSeconds = 40.0;    // full revolution ~67 min
+
 // Frame.layout points here when there is nothing grid-shaped to report (early
 // out, or fully-focused view), so hosts can dereference it unconditionally.
 const GridLayout kEmptyLayout;
@@ -228,13 +237,45 @@ bool MetalScene::tileShowingSignal(std::size_t index) const
 
 int MetalScene::tileAt(float x, float y) const
 {
-    for (std::size_t i = 0; i < gridLayoutCache_.tiles.size() && i < lastCameraCount_; ++i) {
+    const int cell = cellAt(x, y);
+    return (cell >= 0 && cell < static_cast<int>(lastCameraCount_)) ? cell : -1;
+}
+
+int MetalScene::cellAt(float x, float y) const
+{
+    for (std::size_t i = 0; i < gridLayoutCache_.tiles.size(); ++i) {
         const TileRect& cell = gridLayoutCache_.tiles[i];
         if (x >= cell.x && x < cell.x + cell.width && y >= cell.y && y < cell.y + cell.height) {
             return static_cast<int>(i);
         }
     }
     return -1;
+}
+
+bool MetalScene::wantsOrbitRepaint() const
+{
+    if (!haveOrbitEpoch_) {
+        return false;
+    }
+    int dx = 0;
+    int dy = 0;
+    currentOrbitOffset(dx, dy);
+    return dx != gridCacheOrbitX_ || dy != gridCacheOrbitY_;
+}
+
+void MetalScene::currentOrbitOffset(int& dx, int& dy) const
+{
+    if (!haveOrbitEpoch_) {
+        dx = 0;
+        dy = 0;
+        return;
+    }
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - orbitEpoch_).count();
+    const long step = static_cast<long>(elapsed / kOrbitStepSeconds);
+    const double angle = (static_cast<double>(step % kOrbitPositions) / kOrbitPositions) * 2.0 * M_PI;
+    dx = static_cast<int>(std::lround(std::cos(angle) * kOrbitRadiusPts));
+    dy = static_cast<int>(std::lround(std::sin(angle) * kOrbitRadiusPts));
 }
 
 MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
@@ -261,6 +302,10 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
     }
 
     const auto nowTp = std::chrono::steady_clock::now();
+    if (!haveOrbitEpoch_) {
+        orbitEpoch_ = nowTp;
+        haveOrbitEpoch_ = true;
+    }
     float dt = haveRenderTp_ ? std::chrono::duration<float>(nowTp - lastRenderTp_).count() : 0.0f;
     lastRenderTp_ = nowTp;
     haveRenderTp_ = true;
@@ -277,9 +322,19 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
     }
     sawAnimatedContent_ = false;
 
+    // Burn-in orbit: the whole scene drifts on a small circle in integer steps;
+    // every content rect below is inset by the radius so nothing ever crops.
+    int orbitX = 0;
+    int orbitY = 0;
+    currentOrbitOffset(orbitX, orbitY);
+
     // Layout in points (matches the hosts' hit-tests + chrome); video viewports
     // scale to pixels. Reserve the chrome strip in grid view only.
-    const TileRect fullPts { 0.0f, 0.0f, static_cast<float>(pointWidth), static_cast<float>(pointHeight) };
+    const TileRect fullPts {
+        kOrbitRadiusPts + static_cast<float>(orbitX),
+        kOrbitRadiusPts + static_cast<float>(orbitY),
+        static_cast<float>(pointWidth) - 2.0f * kOrbitRadiusPts,
+        static_cast<float>(pointHeight) - 2.0f * kOrbitRadiusPts };
     const bool fullyFocused = focusedTile_ >= 0 && animProgress_ >= 1.0f
         && focusedTile_ < static_cast<int>(frames.size());
 
@@ -289,33 +344,44 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
         if (hoveredTile_ == focusedTile_) {
             drawHover(encoder, fullPts);
         }
+        out.contentRect = fullPts;
     } else {
         const float chromeTop = params.reservedTopPoints;
-        const int gridHeight = std::max(1, pointHeight - static_cast<int>(chromeTop));
+        const float gridX = kOrbitRadiusPts + static_cast<float>(orbitX);
+        const float gridY = chromeTop + kOrbitRadiusPts + static_cast<float>(orbitY);
+        const int gridWidth = std::max(1, pointWidth - 2 * static_cast<int>(kOrbitRadiusPts));
+        const int gridHeight = std::max(1, pointHeight - static_cast<int>(chromeTop)
+            - 2 * static_cast<int>(kOrbitRadiusPts));
         const int effective = static_cast<int>(frames.size()) + (params.extraCell ? 1 : 0);
-        // Cache the layout: it depends only on (count, width, height), so
+        // Cache the layout: it depends only on (count, size, orbit step), so
         // recompute only when one changes -- not every render.
-        if (effective != gridCacheCount_ || pointWidth != gridCacheWidth_
-            || gridHeight != gridCacheHeight_) {
-            gridLayoutCache_ = computeGridLayout(effective, pointWidth, gridHeight);
+        if (effective != gridCacheCount_ || gridWidth != gridCacheWidth_
+            || gridHeight != gridCacheHeight_
+            || orbitX != gridCacheOrbitX_ || orbitY != gridCacheOrbitY_) {
+            gridLayoutCache_ = computeGridLayout(effective, gridWidth, gridHeight);
             for (TileRect& tile : gridLayoutCache_.tiles) {
-                tile.y += chromeTop;
+                tile.x += gridX;
+                tile.y += gridY;
             }
             gridCacheCount_ = effective;
-            gridCacheWidth_ = pointWidth;
+            gridCacheWidth_ = gridWidth;
             gridCacheHeight_ = gridHeight;
+            gridCacheOrbitX_ = orbitX;
+            gridCacheOrbitY_ = orbitY;
         }
         layout = &gridLayoutCache_;
         renderGridTiles(encoder, frames, *layout);
+        out.contentRect = TileRect { gridX, gridY,
+                                     static_cast<float>(gridWidth), static_cast<float>(gridHeight) };
 
         if (animProgress_ > 0.0f && animTile_ >= 0 && animTile_ < static_cast<int>(frames.size())
             && animTile_ < static_cast<int>(layout->tiles.size())) {
             const TileRect& cell = layout->tiles[static_cast<std::size_t>(animTile_)];
             const float e = smoothstep01(animProgress_);
             const TileRect grown {
-                std::lerp(cell.x, 0.0f, e), std::lerp(cell.y, 0.0f, e),
-                std::lerp(cell.width, static_cast<float>(pointWidth), e),
-                std::lerp(cell.height, static_cast<float>(pointHeight), e),
+                std::lerp(cell.x, fullPts.x, e), std::lerp(cell.y, fullPts.y, e),
+                std::lerp(cell.width, fullPts.width, e),
+                std::lerp(cell.height, fullPts.height, e),
             };
             drawTileContentAt(encoder, static_cast<std::size_t>(animTile_), grown);
         }
@@ -325,12 +391,43 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
         }
     }
 
+    drawDimOverlay(encoder, params);
+
+    // Record the orbit position we just drew so wantsOrbitRepaint() can clear --
+    // the grid branch's layout-recompute updates these, but the focus branch
+    // doesn't, so set them here for both (else focus view repaints every frame).
+    gridCacheOrbitX_ = orbitX;
+    gridCacheOrbitY_ = orbitY;
+
     const bool zoomAnimating = animProgress_ != zoomTarget;
     out.layout = layout;
     out.fullyFocused = fullyFocused;
     out.animating = sawAnimatedContent_ || zoomAnimating;
     out.zoomProgress = animProgress_;
     return out;
+}
+
+// Idle-dim: a uniform translucent black wash over the whole frame -- an exact
+// luminance multiply for everything under it. Reuses the hover pipeline: a
+// border wider than the quad degenerates fs_hover into a solid fill.
+void MetalScene::drawDimOverlay(id<MTLRenderCommandEncoder> encoder, const Params& params)
+{
+    const float dim = std::clamp(params.dimFactor, 0.0f, 1.0f);
+    if (dim >= 0.999f) {
+        return;
+    }
+    const TileRect full { 0.0f, 0.0f, params.pointWidth, params.pointHeight };
+    const MTLViewport vp = cellViewport(full);
+    [encoder setViewport:vp];
+    HoverConstants c {};
+    c.sizePx[0] = static_cast<float>(vp.width);
+    c.sizePx[1] = static_cast<float>(vp.height);
+    c.borderPx = static_cast<float>(vp.width + vp.height); // > any edge distance -> solid
+    c.color[0] = 0.0f; c.color[1] = 0.0f; c.color[2] = 0.0f;
+    c.color[3] = 1.0f - dim;
+    [encoder setRenderPipelineState:pipelineHover_];
+    [encoder setFragmentBytes:&c length:sizeof(c) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
 id<MTLRenderPipelineState> MetalScene::makePipeline(id<MTLFunction> vertexFn, id<MTLFunction> fragmentFn, bool blend)

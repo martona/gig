@@ -36,6 +36,7 @@ public:
         float scale = 1.0f;            // pixels per point
         float reservedTopPoints = 0.0f; // chrome strip above the grid (grid view only)
         bool extraCell = false;        // reserve one trailing grid cell (mac diagnostics tile)
+        float dimFactor = 1.0f;        // idle-dim luminance multiplier (1 = normal)
     };
 
     // Snapshot of what the scene drew, for the host's chrome pass. `layout` is in
@@ -47,6 +48,11 @@ public:
         bool fullyFocused = false;
         bool animating = false;        // signal/fade/zoom in flight (not host chrome)
         float zoomProgress = 0.0f;     // 0 = grid, 1 = focused
+        // The rect (points) the scene actually drew content into this frame --
+        // the grid area, or the focused image area. Includes the burn-in orbit
+        // offset, so hosts place focused-view overlays against THIS, not the
+        // window bounds.
+        TileRect contentRect {};
     };
 
     MetalScene() = default;
@@ -72,6 +78,14 @@ public:
     // cells only, diagnostics cell excluded). -1 = none. Grid view only; a
     // focused view is the host's "tap anywhere returns" case.
     int tileAt(float x, float y) const;
+
+    // Like tileAt but over ALL grid cells (index == cameraCount is the extra
+    // diagnostics cell when the host reserved one).
+    int cellAt(float x, float y) const;
+
+    // True when the burn-in orbit has stepped since the last render() -- the host
+    // ORs this into its dirty check so a static image still orbits.
+    bool wantsOrbitRepaint() const;
 
     // Encode the video scene into `encoder` (host-created, host-presented).
     Frame render(id<MTLRenderCommandEncoder> encoder,
@@ -134,12 +148,21 @@ private:
 
     std::vector<TileState> tiles_;
 
-    // Cached grid layout (recomputed only when count/width/height change).
+    // Burn-in pixel orbit: current integer offset (points) on the slow circular
+    // path, derived from wall time since the scene came up.
+    void currentOrbitOffset(int& dx, int& dy) const;
+    void drawDimOverlay(id<MTLRenderCommandEncoder> encoder, const Params& params);
+
+    // Cached grid layout (recomputed when count/size/orbit-step change).
     GridLayout gridLayoutCache_;
     int gridCacheCount_ = -1;
     int gridCacheWidth_ = -1;
     int gridCacheHeight_ = -1;
+    int gridCacheOrbitX_ = 0;
+    int gridCacheOrbitY_ = 0;
     std::size_t lastCameraCount_ = 0;
+    std::chrono::steady_clock::time_point orbitEpoch_;
+    bool haveOrbitEpoch_ = false;
 
     std::vector<std::uint64_t> tileBytes_;
 

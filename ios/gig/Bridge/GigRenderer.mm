@@ -16,6 +16,7 @@
 
 #include "log.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -59,6 +60,15 @@
     std::string _overlayFingerprint;
     BOOL _zoomedFlag;
 
+    // Burn-in: idle-dim ramp + chromeless timer. lastInteraction advances on any
+    // tap / chrome activity; the dim factor ramps toward the target each tick.
+    CFTimeInterval _lastInteraction;
+    float _dimFactor;
+    NSInteger _dimLevelPercent;
+    NSInteger _dimDelaySeconds;
+    CGFloat _dimPreview;  // >=0 forces the factor (settings preview); <0 = idle-driven
+    BOOL _chromeHiddenFlag;
+
     // Dirty-render gate (the desktop run loop's on-demand rendering, ported to
     // the display-link tick): encode a pass only when a new decoded frame
     // arrived, the scene reported an animation in flight last frame (signal
@@ -84,8 +94,37 @@
         _scale = 1.0;
         _lastAnimating = YES; // render until the first scene report says idle
         _needsRender = YES;
+        _dimFactor = 1.0f;
+        _dimLevelPercent = 60;
+        _dimDelaySeconds = 600;
+        _dimPreview = -1.0;
+        _lastInteraction = CACurrentMediaTime();
     }
     return self;
+}
+
+- (void)noteInteraction
+{
+    _lastInteraction = CACurrentMediaTime();
+    _needsRender = YES;
+}
+
+- (void)setDimLevelPercent:(NSInteger)levelPercent delaySeconds:(NSInteger)delaySeconds
+{
+    _dimLevelPercent = std::clamp<NSInteger>(levelPercent, 10, 100);
+    _dimDelaySeconds = std::max<NSInteger>(delaySeconds, 0);
+    _lastInteraction = CACurrentMediaTime();
+}
+
+- (void)setDimPreview:(CGFloat)factor
+{
+    _dimPreview = factor;
+    _needsRender = YES;
+}
+
+- (BOOL)chromeHidden
+{
+    return _chromeHiddenFlag;
 }
 
 - (void)attachLayer:(CAMetalLayer *)layer
@@ -159,6 +198,7 @@
     if (!_scene) {
         return;
     }
+    [self noteInteraction]; // resets the idle-dim + chromeless timers
     _needsRender = YES; // focus change animates from the next tick
     if (_scene->focusedTile() >= 0) {
         _scene->setFocusedTile(-1); // any tap returns to the grid
@@ -191,6 +231,31 @@
         return;
     }
 
+    // Idle-dim + chromeless timers (evaluated BEFORE the dirty gate so a lone
+    // dim ramp or a chrome-hide transition still forces a render). The orbit
+    // also keeps the scene changing, but on its own 40s cadence -- so we let the
+    // scene's own animating flag / frame stamp drive most repaints and just make
+    // sure dim/chrome transitions aren't gated out.
+    const CFTimeInterval idle = CACurrentMediaTime() - _lastInteraction;
+    // Chromeless de-chroming is independent of the dim setting (a "Never dim"
+    // choice must still hide the bright static toolbar/status bar). The SwiftUI
+    // layer additionally gates this on being connected.
+    const bool chromeHide = idle >= 60.0;
+    if (chromeHide != _chromeHiddenFlag) {
+        _chromeHiddenFlag = chromeHide;
+        _needsRender = YES;
+        if (self.onOverlayChanged) {
+            self.onOverlayChanged();
+        }
+    }
+    float dimTarget = 1.0f;
+    if (_dimPreview >= 0.0) {
+        dimTarget = std::clamp(static_cast<float>(_dimPreview), 0.1f, 1.0f);
+    } else if (_dimDelaySeconds > 0 && idle >= static_cast<double>(_dimDelaySeconds)) {
+        dimTarget = static_cast<float>(_dimLevelPercent) / 100.0f;
+    }
+    const bool dimming = _dimFactor != dimTarget;
+
     @autoreleasepool {
         GIGEngine *engine = [GIGEngine shared];
         const std::vector<std::shared_ptr<VideoFrame>> frames = [engine snapshotFramesInternal];
@@ -202,8 +267,15 @@
         for (const std::shared_ptr<VideoFrame> &frame : frames) {
             stamp = stamp * 31ull + (frame ? frame->index + 1ull : 0ull);
         }
-        if (!_needsRender && !_lastAnimating && stamp == _lastFrameStamp) {
+        if (!_needsRender && !_lastAnimating && !dimming
+            && !_scene->wantsOrbitRepaint() && stamp == _lastFrameStamp) {
             return;
+        }
+
+        if (dimming) {
+            const float stepD = 0.015f;
+            _dimFactor = (_dimFactor < dimTarget) ? std::min(dimTarget, _dimFactor + stepD)
+                                                  : std::max(dimTarget, _dimFactor - stepD);
         }
 
         _scene->setTileActivity([engine tileByteCountsInternal]);
@@ -227,6 +299,7 @@
         params.scale = static_cast<float>(_scale);
         params.reservedTopPoints = 0.0f; // the SwiftUI toolbar lives OUTSIDE the Metal view
         params.extraCell = false;        // no diagnostics tile on iOS (dropped by decision)
+        params.dimFactor = _dimFactor;
         const gig::MetalScene::Frame scene = _scene->render(encoder, frames, params);
 
         [encoder endEncoding];

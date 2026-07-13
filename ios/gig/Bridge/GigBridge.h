@@ -29,6 +29,10 @@ NS_SWIFT_NAME(Settings)
 // turn on `insecure` for testing. (Cert pinning also applies once wired to the UI.)
 @property (nonatomic, copy) NSString *caPath;
 @property (nonatomic, assign) BOOL insecure;
+// Burn-in idle dim: ramp video to this luminance (10..100 %) after `dimDelaySeconds`
+// of no interaction (0 = never dim).
+@property (nonatomic, assign) NSInteger dimLevelPercent;
+@property (nonatomic, assign) NSInteger dimDelaySeconds;
 @end
 
 NS_SWIFT_NAME(SettingsBridge)
@@ -70,8 +74,9 @@ NS_SWIFT_NAME(EngineStatus)
 @property (nonatomic, assign, readonly) unsigned long long decodedFrames;
 @property (nonatomic, assign, readonly) NSInteger ingestKbps;
 @property (nonatomic, copy, readonly) NSString *message;   // "ok" or the failure reason
-// The last connect failure was structural (bad/missing config -> Settings is the
-// fix) rather than transient (host unreachable -> retry is the fix).
+// The last connect failure is one Settings fixes (bad/missing config OR a
+// server-rejected login) rather than a network transient (host unreachable ->
+// retry, and gig auto-retries). So !configError on a failure == transient.
 @property (nonatomic, assign, readonly) BOOL configError;
 @end
 

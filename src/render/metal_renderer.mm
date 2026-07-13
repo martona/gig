@@ -38,7 +38,8 @@ namespace {
 
 constexpr float kToolbarLogicalHeight = 32.0f;
 constexpr float kBannerLogicalHeight = 22.0f;
-constexpr float kToolbarHideDelay = 2.5f;
+constexpr float kToolbarHideDelay = 2.5f;   // focus view: quick immersive hide
+constexpr float kChromeHideDelay = 60.0f;   // grid view: burn-in chromeless mode
 
 class MetalRenderer final : public VideoRenderer {
 public:
@@ -80,6 +81,7 @@ public:
         iconSettings_ = makeSymbolTexture(@"gearshape");
         iconReconnect_ = makeSymbolTexture(@"arrow.clockwise");
         iconLog_ = makeSymbolTexture(@"list.bullet");
+        iconFullscreen_ = makeSymbolTexture(@"arrow.up.left.and.arrow.down.right");
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -147,13 +149,21 @@ public:
             params.pointWidth = static_cast<float>(pointWidth);
             params.pointHeight = static_cast<float>(pointHeight);
             params.scale = scale_;
-            params.reservedTopPoints = kToolbarLogicalHeight; // grid view only (scene ignores it focused)
+            // Chromeless: the grid is full-bleed and the toolbar is an auto-hiding
+            // translucent overlay (burn-in) -- no reserved strip anymore.
+            params.reservedTopPoints = 0.0f;
             params.extraCell = overlayStats_.showDiagnostics; // trailing diagnostics cell
+            // Idle-dim is applied by the imgui pass here (over video + labels +
+            // diagnostics, under the toolbar), NOT inside the scene -- otherwise
+            // the imgui-drawn labels/diagnostics would stay bright over a dimmed
+            // video. So the scene renders undimmed; the shell dims.
+            params.dimFactor = 1.0f;
             const gig::MetalScene::Frame scene = scene_->render(encoder, frames, params);
 
-            const gig::TileRect fullPts { 0.0f, 0.0f, static_cast<float>(pointWidth),
-                                          static_cast<float>(pointHeight) };
-            renderImGui(commandBuffer, encoder, pass, frames, *scene.layout, scene.fullyFocused, fullPts);
+            // Focused-view label anchors to the rect the scene actually drew into
+            // (which carries the burn-in orbit offset), not the raw window bounds.
+            renderImGui(commandBuffer, encoder, pass, frames, *scene.layout, scene.fullyFocused,
+                        scene.contentRect);
 
             const bool toolbarAnimating = scene_->focusedTile() >= 0 && toolbarIdle_ < kToolbarHideDelay;
             animating_ = scene.animating || toolbarAnimating;
@@ -212,8 +222,17 @@ public:
 
     float reservedTopLogical() const override
     {
-        return scene_->focusedTile() < 0 ? kToolbarLogicalHeight : 0.0f;
+        return 0.0f; // chromeless: the toolbar overlays, nothing is reserved
     }
+
+    int hitTestCell(float x, float y) const override
+    {
+        return scene_->cellAt(x, y); // scene rects include the burn-in orbit
+    }
+
+    void setDimFactor(float factor) override { dimFactor_ = factor; }
+
+    bool wantsRepaint() const override { return scene_->wantsOrbitRepaint(); }
 
 private:
     // Rasterize an SF Symbol to a white-on-transparent RGBA texture for the toolbar
@@ -331,6 +350,18 @@ private:
             }
         }
 
+        // Idle-dim wash on the BACKGROUND draw list: covers video + labels +
+        // diagnostics but sits under the toolbar/banner/log/status windows (they
+        // are separate imgui windows, always above the background list). alpha =
+        // 1 - dim is an exact luminance multiply. (The scene renders undimmed;
+        // dimming happens here so imgui text isn't left bright over dimmed video.)
+        if (dimFactor_ < 0.999f) {
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            bg->AddRectFilled(vp->WorkPos,
+                              ImVec2(vp->WorkPos.x + vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y),
+                              IM_COL32(0, 0, 0, static_cast<int>((1.0f - dimFactor_) * 255.0f + 0.5f)));
+        }
+
         if (overlayStats_.screen != OverlayStats::StatusScreen::None) {
             // Full-window welcome/connecting/error panel (no running session). It
             // carries the status message, so the slim banner is suppressed.
@@ -420,7 +451,12 @@ private:
         const bool active = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || ImGui::IsMouseDown(ImGuiMouseButton_Left);
         toolbarIdle_ = active ? 0.0f : toolbarIdle_ + io.DeltaTime;
         const bool focusView = scene_->focusedTile() >= 0;
-        if (focusView && toolbarIdle_ >= kToolbarHideDelay) {
+        // Chromeless: the grid toolbar also auto-hides (burn-in), just slower than
+        // the focus view's immersive hide -- except while a status screen needs
+        // its buttons reachable.
+        const bool statusScreenUp = overlayStats_.screen != OverlayStats::StatusScreen::None;
+        const float hideDelay = focusView ? kToolbarHideDelay : kChromeHideDelay;
+        if (!statusScreenUp && toolbarIdle_ >= hideDelay) {
             return;
         }
 
@@ -428,7 +464,8 @@ private:
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.07f, 0.08f, focusView ? 0.82f : 1.0f));
+        // Always a translucent overlay now (nothing reserves space beneath it).
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.07f, 0.08f, 0.82f));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 0.0f));
         const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
@@ -466,12 +503,12 @@ private:
 
             // Right-aligned buttons: SF Symbol glyphs when available, else text.
             const ImGuiStyle& style = ImGui::GetStyle();
-            const bool icons = iconSettings_ && iconReconnect_ && iconLog_;
+            const bool icons = iconSettings_ && iconReconnect_ && iconLog_ && iconFullscreen_;
             if (icons) {
                 const float ext = ImGui::GetFontSize();
                 const ImVec2 isz(ext, ext);
                 const float btnW = ext + style.FramePadding.x * 2.0f;
-                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - (btnW * 3.0f + style.ItemSpacing.x * 2.0f));
+                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - (btnW * 4.0f + style.ItemSpacing.x * 3.0f));
                 if (ImGui::ImageButton("##settings", (ImTextureID)(uintptr_t)(__bridge void*)iconSettings_, isz)) {
                     pendingToolbarAction_ = ToolbarAction::Settings;
                 }
@@ -486,9 +523,15 @@ private:
                     logViewVisible_ = !logViewVisible_;
                 }
                 if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Log"); }
+                ImGui::SameLine();
+                if (ImGui::ImageButton("##fullscreen", (ImTextureID)(uintptr_t)(__bridge void*)iconFullscreen_, isz)) {
+                    pendingToolbarAction_ = ToolbarAction::ToggleFullscreen;
+                }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Fullscreen (F11)"); }
             } else {
                 const auto buttonWidth = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
-                const float buttonsWidth = buttonWidth("Settings") + buttonWidth("Reconnect") + buttonWidth("Log") + style.ItemSpacing.x * 2.0f;
+                const float buttonsWidth = buttonWidth("Settings") + buttonWidth("Reconnect") + buttonWidth("Log")
+                    + buttonWidth("Fullscreen") + style.ItemSpacing.x * 3.0f;
                 ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
                 if (ImGui::Button("Settings")) { pendingToolbarAction_ = ToolbarAction::Settings; }
                 if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Settings (F2)"); }
@@ -497,6 +540,9 @@ private:
                 if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Reconnect (F5)"); }
                 ImGui::SameLine();
                 if (ImGui::Button("Log")) { logViewVisible_ = !logViewVisible_; }
+                ImGui::SameLine();
+                if (ImGui::Button("Fullscreen")) { pendingToolbarAction_ = ToolbarAction::ToggleFullscreen; }
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Fullscreen (F11)"); }
             }
         }
         ImGui::End();
@@ -653,6 +699,8 @@ private:
     id<MTLTexture> iconSettings_ = nil;
     id<MTLTexture> iconReconnect_ = nil;
     id<MTLTexture> iconLog_ = nil;
+    id<MTLTexture> iconFullscreen_ = nil;
+    float dimFactor_ = 1.0f;
 
     std::unique_ptr<gig::MetalScene> scene_;
 

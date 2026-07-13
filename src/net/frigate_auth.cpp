@@ -67,7 +67,7 @@ FrigateAuth::~FrigateAuth()
     stop();
 }
 
-bool FrigateAuth::login(std::string* error)
+bool FrigateAuth::login(std::string* error, bool* serverRejected)
 {
     const std::string body = boost::json::serialize(boost::json::object {
         { "user", config_.user },
@@ -75,6 +75,12 @@ bool FrigateAuth::login(std::string* error)
     });
 
     const HttpResponse response = client_->post("/api/login", "application/json", body, 64 * 1024);
+    if (serverRejected) {
+        // 4xx = Frigate answered and said no (bad credentials -- app-level).
+        // status 0 (no HTTP round trip) or 5xx = network/server trouble, which
+        // the caller may treat as transient and auto-retry.
+        *serverRejected = !response.ok && response.status >= 400 && response.status < 500;
+    }
     if (!response.ok) {
         if (error) {
             *error = response.error;

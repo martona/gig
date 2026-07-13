@@ -495,44 +495,59 @@ public:
             context_->RSSetViewports(1, &fullViewport);
             context_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
 
+            // Burn-in orbit: the whole scene drifts on a small circle in invisible
+            // integer steps; content rects are inset by the radius so nothing crops.
+            if (!haveOrbitEpoch_) {
+                orbitEpoch_ = std::chrono::steady_clock::now();
+                haveOrbitEpoch_ = true;
+            }
+            int orbitX = 0;
+            int orbitY = 0;
+            currentOrbitOffset(orbitX, orbitY);
+            const int orbitMargin = static_cast<int>(std::lround(kOrbitRadiusLogical * dpiScale_));
+            const gig::TileRect contentFull {
+                static_cast<float>(orbitMargin + orbitX),
+                static_cast<float>(orbitMargin + orbitY),
+                static_cast<float>(static_cast<int>(backBufferWidth_) - 2 * orbitMargin),
+                static_cast<float>(static_cast<int>(backBufferHeight_) - 2 * orbitMargin),
+            };
+
             const bool fullyFocused = focusedTile_ >= 0 && animProgress_ >= 1.0f
                 && focusedTile_ < static_cast<int>(frames.size());
             if (fullyFocused) {
-                renderSingleTile(static_cast<std::size_t>(focusedTile_), frames);
+                renderSingleTile(static_cast<std::size_t>(focusedTile_), frames, contentFull);
                 if (hoveredTile_ == focusedTile_) {
-                    drawHover(gig::TileRect {
-                        0.0f, 0.0f, static_cast<float>(backBufferWidth_), static_cast<float>(backBufferHeight_) });
+                    drawHover(contentFull);
                 }
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
                 if (labelVisible(static_cast<std::size_t>(focusedTile_))) {
-                    drawTileLabel(
-                        gig::TileRect { 0.0f, 0.0f, static_cast<float>(backBufferWidth_), static_cast<float>(backBufferHeight_) },
-                        labelFor(static_cast<std::size_t>(focusedTile_)),
-                        2.0f);
+                    drawTileLabel(contentFull, labelFor(static_cast<std::size_t>(focusedTile_)), 2.0f);
                 }
                 overlay_.flush(context_.Get());
             } else {
-                // Reserve the top strip for the toolbar so the grid sits below it
-                // (undisturbed video). In focus view the toolbar auto-hides and the
-                // image is full-bleed, so no reservation there.
-                const int toolbarTop = static_cast<int>(toolbarHeightPx());
-                const int gridHeight = std::max(1, static_cast<int>(backBufferHeight_) - toolbarTop);
+                // Chromeless: the grid is full-bleed (the toolbar overlays it when
+                // visible); only the orbit margin insets it.
+                const int gridHeight = std::max(1, static_cast<int>(backBufferHeight_) - 2 * orbitMargin);
                 // Reserve one extra cell for the synthetic diagnostics tile.
                 const bool showDiagnostics = overlayStats_.showDiagnostics;
                 const int effectiveCount = static_cast<int>(frames.size()) + (showDiagnostics ? 1 : 0);
-                // Cache the layout: it depends only on (count, width, height), so
-                // recompute only when one changes -- not every render.
-                const int gridWidth = static_cast<int>(backBufferWidth_);
+                // Cache the layout: it depends only on (count, size, orbit step),
+                // so recompute only when one changes -- not every render.
+                const int gridWidth = std::max(1, static_cast<int>(backBufferWidth_) - 2 * orbitMargin);
                 if (effectiveCount != gridCacheCount_ || gridWidth != gridCacheWidth_
-                    || gridHeight != gridCacheHeight_) {
+                    || gridHeight != gridCacheHeight_
+                    || orbitX != gridCacheOrbitX_ || orbitY != gridCacheOrbitY_) {
                     gridLayoutCache_ = gig::computeGridLayout(effectiveCount, gridWidth, gridHeight);
                     for (gig::TileRect& tile : gridLayoutCache_.tiles) {
-                        tile.y += static_cast<float>(toolbarTop);
+                        tile.x += static_cast<float>(orbitMargin + orbitX);
+                        tile.y += static_cast<float>(orbitMargin + orbitY);
                     }
                     gridCacheCount_ = effectiveCount;
                     gridCacheWidth_ = gridWidth;
                     gridCacheHeight_ = gridHeight;
+                    gridCacheOrbitX_ = orbitX;
+                    gridCacheOrbitY_ = orbitY;
                 }
                 const gig::GridLayout& layout = gridLayoutCache_;
                 renderGridTiles(frames, layout);
@@ -546,10 +561,10 @@ public:
                     const gig::TileRect& cell = layout.tiles[static_cast<std::size_t>(animTile_)];
                     const float e = smoothstep01(animProgress_);
                     const gig::TileRect grown {
-                        std::lerp(cell.x, 0.0f, e),
-                        std::lerp(cell.y, 0.0f, e),
-                        std::lerp(cell.width, static_cast<float>(backBufferWidth_), e),
-                        std::lerp(cell.height, static_cast<float>(backBufferHeight_), e),
+                        std::lerp(cell.x, contentFull.x, e),
+                        std::lerp(cell.y, contentFull.y, e),
+                        std::lerp(cell.width, contentFull.width, e),
+                        std::lerp(cell.height, contentFull.height, e),
                     };
                     drawTileContentAt(static_cast<std::size_t>(animTile_), grown);
                 }
@@ -574,6 +589,14 @@ public:
                 }
                 overlay_.flush(context_.Get());
             }
+
+            drawDimOverlay();
+
+            // Record the orbit position drawn so wantsRepaint() can clear (the
+            // focus branch doesn't touch the layout cache; without this it would
+            // repaint every frame in focus view).
+            gridCacheOrbitX_ = orbitX;
+            gridCacheOrbitY_ = orbitY;
 
             renderImGui();
 
@@ -681,8 +704,35 @@ public:
 
     float reservedTopLogical() const override
     {
-        // The toolbar reserves space only in the grid view; focus view is full-bleed.
-        return focusedTile_ < 0 ? kToolbarLogicalHeight : 0.0f;
+        return 0.0f; // chromeless: the toolbar overlays, nothing is reserved
+    }
+
+    int hitTestCell(float x, float y) const override
+    {
+        // Logical -> pixel space (this renderer lays out in pixels), then scan
+        // the cached rects (which include the burn-in orbit offset).
+        const float px = x * dpiScale_;
+        const float py = y * dpiScale_;
+        for (std::size_t i = 0; i < gridLayoutCache_.tiles.size(); ++i) {
+            const gig::TileRect& cell = gridLayoutCache_.tiles[i];
+            if (px >= cell.x && px < cell.x + cell.width && py >= cell.y && py < cell.y + cell.height) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    void setDimFactor(float factor) override { dimFactor_ = factor; }
+
+    bool wantsRepaint() const override
+    {
+        if (!haveOrbitEpoch_) {
+            return false;
+        }
+        int dx = 0;
+        int dy = 0;
+        currentOrbitOffset(dx, dy);
+        return dx != gridCacheOrbitX_ || dy != gridCacheOrbitY_;
     }
 
     bool isAnimating() const override { return animating_; }
@@ -1362,6 +1412,65 @@ private:
         context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     }
 
+    // Current burn-in orbit offset (pixels), on the slow circle. Mirrors
+    // metal_scene.mm's currentOrbitOffset (points there, pixels here).
+    void currentOrbitOffset(int& dx, int& dy) const
+    {
+        if (!haveOrbitEpoch_) {
+            dx = 0;
+            dy = 0;
+            return;
+        }
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - orbitEpoch_).count();
+        const long step = static_cast<long>(elapsed / kOrbitStepSeconds);
+        const double angle =
+            (static_cast<double>(step % kOrbitPositions) / kOrbitPositions) * 2.0 * 3.14159265358979323846;
+        const double radiusPx = kOrbitRadiusLogical * dpiScale_;
+        dx = static_cast<int>(std::lround(std::cos(angle) * radiusPx));
+        dy = static_cast<int>(std::lround(std::sin(angle) * radiusPx));
+    }
+
+    // Idle-dim: a uniform translucent black wash over the whole frame -- an
+    // exact luminance multiply. Reuses the hover shader: a border wider than the
+    // quad degenerates it into a solid fill. Drawn before ImGui so chrome and
+    // status screens stay readable.
+    void drawDimOverlay()
+    {
+        const float dim = std::clamp(dimFactor_, 0.0f, 1.0f);
+        if (dim >= 0.999f) {
+            return;
+        }
+        D3D11_VIEWPORT viewport = {};
+        viewport.Width = static_cast<float>(backBufferWidth_);
+        viewport.Height = static_cast<float>(backBufferHeight_);
+        viewport.MaxDepth = 1.0f;
+        context_->RSSetViewports(1, &viewport);
+
+        HoverConstants constants = {};
+        constants.sizePx[0] = viewport.Width;
+        constants.sizePx[1] = viewport.Height;
+        constants.borderPx = viewport.Width + viewport.Height; // > any edge -> solid fill
+        constants.color[3] = 1.0f - dim;                       // black wash
+        context_->UpdateSubresource(hoverConstantBuffer_.Get(), 0, nullptr, &constants, 0, 0);
+
+        UINT stride = sizeof(Vertex);
+        UINT offset = 0;
+        ID3D11Buffer* vertexBuffers[] = { vertexBuffer_.Get() };
+        context_->IASetInputLayout(inputLayout_.Get());
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+        context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
+        context_->PSSetShader(hoverPixelShader_.Get(), nullptr, 0);
+        ID3D11Buffer* constantBuffers[] = { hoverConstantBuffer_.Get() };
+        context_->PSSetConstantBuffers(0, 1, constantBuffers);
+
+        const float factors[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context_->OMSetBlendState(alphaBlendState_.Get(), factors, 0xffffffff);
+        context_->Draw(4, 0);
+        context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    }
+
     // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
     // the back buffer has already been cleared.
     void renderGridTiles(const std::vector<std::shared_ptr<VideoFrame>>& frames, const gig::GridLayout& layout)
@@ -1418,7 +1527,8 @@ private:
     }
 
     // Draws a single focused camera letterboxed across the whole window.
-    void renderSingleTile(std::size_t index, const std::vector<std::shared_ptr<VideoFrame>>& frames)
+    void renderSingleTile(std::size_t index, const std::vector<std::shared_ptr<VideoFrame>>& frames,
+                          const gig::TileRect& full)
     {
         TileState& tile = tiles_[index];
         const VideoFrame* frame = frames[index].get();
@@ -1429,13 +1539,6 @@ private:
         } else if (tile.planeViews[0]) {
             resetFrameTextures(tile);
         }
-
-        const gig::TileRect full {
-            0.0f,
-            0.0f,
-            static_cast<float>(backBufferWidth_),
-            static_cast<float>(backBufferHeight_),
-        };
 
         if (!tile.planeViews[0]) {
             // No frame yet: fill the focused view with the signal animation too.
@@ -1648,22 +1751,28 @@ private:
             || ImGui::IsMouseDown(ImGuiMouseButton_Left);
         toolbarIdle_ = active ? 0.0f : toolbarIdle_ + io.DeltaTime;
         const bool focusView = focusedTile_ >= 0;
-        if (focusView && toolbarIdle_ >= kToolbarHideDelay) {
-            return; // immersive single-camera view: let it hide (image is full-bleed)
+        // Chromeless: the grid toolbar also auto-hides (burn-in), just slower than
+        // the focus view's immersive hide -- except while a status screen needs
+        // its buttons reachable.
+        const bool statusScreenUp = overlayStats_.screen != OverlayStats::StatusScreen::None;
+        const float hideDelay = focusView ? kToolbarHideDelay : kChromeHideDelay;
+        if (!statusScreenUp && toolbarIdle_ >= hideDelay) {
+            return;
         }
 
-        // Segoe MDL2 Assets glyphs (UTF-8): gear U+E713, refresh U+E72C, list U+EA37.
+        // Segoe MDL2 Assets glyphs (UTF-8): gear U+E713, refresh U+E72C, list U+EA37,
+        // fullscreen U+E740.
         const char* const settingsLabel = iconFontLoaded_ ? "\xEE\x9C\x93" : "Settings";
         const char* const reconnectLabel = iconFontLoaded_ ? "\xEE\x9C\xAC" : "Reconnect";
         const char* const logLabel = iconFontLoaded_ ? "\xEE\xA8\xB7" : "Log";
+        const char* const fullscreenLabel = iconFontLoaded_ ? "\xEE\x9D\x80" : "Fullscreen";
 
         const float height = toolbarHeightPx();
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
-        // Opaque chrome in the grid (it reserves space below it); slightly
-        // translucent in focus view, where it's a transient overlay.
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.07f, 0.08f, focusView ? 0.82f : 1.0f));
+        // Always a translucent overlay now (nothing reserves space beneath it).
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.07f, 0.08f, 0.82f));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f)); // flat icon buttons
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * dpiScale_, 0.0f));
         const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
@@ -1716,7 +1825,7 @@ private:
                 return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f;
             };
             const float buttonsWidth = buttonWidth(settingsLabel) + buttonWidth(reconnectLabel)
-                + buttonWidth(logLabel) + style.ItemSpacing.x * 2.0f;
+                + buttonWidth(logLabel) + buttonWidth(fullscreenLabel) + style.ItemSpacing.x * 3.0f;
             ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
             if (ImGui::Button(settingsLabel)) {
                 pendingToolbarAction_ = ToolbarAction::Settings;
@@ -1737,6 +1846,13 @@ private:
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Log");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(fullscreenLabel)) {
+                pendingToolbarAction_ = ToolbarAction::ToggleFullscreen;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Fullscreen (F11)");
             }
         }
         ImGui::End();
@@ -1872,11 +1988,16 @@ private:
     ComPtr<ID3D11Buffer> colorMatrixBuffer_;
     int lastColorMatrixFullRange_ = -1; // last value uploaded to colorMatrixBuffer_ (-1 = none yet)
 
-    // Cached grid layout (recomputed only when count/width/height change).
+    // Cached grid layout (recomputed when count/size/orbit-step change).
     gig::GridLayout gridLayoutCache_;
     int gridCacheCount_ = -1;
     int gridCacheWidth_ = -1;
     int gridCacheHeight_ = -1;
+    int gridCacheOrbitX_ = 0;
+    int gridCacheOrbitY_ = 0;
+    std::chrono::steady_clock::time_point orbitEpoch_;
+    bool haveOrbitEpoch_ = false;
+    float dimFactor_ = 1.0f;
 
     // Per-tile signal-animation driving state.
     std::vector<std::uint64_t> tileBytes_;   // latest per-camera cumulative bytes (from setTileActivity)
@@ -1914,6 +2035,13 @@ private:
 
     // Toolbar height in logical (DPI-independent) points; reserved above the grid.
     static constexpr float kToolbarLogicalHeight = 32.0f;
+    static constexpr float kChromeHideDelay = 60.0f; // grid view: burn-in chromeless mode
+    // Burn-in pixel orbit (see metal_scene.mm for the shared rationale): the
+    // whole scene drifts on a small circle in invisible 1px steps; content rects
+    // are inset by the radius so nothing crops. ~1 revolution per hour.
+    static constexpr float kOrbitRadiusLogical = 16.0f;
+    static constexpr int kOrbitPositions = 100;
+    static constexpr double kOrbitStepSeconds = 40.0;
     // Focus-view idle seconds before the (overlay) toolbar auto-hides. Read by
     // render() too, so the run loop keeps drawing until the hide actually lands.
     static constexpr float kToolbarHideDelay = 2.5f;

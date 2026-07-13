@@ -46,14 +46,33 @@ NS_SWIFT_NAME(VideoHost)
 - (void)stop;
 
 // A tap in view points: focused -> back to grid; grid -> zoom the tapped tile.
+// Also counts as interaction (resets the idle-dim + chromeless timers).
 - (void)handleTapAtPoint:(CGPoint)point NS_SWIFT_NAME(handleTap(at:));
 
+// Register interaction that isn't a tap (e.g. chrome shown by the SwiftUI layer)
+// so the idle timers reset.
+- (void)noteInteraction;
+
+// Idle-dim config (burn-in): after `delaySeconds` of no interaction the video
+// ramps to `levelPercent` luminance. delaySeconds == 0 disables dimming.
+- (void)setDimLevelPercent:(NSInteger)levelPercent delaySeconds:(NSInteger)delaySeconds
+    NS_SWIFT_NAME(setDim(levelPercent:delaySeconds:));
+
+// Live idle-dim preview: force the dim factor to `factor` (0..1) NOW, ignoring
+// the idle timer, for the settings preview slider. Pass a negative value to
+// resume normal idle-driven dimming.
+- (void)setDimPreview:(CGFloat)factor NS_SWIFT_NAME(setDimPreview(_:));
+
 @property (nonatomic, assign, readonly) BOOL zoomed;
+
+// True once `delaySeconds` of no interaction have elapsed: the SwiftUI layer
+// hides its chrome (toolbar + system status bar + home indicator) for burn-in.
+@property (nonatomic, assign, readonly) BOOL chromeHidden;
 
 // Labels currently visible (empty while the zoom animation runs).
 - (NSArray<GIGTileLabel *> *)visibleLabels;
 
-// Fired on the main thread whenever visibleLabels/zoomed changed.
+// Fired on the main thread whenever visibleLabels/zoomed/chromeHidden changed.
 @property (nonatomic, copy, nullable) void (^onOverlayChanged)(void);
 
 @end

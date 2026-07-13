@@ -27,8 +27,15 @@ final class EngineModel: ObservableObject {
     @Published var total = 0
     @Published var detail = ""            // failure reason ("" when healthy)
     @Published var pendingPin: PendingPin? // untrusted cert awaiting a decision
+    @Published var autoRetrying = false   // a transient failure is being retried
 
     private var resumeOnActive = false
+
+    // Auto-reconnect for network-transient failures (a flapping switch port must
+    // not need a human tap). Doubling backoff 5s -> 60s; NOT for auth/config
+    // errors (those need the user).
+    private var autoRetryDelay = 0
+    private var autoRetryWork: DispatchWorkItem?
 
     // Engine lifecycle operations (connect / disconnect / pin decisions) run off
     // the main thread AND strictly in submission order: each task awaits its
@@ -51,43 +58,37 @@ final class EngineModel: ObservableObject {
 
     func connect() {
         guard !connecting else { return }
-        connecting = true
-        detail = ""
-        generation += 1
-        let gen = generation
-        runExclusive {
-            let status = Engine.shared().connect()
-            await MainActor.run { self.finishConnect(status, generation: gen) }
-        }
+        beginConnect(resetDeclines: false, freshBackoff: true)
     }
 
     // A deliberate user retry (Reconnect button / Try Again) is a fresh trust
-    // decision: a previously declined certificate may prompt again.
+    // decision (a previously declined certificate may prompt again) and a fresh
+    // backoff.
     func retry() {
         guard !connecting else { return }
-        connecting = true
-        detail = ""
-        generation += 1
-        let gen = generation
-        runExclusive {
-            Engine.shared().resetDeclinedPins()
-            let status = Engine.shared().connect()
-            await MainActor.run { self.finishConnect(status, generation: gen) }
-        }
+        beginConnect(resetDeclines: true, freshBackoff: true)
     }
 
     // Settings were just saved: reconnect with the new config, SUPERSEDING any
     // in-flight attempt (no !connecting guard — the guarded connect() would
     // silently drop a save made while a slow connect runs; the generation bump
-    // invalidates the old attempt's result and runExclusive keeps order). Also
-    // desktop parity: a save-and-reconnect clears session pin declines.
+    // invalidates the old attempt's result and runExclusive keeps order).
     func applySettingsAndReconnect() {
+        beginConnect(resetDeclines: true, freshBackoff: true)
+    }
+
+    // The one connect path. resetDeclines: treat as an explicit trust decision.
+    // freshBackoff: user-initiated (reset the auto-retry backoff); false keeps it
+    // (an automatic retry chaining into the next).
+    private func beginConnect(resetDeclines: Bool, freshBackoff: Bool) {
+        cancelAutoRetry()
+        if freshBackoff { autoRetryDelay = 0 }
         connecting = true
         detail = ""
         generation += 1
         let gen = generation
         runExclusive {
-            Engine.shared().resetDeclinedPins()
+            if resetDeclines { Engine.shared().resetDeclinedPins() }
             let status = Engine.shared().connect()
             await MainActor.run { self.finishConnect(status, generation: gen) }
         }
@@ -106,6 +107,8 @@ final class EngineModel: ObservableObject {
 
     func acceptPendingPin(_ pin: PendingPin) {
         pendingPin = nil
+        cancelAutoRetry()
+        autoRetryDelay = 0
         connecting = true
         detail = ""
         generation += 1
@@ -126,7 +129,11 @@ final class EngineModel: ObservableObject {
     // MARK: scene-phase policy (background -> clean disconnect, resume on return)
 
     func enterBackground() {
-        guard connected || connecting else { return }
+        // Capture BEFORE cancelling: a pending auto-retry (connected==false &&
+        // connecting==false during the backoff) still means "resume on return".
+        let wasRetrying = autoRetrying
+        cancelAutoRetry() // don't fire a reconnect while suspended
+        guard connected || connecting || wasRetrying else { return }
         resumeOnActive = true
         generation += 1 // invalidate any in-flight connect's result
         connecting = false
@@ -147,6 +154,8 @@ final class EngineModel: ObservableObject {
 
     // TODO(onboarding-project): temporary, pairs with Forget Settings.
     func resetAfterForget() {
+        cancelAutoRetry()
+        autoRetryDelay = 0
         generation += 1
         resumeOnActive = false
         connecting = false
@@ -169,6 +178,32 @@ final class EngineModel: ObservableObject {
         guard gen == generation else { return } // superseded; don't touch UI state
         apply(status, fromConnect: true)
         checkPendingPin()
+        // Schedule an automatic retry ONLY for a network-transient failure (not a
+        // server-rejected login or a config problem, and never if a cert prompt
+        // is up). configError covers both the auth and structural cases from the
+        // bridge; a bare transient failure has configError == false.
+        cancelAutoRetry()
+        if !status.connected && !configError && pendingPin == nil
+            && status.message != "ok" && status.message != "working" {
+            scheduleAutoRetry()
+        }
+    }
+
+    private func scheduleAutoRetry() {
+        autoRetryDelay = autoRetryDelay == 0 ? 5 : min(autoRetryDelay * 2, 60)
+        autoRetrying = true
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.autoRetrying, !self.connecting else { return }
+            self.beginConnect(resetDeclines: false, freshBackoff: false)
+        }
+        autoRetryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(autoRetryDelay), execute: work)
+    }
+
+    private func cancelAutoRetry() {
+        autoRetryWork?.cancel()
+        autoRetryWork = nil
+        autoRetrying = false
     }
 
     private func apply(_ status: EngineStatus, fromConnect: Bool) {
@@ -202,6 +237,7 @@ final class OverlayModel: ObservableObject {
 
     @Published var labels: [Label] = []
     @Published var zoomed = false
+    @Published var chromeHidden = false
 
     init() {
         VideoHost.shared().onOverlayChanged = { [weak self] in
@@ -216,6 +252,7 @@ final class OverlayModel: ObservableObject {
             Label(id: $0.index, text: $0.text, rect: $0.rect)
         }
         zoomed = host.zoomed
+        chromeHidden = host.chromeHidden
     }
 }
 
@@ -237,14 +274,27 @@ struct ContentView: View {
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    // Chromeless (burn-in): the video host reports when the idle timer elapsed;
+    // hide the toolbar + system status bar + home indicator. Never while a
+    // status/onboarding screen is up (its buttons must stay reachable).
+    private var chromeHidden: Bool {
+        overlay.chromeHidden && phase == .ready && engine.connected
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
+            if !chromeHidden {
+                toolbar
+            }
             videoArea
         }
         .background(Color(white: 0.03))
+        .statusBarHidden(chromeHidden)
+        .persistentSystemOverlays(chromeHidden ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
-            SettingsView(onSave: {
+            SettingsView(dimPreview: { factor in VideoHost.shared().setDimPreview(factor) },
+                         onSave: {
+                applyDimSettings()
                 if !SettingsBridge.current().baseURL.isEmpty {
                     engine.applySettingsAndReconnect()
                 }
@@ -276,7 +326,14 @@ struct ContentView: View {
             Text(pinMessage(pin))
         }
         .onAppear(perform: autoStart)
-        .onReceive(ticker) { _ in engine.refresh() }
+        .onReceive(ticker) { _ in
+            engine.refresh()
+            // A sheet open (Log/Settings) is active use even without a video tap:
+            // keep the idle-dim + chromeless timers from firing under it.
+            if showSettings || showLog {
+                VideoHost.shared().noteInteraction()
+            }
+        }
         .onChange(of: engine.connected) { _ in updateIdleTimer() }
         .onChange(of: engine.connecting) { connecting in
             // Entering an error state: re-probe so a Local-Network denial shows
@@ -414,6 +471,7 @@ struct ContentView: View {
                         detail: engine.detail,
                         configError: engine.configError,
                         localNetworkDenied: probe.outcome == .denied,
+                        autoRetrying: engine.autoRetrying,
                         onRetry: { engine.retry() },
                         onOpenSettings: { showSettings = true },
                         onViewLog: { showLog = true }
@@ -451,12 +509,19 @@ struct ContentView: View {
     private func autoStart() {
         guard !didAutoStart else { return }
         didAutoStart = true
+        applyDimSettings()
         if SettingsBridge.current().baseURL.isEmpty {
             phase = .welcome // first run: welcome -> permission -> settings
         } else {
             phase = .ready
             engine.connect()
         }
+    }
+
+    // Push the persisted idle-dim config into the video host (burn-in).
+    private func applyDimSettings() {
+        let s = SettingsBridge.current()
+        VideoHost.shared().setDim(levelPercent: s.dimLevelPercent, delaySeconds: s.dimDelaySeconds)
     }
 }
 

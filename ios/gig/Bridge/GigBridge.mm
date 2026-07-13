@@ -25,6 +25,7 @@
 #include "net/tls_session_cache.hpp"
 #include "platform/settings_store.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -99,6 +100,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.password = toNs(store->getString("password", true));
     settings.caPath = toNs(store->getString("ca", false));
     settings.insecure = store->getBool("insecure").value_or(false);
+    settings.dimLevelPercent = static_cast<NSInteger>(store->getInt("dim-level").value_or(60));
+    settings.dimDelaySeconds = static_cast<NSInteger>(store->getInt("dim-delay").value_or(600));
     return settings;
 }
 
@@ -122,6 +125,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
         store->setString("ca", caPath, false);
     }
     store->setBool("insecure", settings.insecure);
+    store->setInt("dim-level", std::clamp<NSInteger>(settings.dimLevelPercent, 10, 100));
+    store->setInt("dim-delay", std::max<NSInteger>(settings.dimDelaySeconds, 0));
 }
 
 // TODO(onboarding-project): temporary; remove with the Forget Settings UI.
@@ -234,7 +239,10 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
     const gig::AppConfig cfg = loadAppConfig(*_store);
     const gig::ApplyResult result = _session->applyConfig(cfg);
-    _lastConfigError = !result.ok && result.failure == gig::ApplyFailure::Config;
+    // Settings is the fix for a structural config error AND a server-rejected
+    // login (bad credentials); only a network transient auto-retries.
+    _lastConfigError = !result.ok
+        && (result.failure == gig::ApplyFailure::Config || result.failure == gig::ApplyFailure::Auth);
     if (!result.ok) {
         gig::logError() << "iOS connect failed: " << result.error;
     }

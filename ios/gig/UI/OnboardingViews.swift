@@ -110,6 +110,7 @@ struct ErrorStateView: View {
     let detail: String
     let configError: Bool
     let localNetworkDenied: Bool
+    var autoRetrying: Bool = false
     var onRetry: () -> Void
     var onOpenSettings: () -> Void
     var onViewLog: () -> Void
@@ -138,6 +139,16 @@ struct ErrorStateView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .lineLimit(6)
+            }
+
+            if autoRetrying {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Retrying automatically…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 4)
             }
 
             Spacer().frame(height: 16)

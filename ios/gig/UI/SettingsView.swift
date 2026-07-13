@@ -10,6 +10,9 @@
 import SwiftUI
 
 struct SettingsView: View {
+    /// Live idle-dim preview: factor in 0..1 while the slider moves; negative to
+    /// resume normal idle-driven dimming (call on disappear).
+    var dimPreview: (CGFloat) -> Void = { _ in }
     /// Called after a successful save; the caller reconnects with the new config.
     var onSave: () -> Void
     /// TODO(onboarding-project): temporary. Called after Forget Settings wiped the
@@ -23,7 +26,16 @@ struct SettingsView: View {
     @State private var password = ""
     @State private var caPath = ""
     @State private var insecure = false
+    @State private var dimLevel: Double = 60
+    @State private var dimDelay = 600
     @State private var confirmForget = false
+
+    // Delay choices (seconds); matches the desktop dropdown.
+    private static let dimDelays: [(Int, String)] = [
+        (0, "Never"), (300, "5 minutes"), (600, "10 minutes"), (900, "15 minutes"),
+        (1800, "30 minutes"), (3600, "1 hour"), (7200, "2 hours"),
+        (14400, "4 hours"), (28800, "8 hours"),
+    ]
 
     var body: some View {
         NavigationStack {
@@ -48,6 +60,29 @@ struct SettingsView: View {
                     Text("TLS")
                 } footer: {
                     Text("Certificates trusted by iOS (public CAs or an installed CA profile) work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Dim to")
+                            Spacer()
+                            Text("\(Int(dimLevel))%").foregroundStyle(.secondary)
+                        }
+                        // Live preview: dims the real video behind the sheet as
+                        // the slider moves; released -> resumes idle-driven dimming.
+                        Slider(value: $dimLevel, in: 10...100, step: 5) { editing in
+                            dimPreview(editing ? CGFloat(dimLevel / 100.0) : -1)
+                        }
+                        .onChange(of: dimLevel) { v in dimPreview(CGFloat(v / 100.0)) }
+                    }
+                    Picker("Dim after", selection: $dimDelay) {
+                        ForEach(Self.dimDelays, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                } header: {
+                    Text("Screen protection")
+                } footer: {
+                    Text("Reduces brightness when idle to limit OLED burn-in. The image also drifts slowly (pixel shift) to spread wear.")
                 }
 
                 // TODO(onboarding-project): temporary section; remove when done.
@@ -82,6 +117,7 @@ struct SettingsView: View {
                 }
             }
             .onAppear(perform: load)
+            .onDisappear { dimPreview(-1) } // resume idle-driven dimming
         }
     }
 
@@ -92,6 +128,8 @@ struct SettingsView: View {
         password = s.password
         caPath = s.caPath
         insecure = s.insecure
+        dimLevel = Double(s.dimLevelPercent)
+        dimDelay = s.dimDelaySeconds
     }
 
     private func save() {
@@ -101,10 +139,12 @@ struct SettingsView: View {
         s.password = password
         s.caPath = caPath
         s.insecure = insecure
+        s.dimLevelPercent = Int(dimLevel)
+        s.dimDelaySeconds = dimDelay
         SettingsBridge.save(s)
     }
 }
 
 #Preview {
-    SettingsView {}
+    SettingsView(onSave: {})
 }

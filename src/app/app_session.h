@@ -33,10 +33,12 @@ struct AppConfig {
 
 // Why an applyConfig() failed, so the caller can react without a one-size-fits-
 // all modal: Config = structural/local problem (no connection set, unreadable
-// TLS material) that needs the settings dialog; Transient = a connection-time
-// failure (host unreachable, login/discovery) that should come up disconnected
-// with a status banner and let the user Reconnect, not block on a dialog.
-enum class ApplyFailure { None, Config, Transient };
+// TLS material) that needs the settings dialog; Auth = the server ANSWERED and
+// rejected the login (4xx -- wrong credentials, an app-level problem: point the
+// user at Settings, do NOT auto-retry); Transient = a network-level failure
+// (host unreachable, timeout, TLS, 5xx, discovery) that is worth retrying
+// automatically -- e.g. a switch port flapping under a hardwired iPad.
+enum class ApplyFailure { None, Config, Auth, Transient };
 
 struct ApplyResult {
     bool ok = false;

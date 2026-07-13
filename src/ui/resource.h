@@ -30,3 +30,5 @@
 #define IDC_LABELMODE       2020
 // TODO(onboarding-project): temporary Forget Settings affordance; remove when done.
 #define IDC_FORGET          2021
+#define IDC_DIM_LEVEL       2022
+#define IDC_DIM_DELAY       2023

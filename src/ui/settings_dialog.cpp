@@ -2,6 +2,10 @@
 
 #include "ui/resource.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -88,8 +92,34 @@ struct DialogState {
     AppConfig* config;
     bool* showOverlay;
     int* labelMode; // 0 hide / 1 show-on-error-only / 2 always
+    int* dimLevel;  // idle-dim luminance percent (10..100)
+    int* dimDelay;  // idle-dim delay seconds (0 = never)
     std::string status;
 };
+
+// Idle-dim delay choices (seconds; 0 = Never), shared by both dialogs.
+struct DimDelayChoice { int seconds; const wchar_t* label; };
+constexpr DimDelayChoice kDimDelays[] = {
+    { 0, L"Never" },        { 300, L"5 minutes" },  { 600, L"10 minutes" },
+    { 900, L"15 minutes" }, { 1800, L"30 minutes" }, { 3600, L"1 hour" },
+    { 7200, L"2 hours" },   { 14400, L"4 hours" },   { 28800, L"8 hours" },
+};
+
+// The choice index nearest a delay value (snaps arbitrary stored values to a
+// menu entry so the dropdown always shows something sensible).
+int dimDelayIndex(int seconds)
+{
+    int best = 0;
+    int bestDiff = std::numeric_limits<int>::max();
+    for (int i = 0; i < static_cast<int>(std::size(kDimDelays)); ++i) {
+        const int diff = std::abs(kDimDelays[i].seconds - seconds);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = i;
+        }
+    }
+    return best;
+}
 
 // Custom dialog result: the user confirmed "Forget..." (wipe settings + restart
 // onboarding). TODO(onboarding-project): temporary; remove with IDC_FORGET.
@@ -136,6 +166,16 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     }
     SendMessageW(labelCombo, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
 
+    // Screen protection: dim level (%) + delay dropdown.
+    SetDlgItemInt(dlg, IDC_DIM_LEVEL, static_cast<UINT>(state.dimLevel ? *state.dimLevel : 60), FALSE);
+    HWND dimCombo = GetDlgItem(dlg, IDC_DIM_DELAY);
+    SendMessageW(dimCombo, CB_RESETCONTENT, 0, 0);
+    for (const DimDelayChoice& choice : kDimDelays) {
+        SendMessageW(dimCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice.label));
+    }
+    SendMessageW(dimCombo, CB_SETCURSEL,
+                 static_cast<WPARAM>(dimDelayIndex(state.dimDelay ? *state.dimDelay : 600)), 0);
+
     setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
 }
 
@@ -154,6 +194,15 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
         const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LABELMODE), CB_GETCURSEL, 0, 0);
         if (sel != CB_ERR) {
             *state.labelMode = static_cast<int>(sel);
+        }
+    }
+    if (state.dimLevel) {
+        *state.dimLevel = std::clamp(static_cast<int>(GetDlgItemInt(dlg, IDC_DIM_LEVEL, nullptr, FALSE)), 10, 100);
+    }
+    if (state.dimDelay) {
+        const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_DIM_DELAY), CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR && sel < static_cast<LRESULT>(std::size(kDimDelays))) {
+            *state.dimDelay = kDimDelays[sel].seconds;
         }
     }
     c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
@@ -269,6 +318,7 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 } // namespace
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
+                        int& dimLevelPercent, int& dimDelaySeconds,
                         bool& forgetRequested, const std::string& statusMessage)
 {
     // Edit a working copy so a Cancel in either the primary or the nested advanced
@@ -277,7 +327,10 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     AppConfig working = config;
     bool workingOverlay = showOverlay;
     int workingLabelMode = labelMode;
-    DialogState state { &working, &workingOverlay, &workingLabelMode, statusMessage };
+    int workingDimLevel = dimLevelPercent;
+    int workingDimDelay = dimDelaySeconds;
+    DialogState state { &working, &workingOverlay, &workingLabelMode,
+                        &workingDimLevel, &workingDimDelay, statusMessage };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
         primaryDlgProc, reinterpret_cast<LPARAM>(&state));
@@ -291,6 +344,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     config = working;
     showOverlay = workingOverlay;
     labelMode = workingLabelMode;
+    dimLevelPercent = workingDimLevel;
+    dimDelaySeconds = workingDimDelay;
     return true;
 }
 

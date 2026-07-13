@@ -73,12 +73,31 @@ std::string fromField(NSTextField* field)
 // Advanced window: edits the working config's TLS / tuning / stream-template fields
 // in place, but only on its own OK (Cancel leaves the working copy untouched, same
 // as the Windows advanced dialog).
-void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
+// Idle-dim delay choices (seconds; 0 = Never), matching the Windows dropdown.
+struct DimDelayChoice { int seconds; NSString* label; };
+static NSArray<NSString*>* dimDelayTitles()
+{
+    return @[ @"Never", @"5 minutes", @"10 minutes", @"15 minutes", @"30 minutes",
+              @"1 hour", @"2 hours", @"4 hours", @"8 hours" ];
+}
+static const int kDimDelaySeconds[] = { 0, 300, 600, 900, 1800, 3600, 7200, 14400, 28800 };
+static int dimDelayIndexFor(int seconds)
+{
+    int best = 0, bestDiff = INT_MAX;
+    for (int i = 0; i < static_cast<int>(sizeof(kDimDelaySeconds) / sizeof(int)); ++i) {
+        const int diff = std::abs(kDimDelaySeconds[i] - seconds);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
+void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
+                        int& dimLevelPercent, int& dimDelaySeconds)
 {
     @autoreleasepool {
         constexpr CGFloat kWidth = 560;
         constexpr CGFloat kRow = 30;
-        const CGFloat height = 470;
+        const CGFloat height = 560;
 
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWidth, height)
                                                        styleMask:NSWindowStyleMaskTitled
@@ -171,6 +190,17 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
         [content addSubview:labelPopup];
         row();
 
+        section(@"Screen protection");
+        label(@"Dim to (%):");
+        NSTextField* dimLevelField = field(std::to_string(dimLevelPercent), 80);
+        row();
+        label(@"Dim after:");
+        NSPopUpButton* dimDelayPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(174, y - 2, 220, 26) pullsDown:NO];
+        [dimDelayPopup addItemsWithTitles:dimDelayTitles()];
+        [dimDelayPopup selectItemAtIndex:dimDelayIndexFor(dimDelaySeconds)];
+        [content addSubview:dimDelayPopup];
+        row();
+
         section(@"Advanced connection");
         label(@"Stream template:");
         NSTextField* streamField = field(config.streamUrlTemplate, kWidth - 190);
@@ -202,6 +232,13 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
         config.softwareDecode = (softwareCheck.state == NSControlStateValueOn);
         showOverlay = (overlayCheck.state == NSControlStateValueOn);
         labelMode = static_cast<int>(labelPopup.indexOfSelectedItem);
+        dimLevelPercent = std::clamp(static_cast<int>(dimLevelField.intValue), 10, 100);
+        {
+            const NSInteger i = dimDelayPopup.indexOfSelectedItem;
+            if (i >= 0 && i < static_cast<NSInteger>(sizeof(kDimDelaySeconds) / sizeof(int))) {
+                dimDelaySeconds = kDimDelaySeconds[i];
+            }
+        }
         config.streamUrlTemplate = fromField(streamField);
     }
 }
@@ -209,6 +246,7 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode)
 } // namespace
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
+                        int& dimLevelPercent, int& dimDelaySeconds,
                         bool& forgetRequested, const std::string& statusMessage)
 {
     (void)parent; // macOS modal has no owner window to thread through
@@ -220,6 +258,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         AppConfig working = config;
         bool workingOverlay = showOverlay;
         int workingLabelMode = labelMode;
+        int workingDimLevel = dimLevelPercent;
+        int workingDimDelay = dimDelaySeconds;
 
         constexpr CGFloat kWidth = 520;
         const CGFloat height = 196;
@@ -285,7 +325,11 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         AppConfig* workingPtr = &working;
         bool* overlayPtr = &workingOverlay;
         int* labelPtr = &workingLabelMode;
-        controller.onAdvanced = ^{ showAdvancedDialog(*workingPtr, *overlayPtr, *labelPtr); };
+        int* dimLevelPtr = &workingDimLevel;
+        int* dimDelayPtr = &workingDimDelay;
+        controller.onAdvanced = ^{
+            showAdvancedDialog(*workingPtr, *overlayPtr, *labelPtr, *dimLevelPtr, *dimDelayPtr);
+        };
 
         [window center];
         [window makeKeyAndOrderFront:nil];
@@ -306,6 +350,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         config = working;
         showOverlay = workingOverlay;
         labelMode = workingLabelMode;
+        dimLevelPercent = workingDimLevel;
+        dimDelaySeconds = workingDimDelay;
         return true;
     }
 }

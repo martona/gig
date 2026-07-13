@@ -45,8 +45,10 @@ public:
 
     // One blocking login POST; never logs or echoes the password. On failure
     // returns false with the reason (status + a response-body snippet, or the
-    // transport error) in *error.
-    bool login(std::string* error = nullptr);
+    // transport error) in *error. *serverRejected (optional) is set true when
+    // the server ANSWERED with a 4xx -- an app-level rejection (bad creds),
+    // distinct from a network-level failure the caller may auto-retry.
+    bool login(std::string* error = nullptr, bool* serverRejected = nullptr);
 
     void startAutoRefresh();
     void stop();

@@ -18,6 +18,7 @@ namespace gig {
 // confirmed the "Forget..." button: the dialog closes returning false (no values
 // to save) and the caller wipes the settings store and restarts onboarding.
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
+                        int& dimLevelPercent, int& dimDelaySeconds,
                         bool& forgetRequested, const std::string& statusMessage = {});
 
 } // namespace gig

@@ -28,6 +28,8 @@ struct OverlayStats {
     enum class StatusScreen { None, Welcome, Connecting, Error };
     StatusScreen screen = StatusScreen::None;
     bool errorIsConfig = false;
+    bool errorIsAuth = false;      // server rejected the login (wording + Settings CTA)
+    bool autoRetryPending = false; // a transient failure is being retried automatically
 
     // Connection status, derived each refresh by the run loop. LinkState::Ok with
     // healthDegraded == false means nothing is wrong (no banner). Reconnecting =
@@ -49,8 +51,8 @@ enum class LabelMode { Hide = 0, ErrorOnly = 1, Always = 2 };
 class VideoRenderer {
 public:
     // A button press in the on-screen toolbar, polled by the run loop. The log
-    // toggle is handled inside the renderer; these two need the app.
-    enum class ToolbarAction { None, Settings, Reconnect };
+    // toggle is handled inside the renderer; the others need the app.
+    enum class ToolbarAction { None, Settings, Reconnect, ToggleFullscreen };
 
     virtual ~VideoRenderer() = default;
 
@@ -106,6 +108,23 @@ public:
     // Vertical space (logical points) the toolbar reserves above the grid, so the
     // run loop's click hit-testing matches the rendered layout. 0 in focus view.
     virtual float reservedTopLogical() const { return 0.0f; }
+
+    // The grid cell under a LOGICAL-point position, from the renderer's OWN laid-
+    // out rects (which include the burn-in orbit offset the caller can't know):
+    // 0..N-1 = cameras, N = the diagnostics cell when shown, -1 = none. Only
+    // meaningful in grid view (a focused view is the caller's tap-anywhere case).
+    virtual int hitTestCell(float x, float y) const { (void)x; (void)y; return -1; }
+
+    // Idle-dim luminance multiplier (1 = normal), pushed every frame by the run
+    // loop so the ramp animates smoothly. Applied to the video scene only; chrome
+    // and status screens stay readable.
+    virtual void setDimFactor(float factor) { (void)factor; }
+
+    // The renderer wants a repaint even though nothing else changed -- currently
+    // the burn-in orbit stepping to a new position. The on-demand run loop ORs
+    // this into its dirty check so a static image still orbits (the very case
+    // orbiting protects). Cheap: true only on the ~40s step boundary.
+    virtual bool wantsRepaint() const { return false; }
 
     virtual std::shared_ptr<D3D11DecodeContext> d3d11DecodeContext() const { return {}; }
 };

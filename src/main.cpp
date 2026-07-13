@@ -12,6 +12,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
@@ -155,6 +156,10 @@ struct StartupConfig {
     gig::AppConfig session;
     bool showOverlay = true;
     LabelMode labelMode = LabelMode::ErrorOnly;
+    // Burn-in idle dim: after dimDelaySeconds without interaction, the video
+    // ramps to dimLevelPercent luminance (0 delay = never dim).
+    int dimLevelPercent = 60;
+    int dimDelaySeconds = 600;
 };
 
 // Read all settings from the platform store, applying the same derivation +
@@ -177,6 +182,8 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.showOverlay = store.getBool("overlay").value_or(false); // debug tile off by default; status lives in the toolbar
     const int labelMode = static_cast<int>(store.getInt("cam-labels").value_or(1)); // default: show on error only
     cfg.labelMode = static_cast<LabelMode>((labelMode >= 0 && labelMode <= 2) ? labelMode : 1);
+    cfg.dimLevelPercent = std::clamp(static_cast<int>(store.getInt("dim-level").value_or(60)), 10, 100);
+    cfg.dimDelaySeconds = std::max(0, static_cast<int>(store.getInt("dim-delay").value_or(600)));
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -211,8 +218,11 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // Persist the editable settings back to the store (mirror of loadConfig's keys).
 // The password is DPAPI-encrypted; an empty password removes the value rather
 // than storing an empty blob. useSystemStore is derived on load, never stored.
-void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode)
+void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode,
+                int dimLevelPercent, int dimDelaySeconds)
 {
+    store.setInt("dim-level", dimLevelPercent);
+    store.setInt("dim-delay", dimDelaySeconds);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
     store.setString("stream-url", s.streamUrlTemplate);
@@ -425,6 +435,21 @@ int main(int argc, char** argv)
         gig::AppSession session(renderer->d3d11DecodeContext(), sessionCache, cookieJar);
         auto configEmpty = [&]() { return cfg.session.baseUrl.empty() && cfg.session.url.empty(); };
         bool lastFailureWasConfig = false;
+        bool lastFailureWasAuth = false;
+
+        // Auto-reconnect for network-transient failures (a flapping switch port
+        // must not need a human): doubling backoff 5s -> 60s while the error
+        // screen is up. Config errors and server-rejected logins never auto-retry.
+        bool autoRetryArmed = false;
+        int autoRetryDelaySeconds = 0;
+        auto autoRetryAt = std::chrono::steady_clock::time_point{};
+        auto scheduleAutoRetry = [&]() {
+            autoRetryDelaySeconds = autoRetryDelaySeconds == 0 ? 5 : std::min(autoRetryDelaySeconds * 2, 60);
+            autoRetryAt = std::chrono::steady_clock::now() + std::chrono::seconds(autoRetryDelaySeconds);
+            autoRetryArmed = true;
+            gig::logInfo() << "auto-reconnect in " << autoRetryDelaySeconds << "s";
+        };
+
         gig::ApplyResult applied;
         if (!configEmpty()) {
             applied = session.applyConfig(cfg.session);
@@ -451,6 +476,10 @@ int main(int argc, char** argv)
                 gig::logWarning() << "initial connect failed (" << applied.error
                                   << "); starting on the error screen";
                 lastFailureWasConfig = (applied.failure == gig::ApplyFailure::Config);
+                lastFailureWasAuth = (applied.failure == gig::ApplyFailure::Auth);
+                if (applied.failure == gig::ApplyFailure::Transient) {
+                    scheduleAutoRetry();
+                }
             }
         }
         renderer->setCameraLabels(session.cameraLabels());
@@ -467,6 +496,8 @@ int main(int argc, char** argv)
             } else {
                 stats.screen = OverlayStats::StatusScreen::Error;
                 stats.errorIsConfig = lastFailureWasConfig;
+                stats.errorIsAuth = lastFailureWasAuth;
+                stats.autoRetryPending = autoRetryArmed;
             }
         };
 
@@ -506,14 +537,22 @@ int main(int argc, char** argv)
         std::uint64_t lastRenderedFrames = 0;
         auto lastInteraction = std::chrono::steady_clock::now();
 
-        // Reconnect with the given config (F5 / settings-apply / Try Again):
-        // rebuild the session, rebind the renderer's camera set, reset the running
-        // frame deltas (the new supervisor counts from 0), report a failure.
-        auto applyAndReport = [&](const gig::AppConfig& connConfig) {
+        // Idle-dim (burn-in): ramp the video luminance to the configured level
+        // after the configured idle delay; snap back to full on any interaction.
+        float currentDim = 1.0f;
+
+        // Reconnect with the given config: user-initiated (F5 / settings-apply /
+        // Try Again -- fresh backoff + fresh trust decision) or an automatic
+        // retry (keeps the backoff, keeps session pin declines).
+        auto applyAndReport = [&](const gig::AppConfig& connConfig, bool userInitiated = true) {
             renderer->setFocusedTile(-1);
-            // An explicit retry is a fresh trust decision: a previously declined
-            // certificate may prompt again.
-            pinStore.clearSessionDeclines();
+            if (userInitiated) {
+                // An explicit retry is a fresh trust decision: a previously
+                // declined certificate may prompt again. And a fresh backoff.
+                pinStore.clearSessionDeclines();
+                autoRetryDelaySeconds = 0;
+            }
+            autoRetryArmed = false;
             {
                 // applyConfig blocks this thread (login/discovery); put the
                 // connecting screen up for the duration by rendering one frame.
@@ -530,9 +569,13 @@ int main(int argc, char** argv)
             lastStatsFrames = 0;
             lastConnectError = result.ok ? std::string() : result.error;
             lastFailureWasConfig = !result.ok && result.failure == gig::ApplyFailure::Config;
+            lastFailureWasAuth = !result.ok && result.failure == gig::ApplyFailure::Auth;
             if (!result.ok) {
                 // Surfaced non-modally via the error screen -- no messagebox.
                 gig::logError() << "connect failed: " << result.error;
+                if (result.failure == gig::ApplyFailure::Transient) {
+                    scheduleAutoRetry(); // network-level: keep trying on our own
+                }
             }
             // Reflect the outcome immediately (don't wait for the 1s stats tick).
             OverlayStats after;
@@ -545,41 +588,24 @@ int main(int argc, char** argv)
             renderer->setDiagnostics(after);
         };
 
-        // Camera tile under a window-space point, or -1. Mirrors the renderer's
-        // grid (cameras + optional diagnostics cell, below the toolbar strip); the
-        // diagnostics cell isn't a camera, so it's excluded here. Used for both the
-        // click-to-focus hit-test and the hover affordance.
-        // Cached grid layout for the hit-test: recompute only when the camera count
-        // or window/grid size changes, not on every mouse-motion event.
-        int hitCacheEffective = -1;
-        int hitCacheWidth = -1;
-        int hitCacheHeight = -1;
-        gig::GridLayout hitLayout;
+        // Camera tile under a window-space point, or -1. The renderer owns the
+        // laid-out rects (which include the burn-in orbit offset only it knows),
+        // so hit-testing asks it; index == cameraCount is the diagnostics cell.
         auto cameraTileAt = [&](float x, float y) -> int {
-            int windowWidth = 0;
-            int windowHeight = 0;
-            SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
-            if (windowWidth <= 0 || windowHeight <= 0) {
-                return -1;
+            const int cell = renderer->hitTestCell(x, y);
+            return (cell >= 0 && cell < static_cast<int>(session.cameraCount())) ? cell : -1;
+        };
+
+        // True fullscreen (borderless desktop), distinct from maximization.
+        // Enter/exit: F11 or the toolbar button; Esc also exits (after closing
+        // the log view / leaving a focused tile).
+        auto isFullscreen = [&]() {
+            return (SDL_GetWindowFlags(window.get()) & SDL_WINDOW_FULLSCREEN) != 0;
+        };
+        auto toggleFullscreen = [&]() {
+            if (!SDL_SetWindowFullscreen(window.get(), !isFullscreen())) {
+                gig::logWarning() << "fullscreen toggle failed: " << SDL_GetError();
             }
-            const std::size_t cameraCount = session.cameraCount();
-            const int effective = static_cast<int>(cameraCount) + (cfg.showOverlay ? 1 : 0);
-            const int gridTop = static_cast<int>(renderer->reservedTopLogical());
-            const int gridHeight = windowHeight - gridTop;
-            if (effective != hitCacheEffective || windowWidth != hitCacheWidth || gridHeight != hitCacheHeight) {
-                hitLayout = gig::computeGridLayout(effective, windowWidth, gridHeight);
-                hitCacheEffective = effective;
-                hitCacheWidth = windowWidth;
-                hitCacheHeight = gridHeight;
-            }
-            for (std::size_t t = 0; t < hitLayout.tiles.size() && t < cameraCount; ++t) {
-                gig::TileRect cell = hitLayout.tiles[t];
-                cell.y += static_cast<float>(gridTop);
-                if (x >= cell.x && x < cell.x + cell.width && y >= cell.y && y < cell.y + cell.height) {
-                    return static_cast<int>(t);
-                }
-            }
-            return -1;
         };
 
 #if defined(_WIN32) || defined(__APPLE__)
@@ -589,9 +615,12 @@ int main(int argc, char** argv)
             gig::AppConfig edited = cfg.session;
             bool overlay = cfg.showOverlay;
             int labelMode = static_cast<int>(cfg.labelMode);
+            int dimLevel = cfg.dimLevelPercent;
+            int dimDelay = cfg.dimDelaySeconds;
             bool forget = false;
-            if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, forget, lastConnectError)) {
-                saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode));
+            if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, dimLevel, dimDelay,
+                                        forget, lastConnectError)) {
+                saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode), dimLevel, dimDelay);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 OverlayStats overlayStats;
@@ -645,12 +674,14 @@ int main(int argc, char** argv)
                     continue;
                 }
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
-                    // Esc closes the log view first (even if ImGui has keyboard focus),
-                    // then leaves a focused tile, then quits.
+                    // Esc unwinds innermost-out: log view, focused tile,
+                    // fullscreen, then quit.
                     if (renderer->logViewVisible()) {
                         renderer->setLogViewVisible(false);
                     } else if (renderer->focusedTile() >= 0) {
                         renderer->setFocusedTile(-1);
+                    } else if (isFullscreen()) {
+                        toggleFullscreen();
                     } else {
                         running = false;
                     }
@@ -660,6 +691,10 @@ int main(int argc, char** argv)
                     // Reconnect live with the current config -- no restart.
                     gig::logInfo() << "reconnect requested (F5)";
                     applyAndReport(cfg.session);
+                    continue;
+                }
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F11) {
+                    toggleFullscreen(); // browser convention
                     continue;
                 }
 #if defined(_WIN32) || defined(__APPLE__)
@@ -687,23 +722,11 @@ int main(int argc, char** argv)
                         renderer->setFocusedTile(-1); // any click returns to the grid
                     } else if (const int idx = cameraTileAt(event.button.x, event.button.y); idx >= 0) {
                         renderer->setFocusedTile(idx);
-                    } else if (cfg.showOverlay) {
+                    } else if (cfg.showOverlay
+                        && renderer->hitTestCell(event.button.x, event.button.y)
+                            == static_cast<int>(session.cameraCount())) {
                         // The synthetic diagnostics tile (not a camera) toggles the log view.
-                        int windowWidth = 0;
-                        int windowHeight = 0;
-                        SDL_GetWindowSize(window.get(), &windowWidth, &windowHeight);
-                        const std::size_t cameraCount = session.cameraCount();
-                        const int gridTop = static_cast<int>(renderer->reservedTopLogical());
-                        gig::GridLayout layout = gig::computeGridLayout(
-                            static_cast<int>(cameraCount) + 1, windowWidth, windowHeight - gridTop);
-                        if (cameraCount < layout.tiles.size()) {
-                            gig::TileRect cell = layout.tiles[cameraCount];
-                            cell.y += static_cast<float>(gridTop);
-                            if (event.button.x >= cell.x && event.button.x < cell.x + cell.width
-                                && event.button.y >= cell.y && event.button.y < cell.y + cell.height) {
-                                renderer->setLogViewVisible(!renderer->logViewVisible());
-                            }
-                        }
+                        renderer->setLogViewVisible(!renderer->logViewVisible());
                     }
                 } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
                     // Hover affordance: in focus view the whole image is the hot
@@ -717,10 +740,10 @@ int main(int argc, char** argv)
                     renderer->resize();
                 }
 
-                // Remember the normal (non-maximized/minimized) window rectangle.
+                // Remember the normal (non-maximized/minimized/fullscreen) rectangle.
                 if (event.type == SDL_EVENT_WINDOW_MOVED || event.type == SDL_EVENT_WINDOW_RESIZED) {
                     const SDL_WindowFlags wflags = SDL_GetWindowFlags(window.get());
-                    if (!(wflags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED))) {
+                    if (!(wflags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN))) {
                         SDL_GetWindowPosition(window.get(), &liveGeom.x, &liveGeom.y);
                         SDL_GetWindowSize(window.get(), &liveGeom.w, &liveGeom.h);
                     }
@@ -805,18 +828,41 @@ int main(int argc, char** argv)
                 lastStatsFrames = total;
             }
 
+            // Fire a scheduled auto-reconnect when its backoff elapses (a network
+            // transient recovering on its own -- e.g. the switch port came back).
+            if (autoRetryArmed && now >= autoRetryAt) {
+                gig::logInfo() << "auto-reconnect";
+                applyAndReport(cfg.session, /*userInitiated=*/false);
+            }
+
+            // Idle-dim ramp. Target = full while a status screen is up, recently
+            // interacted, or dimming disabled; else the configured level after the
+            // delay. Ramp ~1.5%/frame so it's a gentle fade, not a snap.
+            const bool idleForDim = cfg.dimDelaySeconds > 0
+                && (frameStart - lastInteraction) >= std::chrono::seconds(cfg.dimDelaySeconds)
+                && session.running();
+            const float dimTarget = idleForDim ? static_cast<float>(cfg.dimLevelPercent) / 100.0f : 1.0f;
+            const bool dimming = currentDim != dimTarget;
+            if (dimming) {
+                const float stepD = 0.015f;
+                currentDim = (currentDim < dimTarget) ? std::min(dimTarget, currentDim + stepD)
+                                                      : std::max(dimTarget, currentDim - stepD);
+            }
+            renderer->setDimFactor(currentDim);
+
             // Draw on demand. While minimized there's nothing to present, so skip
             // the render (and the shared D3D11 lock it holds) entirely -- decoders
             // keep running so restore is instant. Otherwise draw when a new frame
             // arrived, an animation is in flight, input was recent, the stats just
-            // refreshed, or the log view is open.
+            // refreshed, the log view is open, or the dim level is ramping.
             const bool minimized = (SDL_GetWindowFlags(window.get()) & SDL_WINDOW_MINIMIZED) != 0;
             const std::uint64_t decodedNow = session.totalDecodedFrames();
             const bool newFrame = decodedNow != lastRenderedFrames;
             const bool recentInput = (frameStart - lastInteraction) < inputRenderTail;
             const bool dirty = !minimized
-                && (newFrame || statsRefreshed || recentInput
-                    || renderer->isAnimating() || renderer->logViewVisible());
+                && (newFrame || statsRefreshed || recentInput || dimming
+                    || renderer->isAnimating() || renderer->logViewVisible()
+                    || renderer->wantsRepaint()); // burn-in orbit step
 
             if (dirty) {
                 const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
@@ -824,11 +870,14 @@ int main(int argc, char** argv)
                 renderer->render(frames);
                 lastRenderedFrames = decodedNow;
 
-                // Toolbar buttons route through the same paths as F2 / F5.
+                // Toolbar buttons route through the same paths as F2 / F5 / F11.
                 switch (renderer->takeToolbarAction()) {
                 case VideoRenderer::ToolbarAction::Reconnect:
                     gig::logInfo() << "reconnect requested (toolbar)";
                     applyAndReport(cfg.session);
+                    break;
+                case VideoRenderer::ToolbarAction::ToggleFullscreen:
+                    toggleFullscreen();
                     break;
 #if defined(_WIN32) || defined(__APPLE__)
                 case VideoRenderer::ToolbarAction::Settings:
@@ -853,7 +902,8 @@ int main(int argc, char** argv)
         {
             const SDL_WindowFlags wflags = SDL_GetWindowFlags(window.get());
             liveGeom.maximized = (wflags & SDL_WINDOW_MAXIMIZED) != 0;
-            if (!liveGeom.maximized && !(wflags & SDL_WINDOW_MINIMIZED)) {
+            if (!liveGeom.maximized
+                && !(wflags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN))) {
                 SDL_GetWindowPosition(window.get(), &liveGeom.x, &liveGeom.y);
                 SDL_GetWindowSize(window.get(), &liveGeom.w, &liveGeom.h);
             }
