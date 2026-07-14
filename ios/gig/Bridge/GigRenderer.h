@@ -67,9 +67,12 @@ NS_SWIFT_NAME(VideoHost)
 - (void)setDimPreview:(CGFloat)factor NS_SWIFT_NAME(setDimPreview(_:));
 
 // Activity view config (from settings): activity = show only cameras with
-// current Frigate activity; motionCounts = raw motion also counts (noisier).
-- (void)setViewModeActivity:(BOOL)activity motionCounts:(BOOL)motionCounts
-    NS_SWIFT_NAME(setViewMode(activity:motionCounts:));
+// current Frigate activity; motionCounts = raw motion also counts (noisier);
+// activeOnly = ignore stationary objects (parked cars, settled packages).
+- (void)setViewModeActivity:(BOOL)activity
+               motionCounts:(BOOL)motionCounts
+                 activeOnly:(BOOL)activeOnly
+    NS_SWIFT_NAME(setViewMode(activity:motionCounts:activeOnly:));
 
 // Keep off-screen cameras streaming (default YES). NO = the on-demand stream
 // policy tears hidden cameras down and reconnects them when they appear.

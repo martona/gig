@@ -31,6 +31,7 @@ struct SettingsView: View {
     @State private var orbitStep: Double = 40
     @State private var activityView = false
     @State private var motionActivity = false
+    @State private var activeOnly = false
     @State private var keepHiddenStreams = true
     @State private var confirmForget = false
 
@@ -103,11 +104,12 @@ struct SettingsView: View {
                         Text("Active cameras only").tag(true)
                     }
                     Toggle("Raw motion counts as activity", isOn: $motionActivity)
+                    Toggle("Ignore stationary objects", isOn: $activeOnly)
                     Toggle("Keep hidden cameras streaming", isOn: $keepHiddenStreams)
                 } header: {
                     Text("View")
                 } footer: {
-                    Text("Active-only keeps the wall empty until a camera sees something (tracked objects; raw motion optionally — it's noisy on windy days). Tap anywhere to peek at every camera; activity also wakes the display from idle dim. Turning off hidden-camera streaming saves power; a camera reconnects in a second or two when it appears.")
+                    Text("Active-only keeps the wall empty until a camera sees something (tracked objects; raw motion optionally — it's noisy on windy days). Ignoring stationary objects drops parked cars and settled packages ~10s after they stop moving. Tap anywhere to peek at every camera; activity also wakes the display from idle dim. Turning off hidden-camera streaming saves power; a camera reconnects in a second or two when it appears.")
                 }
 
                 // TODO(onboarding-project): temporary section; remove when done.
@@ -158,6 +160,7 @@ struct SettingsView: View {
         orbitStep = Double(s.orbitStepSeconds)
         activityView = s.activityView
         motionActivity = s.motionActivity
+        activeOnly = s.activeOnly
         keepHiddenStreams = s.keepHiddenStreams
     }
 
@@ -173,6 +176,7 @@ struct SettingsView: View {
         s.orbitStepSeconds = Int(orbitStep)
         s.activityView = activityView
         s.motionActivity = motionActivity
+        s.activeOnly = activeOnly
         s.keepHiddenStreams = keepHiddenStreams
         SettingsBridge.save(s)
     }

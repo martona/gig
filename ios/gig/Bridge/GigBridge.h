@@ -41,6 +41,9 @@ NS_SWIFT_NAME(Settings)
 // Whether raw motion counts as activity (noisy: wind-blown shadows trigger
 // it); tracked objects always count.
 @property (nonatomic, assign) BOOL motionActivity;
+// Ignore STATIONARY objects: a parked car or a package settled on the
+// doorstep stops counting as activity ~10s after it stops moving.
+@property (nonatomic, assign) BOOL activeOnly;
 // Keep off-screen cameras streaming (default). Off = tear a hidden camera's
 // stream down and reconnect when it appears (saves decode power; costs ~1-2s
 // + the scope animation on wake).

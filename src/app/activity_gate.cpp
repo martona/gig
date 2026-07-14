@@ -13,11 +13,16 @@ void ActivityGate::reset()
 }
 
 ActivityGate::Result ActivityGate::evaluate(
-    bool activityMode, bool motionCounts, bool feedConnected,
-    double secondsSinceInteraction,
+    bool activityMode, bool motionCounts, bool activeOnly,
+    bool feedConnected, double secondsSinceInteraction,
     const std::vector<FrigateEvents::CameraState>& states,
     int cameraCount)
 {
+    // One definition of "active" for wake edges and visibility alike.
+    auto isActive = [&](const FrigateEvents::CameraState& s) {
+        const int count = activeOnly ? s.activeObjectCount : s.objectCount;
+        return count > 0 || (motionCounts && s.motion);
+    };
     Result result;
     const std::size_t count = static_cast<std::size_t>(std::max(0, cameraCount));
     if (shownSince_.size() != count) {
@@ -43,8 +48,7 @@ ActivityGate::Result ActivityGate::evaluate(
     // shows all cameras), but only while the feed is trustworthy.
     if (statesUsable && feedConnected) {
         for (std::size_t i = 0; i < count; ++i) {
-            const FrigateEvents::CameraState& s = states[i];
-            const bool active = s.objectCount > 0 || (motionCounts && s.motion);
+            const bool active = isActive(states[i]);
             if (active && !wasActive_[i]) {
                 result.wakeEdge = true;
             }
@@ -71,9 +75,10 @@ ActivityGate::Result ActivityGate::evaluate(
     result.filtered = true;
     for (std::size_t i = 0; i < count; ++i) {
         const FrigateEvents::CameraState& s = states[i];
-        const bool active = s.objectCount > 0 || (motionCounts && s.motion);
-        const double lastActiveAt = motionCounts ? std::max(s.lastObjectAt, s.lastMotionAt)
-                                                 : s.lastObjectAt;
+        const bool active = isActive(s);
+        const double lastObjectAt = activeOnly ? s.lastActiveObjectAt : s.lastObjectAt;
+        const double lastActiveAt = motionCounts ? std::max(lastObjectAt, s.lastMotionAt)
+                                                 : lastObjectAt;
         const bool lingering = lastActiveAt > 0.0 && (now - lastActiveAt) < kLingerSeconds;
         const bool holding = shownSince_[i] > 0.0 && (now - shownSince_[i]) < kMinShowSeconds;
         if (active || lingering || holding) {

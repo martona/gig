@@ -171,6 +171,10 @@ struct StartupConfig {
     // Whether raw motion counts as activity (opt-in: wind-blown shadows
     // trigger it); tracked objects (<cam>/all) always count.
     bool motionActivity = false;
+    // Ignore STATIONARY objects (opt-in): activity uses Frigate's /active
+    // counters, so a parked car or a package settled on the doorstep stops
+    // counting ~10s after it stops moving.
+    bool activeOnly = false;
     // Keep off-screen cameras streaming (default). Off = tear a hidden
     // camera's stream down after a short delay and reconnect when it appears
     // (saves decode power; costs ~1-2s + the scope animation on wake).
@@ -202,6 +206,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.orbitStepSeconds = std::clamp(static_cast<int>(store.getInt("orbit-step").value_or(40)), 1, 600);
     cfg.viewMode = std::clamp(static_cast<int>(store.getInt("view-mode").value_or(0)), 0, 1);
     cfg.motionActivity = store.getBool("motion-activity").value_or(false);
+    cfg.activeOnly = store.getBool("active-only").value_or(false);
     cfg.keepHiddenStreams = store.getBool("stream-hidden").value_or(true);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
@@ -239,13 +244,14 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode,
                 int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
-                int viewMode, bool motionActivity, bool keepHiddenStreams)
+                int viewMode, bool motionActivity, bool activeOnly, bool keepHiddenStreams)
 {
     store.setInt("dim-level", dimLevelPercent);
     store.setInt("dim-delay", dimDelaySeconds);
     store.setInt("orbit-step", orbitStepSeconds);
     store.setInt("view-mode", viewMode);
     store.setBool("motion-activity", motionActivity);
+    store.setBool("active-only", activeOnly);
     store.setBool("stream-hidden", keepHiddenStreams);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
@@ -688,6 +694,7 @@ int main(int argc, char** argv)
             int orbitStep = cfg.orbitStepSeconds;
             int viewMode = cfg.viewMode;
             bool motionActivity = cfg.motionActivity;
+            bool activeOnly = cfg.activeOnly;
             bool keepHiddenStreams = cfg.keepHiddenStreams;
             bool forget = false;
             // Live idle-dim preview: while the slider moves, apply the previewed
@@ -699,10 +706,10 @@ int main(int argc, char** argv)
                 renderer->render(session.snapshotFrames());
             };
             if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, dimLevel, dimDelay,
-                                        orbitStep, viewMode, motionActivity, keepHiddenStreams,
-                                        forget, lastConnectError, onDimPreview)) {
+                                        orbitStep, viewMode, motionActivity, activeOnly,
+                                        keepHiddenStreams, forget, lastConnectError, onDimPreview)) {
                 saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode),
-                           dimLevel, dimDelay, orbitStep, viewMode, motionActivity,
+                           dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
                            keepHiddenStreams);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
@@ -868,8 +875,8 @@ int main(int argc, char** argv)
                 activityFeed ? activityFeed->snapshot()
                              : std::vector<gig::FrigateEvents::CameraState> {};
             const gig::ActivityGate::Result activity = activityGate.evaluate(
-                cfg.viewMode == 1, cfg.motionActivity, feedUp, sinceInteraction,
-                feedStates, static_cast<int>(session.cameraCount()));
+                cfg.viewMode == 1, cfg.motionActivity, cfg.activeOnly, feedUp,
+                sinceInteraction, feedStates, static_cast<int>(session.cameraCount()));
             if (activity.wakeEdge) {
                 lastActivityWake = frameStart;
             }
@@ -918,7 +925,8 @@ int main(int argc, char** argv)
                     for (std::size_t i = 0; i < visibleTiles.size(); ++i) {
                         const int cam = visibleTiles[i];
                         if (cam >= 0 && cam < static_cast<int>(feedStates.size())) {
-                            reasons[i] = gig::activityReason(feedStates[static_cast<std::size_t>(cam)]);
+                            reasons[i] = gig::activityReason(
+                                feedStates[static_cast<std::size_t>(cam)], cfg.activeOnly);
                         }
                     }
                 }

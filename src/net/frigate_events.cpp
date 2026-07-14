@@ -322,10 +322,13 @@ void FrigateEvents::handleMessage(const std::string& text)
     // Consumed topics (everything else -- events/reviews firehose, stats,
     // set/state control echoes -- is ignored, though it still counts as
     // traffic for the idle watchdog just by arriving):
-    //   "<cam>/all"           bare int, tracked objects (the activity trigger)
-    //   "<cam>/motion"        "ON"/"OFF"
-    //   "<cam>/<label>"       bare int per object label (reason suffix)
-    //   "<cam>/status/detect" "online" heartbeat every ~10s (down detection)
+    //   "<cam>/all"            bare int, tracked objects (the activity trigger)
+    //   "<cam>/all/active"     bare int, EXCLUDES stationary objects (parked
+    //                          cars, delivered packages) -- the active-only mode
+    //   "<cam>/motion"         "ON"/"OFF"
+    //   "<cam>/<label>"        bare int per object label (reason suffix)
+    //   "<cam>/<label>/active" bare int, active objects of that label
+    //   "<cam>/status/detect"  "online" heartbeat every ~10s (down detection)
     boost::system::error_code parseEc;
     const boost::json::value parsed = boost::json::parse(text, parseEc);
     if (parseEc || !parsed.is_object()) {
@@ -376,6 +379,17 @@ void FrigateEvents::handleMessage(const std::string& text)
         }
         return;
     }
+    if (kind == "all/active") {
+        if (!isNumeric) {
+            return;
+        }
+        const bool wasPositive = state.activeObjectCount > 0;
+        state.activeObjectCount = std::max(0, numeric);
+        if (state.activeObjectCount > 0 || wasPositive) {
+            state.lastActiveObjectAt = nowSeconds();
+        }
+        return;
+    }
     if (kind == "motion") {
         if (!payload->is_string()) {
             return;
@@ -396,12 +410,19 @@ void FrigateEvents::handleMessage(const std::string& text)
         state.lastStatusAt = nowSeconds();
         return;
     }
-    // "<cam>/<label>" object-count topics (person, car, dog, ...): a single
-    // path segment with a numeric payload. The numeric check alone filters
-    // the string-payload siblings (review_status, snapshots, ...) and the
-    // '/'-check above already excluded "<label>/active" and "x/state" paths.
-    if (isNumeric && kind.find('/') == std::string_view::npos) {
+    // "<cam>/<label>" and "<cam>/<label>/active" object-count topics (person,
+    // car, dog, ...): a single label segment with a numeric payload. The
+    // numeric check alone filters the string-payload siblings (review_status,
+    // snapshots, ...); multi-segment paths like "x/state" fail both shapes.
+    if (!isNumeric) {
+        return;
+    }
+    const std::size_t kindSlash = kind.find('/');
+    if (kindSlash == std::string_view::npos) {
         state.objects[std::string(kind)] = std::max(0, numeric);
+    } else if (kind.substr(kindSlash + 1) == "active"
+               && kind.substr(0, kindSlash).find('/') == std::string_view::npos) {
+        state.activeObjects[std::string(kind.substr(0, kindSlash))] = std::max(0, numeric);
     }
 }
 

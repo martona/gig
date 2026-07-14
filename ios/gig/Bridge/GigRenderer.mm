@@ -91,6 +91,7 @@
     std::uint64_t _lastSessionEpoch;
     BOOL _viewModeActivity;
     BOOL _motionActivity;
+    BOOL _activeOnly;
     BOOL _keepHiddenStreams;
     std::vector<int> _visibleTiles;
     CFTimeInterval _lastActivityWake;
@@ -151,10 +152,11 @@
     _needsRender = YES;
 }
 
-- (void)setViewModeActivity:(BOOL)activity motionCounts:(BOOL)motionCounts
+- (void)setViewModeActivity:(BOOL)activity motionCounts:(BOOL)motionCounts activeOnly:(BOOL)activeOnly
 {
     _viewModeActivity = activity;
     _motionActivity = motionCounts;
+    _activeOnly = activeOnly;
     _needsRender = YES;
 }
 
@@ -322,8 +324,8 @@
         // startup counts as interaction, which also covers /ws having no
         // state replay on connect.
         const gig::ActivityGate::Result activity = _gate.evaluate(
-            _viewModeActivity == YES, _motionActivity == YES, snap.feedConnected,
-            idle, snap.activity, static_cast<int>(snap.frames.size()));
+            _viewModeActivity == YES, _motionActivity == YES, _activeOnly == YES,
+            snap.feedConnected, idle, snap.activity, static_cast<int>(snap.frames.size()));
         if (activity.wakeEdge) {
             _lastActivityWake = CACurrentMediaTime();
         }
@@ -425,7 +427,7 @@
             bytes.push_back(slot < snap.bytes.size() ? snap.bytes[slot] : 0);
             std::string label = slot < snap.labels.size() ? snap.labels[slot] : std::string();
             std::string reason = snap.feedConnected && slot < snap.activity.size()
-                ? gig::activityReason(snap.activity[slot])
+                ? gig::activityReason(snap.activity[slot], _activeOnly == YES)
                 : std::string();
             if (!reason.empty() && !label.empty()) {
                 label += " - " + reason;

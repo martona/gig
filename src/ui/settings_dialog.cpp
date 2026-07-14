@@ -99,6 +99,7 @@ struct DialogState {
     int* orbitStep; // pixel-orbit step seconds (>= 1)
     int* viewMode;  // 0 all cameras / 1 active cameras only
     bool* motionActivity; // raw motion counts as activity (opt-in)
+    bool* activeOnly;     // ignore stationary objects (opt-in)
     bool* keepHiddenStreams; // keep off-screen cameras streaming (default on)
     std::string status;
     std::function<void(int)> onDimPreview; // live dim preview while the slider moves
@@ -204,6 +205,8 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     SendMessageW(viewCombo, CB_SETCURSEL, static_cast<WPARAM>(viewSel), 0);
     CheckDlgButton(dlg, IDC_MOTION_ACTIVITY,
                    (state.motionActivity && *state.motionActivity) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dlg, IDC_ACTIVE_ONLY,
+                   (state.activeOnly && *state.activeOnly) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dlg, IDC_STREAM_HIDDEN,
                    (!state.keepHiddenStreams || *state.keepHiddenStreams) ? BST_CHECKED : BST_UNCHECKED);
 
@@ -248,6 +251,9 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
     }
     if (state.motionActivity) {
         *state.motionActivity = IsDlgButtonChecked(dlg, IDC_MOTION_ACTIVITY) == BST_CHECKED;
+    }
+    if (state.activeOnly) {
+        *state.activeOnly = IsDlgButtonChecked(dlg, IDC_ACTIVE_ONLY) == BST_CHECKED;
     }
     if (state.keepHiddenStreams) {
         *state.keepHiddenStreams = IsDlgButtonChecked(dlg, IDC_STREAM_HIDDEN) == BST_CHECKED;
@@ -379,7 +385,8 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
-                        int& viewMode, bool& motionActivity, bool& keepHiddenStreams,
+                        int& viewMode, bool& motionActivity, bool& activeOnly,
+                        bool& keepHiddenStreams,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -399,10 +406,12 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     int workingOrbitStep = orbitStepSeconds;
     int workingViewMode = viewMode;
     bool workingMotionActivity = motionActivity;
+    bool workingActiveOnly = activeOnly;
     bool workingKeepHidden = keepHiddenStreams;
     DialogState state { &working, &workingOverlay, &workingLabelMode,
                         &workingDimLevel, &workingDimDelay, &workingOrbitStep,
-                        &workingViewMode, &workingMotionActivity, &workingKeepHidden,
+                        &workingViewMode, &workingMotionActivity, &workingActiveOnly,
+                        &workingKeepHidden,
                         statusMessage, onDimPreview };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
@@ -422,6 +431,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     orbitStepSeconds = workingOrbitStep;
     viewMode = workingViewMode;
     motionActivity = workingMotionActivity;
+    activeOnly = workingActiveOnly;
     keepHiddenStreams = workingKeepHidden;
     return true;
 }

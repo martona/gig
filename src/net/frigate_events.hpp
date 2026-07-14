@@ -40,17 +40,21 @@ class CookieJar;
 class FrigateEvents {
 public:
     struct CameraState {
-        int objectCount = 0;    // <cam>/all: tracked objects present right now
-        bool motion = false;    // <cam>/motion: raw motion currently ON
+        int objectCount = 0;       // <cam>/all: tracked objects present right now
+        int activeObjectCount = 0; // <cam>/all/active: excludes STATIONARY objects
+        bool motion = false;       // <cam>/motion: raw motion currently ON
         // nowSeconds() stamps of the last moment each signal was (still)
         // positive; 0 = never seen. Kept per signal so the caller can apply
-        // its "does raw motion count?" policy to the linger window too.
+        // its "does raw motion count?" / "active only?" policy to the linger
+        // window too.
         double lastObjectAt = 0.0;
+        double lastActiveObjectAt = 0.0;
         double lastMotionAt = 0.0;
-        // Per-label active object counts ("<cam>/person" etc.) -- feeds the
-        // label reason suffix ("driveway - person"). std::map so iteration
-        // (and the joined reason string) is deterministic.
+        // Per-label object counts ("<cam>/person" and "<cam>/person/active")
+        // -- feed the label reason suffix ("driveway - person"). std::map so
+        // iteration (and the joined reason string) is deterministic.
         std::map<std::string, int> objects;
+        std::map<std::string, int> activeObjects;
         // "<cam>/status/detect" heartbeat (every ~10s per camera): last
         // payload + arrival stamp. A camera counts as DOWN only after we've
         // heard from it at least once -- never-heard is unknown, not down
@@ -131,12 +135,13 @@ private:
 };
 
 // Why a camera counts as active, for the label suffix ("driveway - person"):
-// the active object labels joined (alphabetical -- std::map order), else
-// "motion" while raw motion is ON, else empty (nothing happening).
-inline std::string activityReason(const FrigateEvents::CameraState& state)
+// the object labels joined (alphabetical -- std::map order), else "motion"
+// while raw motion is ON, else empty (nothing happening). activeOnly picks
+// the stationary-excluding counts so a parked car doesn't caption its tile.
+inline std::string activityReason(const FrigateEvents::CameraState& state, bool activeOnly)
 {
     std::string reason;
-    for (const auto& [label, count] : state.objects) {
+    for (const auto& [label, count] : (activeOnly ? state.activeObjects : state.objects)) {
         if (count > 0) {
             if (!reason.empty()) {
                 reason += ", ";

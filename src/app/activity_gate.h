@@ -37,9 +37,12 @@ public:
     };
 
     // states must be index-aligned with the session's cameras; pass an empty
-    // vector (or a mismatched size) to force show-all.
-    Result evaluate(bool activityMode, bool motionCounts, bool feedConnected,
-                    double secondsSinceInteraction,
+    // vector (or a mismatched size) to force show-all. activeOnly = ignore
+    // STATIONARY objects (the /active counter variants): a parked car or a
+    // package settled on the doorstep stops counting as activity ~10s after
+    // it stops moving.
+    Result evaluate(bool activityMode, bool motionCounts, bool activeOnly,
+                    bool feedConnected, double secondsSinceInteraction,
                     const std::vector<FrigateEvents::CameraState>& states,
                     int cameraCount);
 
