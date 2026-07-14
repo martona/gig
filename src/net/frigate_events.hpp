@@ -12,6 +12,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace boost::json {
+class value;
+} // namespace boost::json
+
 namespace gig {
 
 class TlsSessionCache;
@@ -29,9 +33,73 @@ class CookieJar;
 //     motion ("ON"/"OFF") and the ~10s "<cam>/status/detect" heartbeat
 //   - "<cam>/all" = count of tracked objects on that camera (all labels);
 //     "<cam>/motion" = raw motion with a server-side off-delay (~30s+)
-//   - NO state replay on connect: activity is unknown until the next edge, so
-//     callers treat (re)connect like startup (show-all until things settle)
+//   - NO automatic state replay on connect -- but Frigate (0.14+) answers a
+//     client-published "onConnect" topic with a "camera_activity" snapshot
+//     (current motion + tracked-object list per camera; the seeding its own
+//     web UI does on open/refocus). We publish it right after the handshake,
+//     so activity that started BEFORE we joined is known immediately.
 //   - "events"/"reviews" are a verbose firehose; ignored here.
+//
+// SEEDING PROTOCOL -- ugly by necessity; read the WHY before touching it.
+//
+// The camera_activity snapshot is untrustworthy in two specific ways, both
+// verified at source level against Frigate v0.15.2 + v0.16.4 (2026-07-14):
+//
+//   (a) It is a BROADCAST, not a reply. The dispatcher fans the response out
+//       to every connected ws client (+ MQTT) with no correlation id, so
+//       snapshots also arrive unsolicited whenever any OTHER viewer's UI
+//       connects or refocuses a tab -- indistinguishable from ours.
+//   (b) It can carry state STALER than edges already delivered to us, with
+//       nothing on the wire (no seq, no version, no timestamp) to detect it.
+//       Frigate's Dispatcher has no locks; handle_on_connect runs on the ws
+//       thread with a copy->broadcast gap (0.15), and 0.16 additionally
+//       publishes count edges BEFORE committing the snapshot's source dict
+//       (activity_manager.py:121 vs :93 -- the whole camera/zone loop plus
+//       synchronous socket writes sit inside that window). Because count
+//       topics publish only on CHANGE, accepting a stale snapshot over a
+//       fresher edge would wedge phantom state until the next real
+//       transition -- unbounded on a quiet camera.
+//
+// Against that, the snapshot is the ONLY witness to pre-join state: after we
+// join, the edge stream is a complete record of everything that CHANGES
+// ("<cam>/all" carries absolute counts, not deltas). The only post-join gap
+// a snapshot can fill is the per-label breakdown + motion flag of objects
+// that never transition again (e.g. a car parked since before we joined).
+//
+// The protocol that squares this (user-specified, 2026-07-14):
+//   1. ACCEPTANCE WINDOW: snapshots count only within kSeedWindowSeconds of
+//      our own request, and only until the seed SETTLES. Outside that, they
+//      are ignored outright -- per the above they carry nothing our edge
+//      stream doesn't, and every one accepted is another roll of race (b).
+//   2. AMBIGUITY, per camera: a snapshot's data for a camera is applied only
+//      if that camera has been edge-quiet for kSnapshotEdgeQuietSeconds
+//      (the verified race windows are milliseconds; the guard is generous
+//      for the NORMAL case -- a server that stalls multi-seconds inside its
+//      own race window, e.g. one wedged viewer blocking 0.16's synchronous
+//      broadcast loop, can still defeat it; undetectable client-side
+//      without a wire seq). A camera that raced an edge is marked AMBIGUOUS
+//      -- not silently dropped. Already-Clean cameras skip redundant
+//      re-application. A camera an earlier snapshot marked ambiguous that a
+//      later one OMITS flips to clean: whatever raced has departed (its
+//      edges already told us) or the camera is role-filtered (dev builds
+//      after 0.17 reshape the broadcast per recipient) and no snapshot will
+//      ever carry it.
+//   3. RETRY: while any camera is ambiguous, re-request the snapshot after
+//      kSeedRetryDelay (logged) and restart the window; give up after
+//      kSeedMaxRetries with a warning naming the stragglers. A perpetually
+//      busy camera may never seed -- acceptable: its absolute counts are
+//      already correct from its own edges, and only pre-join label detail /
+//      motion lag until the object's next transition.
+//   4. ABSENT = CLEAN: a camera missing from a snapshot (0.15 omits
+//      never-active cameras; post-0.17 dev filters by viewer role) or
+//      present with config only (0.16+) has nothing knowable -- it must not
+//      hold the seed open. Cameras never mentioned stay Unknown and don't
+//      drive retries.
+//
+// A pre-0.14 server never answers: no snapshot, no ambiguity, no retries --
+// state stays edge-only exactly as before this protocol existed. Callers'
+// show-all settle window on (re)connect remains as belt-and-braces for that
+// case. Constants live next to kOnConnectFrame in the .cpp.
 //
 // One background thread connects, parses, and keeps a per-camera snapshot the
 // render loop polls. Reconnects on its own (5s -> 60s doubling backoff); the
@@ -61,6 +129,13 @@ public:
         // (right after a connect everything is unheard; no false alarms).
         bool statusOnline = true;
         double lastStatusAt = 0.0;
+        // Last activity EDGE (count/motion topic; NOT heartbeats) for this
+        // camera -- the ambiguity detector of the seeding protocol (see the
+        // class comment): snapshot data for a camera with an edge fresher
+        // than kSnapshotEdgeQuietSeconds is not applied, the camera is
+        // marked ambiguous, and the seed is re-requested.
+        double lastEdgeAt = 0.0;
+        static constexpr double kSnapshotEdgeQuietSeconds = 2.0;
 
         // Staleness threshold DELIBERATELY beyond the socket's own idle
         // watchdog (45s idle timeout; beast's timer granularity means the
@@ -110,7 +185,27 @@ private:
     // (empty when cancelled). Sets liveSeconds to how long the socket was up.
     std::string runOnce(double& liveSeconds);
     void handleMessage(const std::string& text);
+    // "camera_activity": apply a snapshot under the seeding protocol (class
+    // comment) -- acceptance window, per-camera ambiguity, settle detection.
+    void handleActivitySnapshot(const boost::json::value& payload);
     void clearStates();
+
+    // --- seeding protocol (all take stateMutex_; called from the io thread) ---
+    // Stamp the acceptance window: an onConnect frame just went out.
+    void noteSeedRequested();
+    // Any camera still ambiguous and the seed not settled? (Drives the retry
+    // timer in the ws phase.)
+    bool seedRetryPending() const;
+    // Consume one retry: logs and returns true to send, or -- past
+    // kSeedMaxRetries -- settles with a warning naming the stragglers and
+    // returns false.
+    bool takeSeedRetryTicket();
+
+    enum class SeedStatus : unsigned char {
+        Unknown,   // no snapshot has mentioned this camera (absent = clean-ish)
+        Clean,     // seeded (or config-only: nothing to know); further copies redundant
+        Ambiguous, // snapshot raced an edge; awaiting a retry
+    };
 
     const std::string baseUrl_;
     const TlsOptions tls_;
@@ -132,6 +227,11 @@ private:
     std::vector<std::string> cameraNames_;
     std::unordered_map<std::string, int> cameraIndex_;
     std::vector<CameraState> states_;
+    // Seeding-protocol state (guarded by stateMutex_, reset by clearStates):
+    std::vector<SeedStatus> seedStatus_; // index-aligned with states_
+    double seedRequestedAt_ = 0.0;       // nowSeconds() of the last onConnect send
+    int seedRetries_ = 0;
+    bool seedSettled_ = false;           // all clean, or gave up: ignore snapshots
 };
 
 // Why a camera counts as active, for the label suffix ("driveway - person"):
