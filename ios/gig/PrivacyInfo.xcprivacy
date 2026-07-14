@@ -2,14 +2,51 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Privacy manifest (mandatory for App Store submission). gig collects
+         nothing and tracks nothing: all traffic is LAN-direct to the user's own
+         Frigate server; there are no analytics, no third-party SDKs with
+         network access, and no servers of ours.
+
+         The accessed-API declarations cover the app plus its statically linked
+         C/C++ deps (FFmpeg, OpenSSL, boost): App Store Connect scans the
+         binary for the listed SYMBOLS, so library-internal uses count. If a
+         post-upload ITMS-91053 email names an undeclared category (e.g. disk
+         space via statfs), add it here with the matching reason code. -->
     <key>NSPrivacyAccessedAPITypes</key>
     <array>
         <dict>
+            <!-- The settings store (settings_store_mac.mm / GIGSettingsBridge)
+                 persists app configuration in NSUserDefaults. CA92.1 =
+                 accessing only this app's own defaults. -->
             <key>NSPrivacyAccessedAPIType</key>
             <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
             <key>NSPrivacyAccessedAPITypeReasons</key>
             <array>
                 <string>CA92.1</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- stat/fstat land in the binary via OpenSSL (cert/config paths)
+                 and FFmpeg's file I/O; anything they touch on iOS lives inside
+                 the app container. C617.1 = timestamps of files inside the app
+                 container / group container. -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- mach_absolute_time lands in the binary via the monotonic-clock
+                 plumbing (boost timers, FFmpeg); the app times reconnect
+                 backoff, watchdogs, and idle/dim off it. 35F9.1 = measuring
+                 elapsed time between in-app events. -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
             </array>
         </dict>
     </array>

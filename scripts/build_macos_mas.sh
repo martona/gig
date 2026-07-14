@@ -280,6 +280,18 @@ if [[ "$sign_for_distribution" == "1" ]]; then
         APP_IDENTIFIER="${TEAM_ID}.${BUNDLE_ID}"
     fi
 
+    # A profile for the WRONG APP signs cleanly and only fails at upload time
+    # (ITMS-90286, application-identifier mismatch -- seen live with clipp's
+    # profile left in APPLE_MAS_PROVISIONING_PROFILE). The identifier must be
+    # <AppIDPrefix>.<our bundle id>; catch anything else before signing.
+    if [[ "$APP_IDENTIFIER" != *".${BUNDLE_ID}" ]]; then
+        echo "[!] Fatal: provisioning profile is not for this app." >&2
+        echo "    Profile's application-identifier: $APP_IDENTIFIER" >&2
+        echo "    Expected suffix:                  .$BUNDLE_ID" >&2
+        echo "    Check APPLE_MAS_PROVISIONING_PROFILE: $PROVISION_PROFILE" >&2
+        exit 1
+    fi
+
     EFFECTIVE_ENTITLEMENTS="$STAGE_DIR/gig.effective.entitlements"
     cp "$ENTITLEMENTS_FILE" "$EFFECTIVE_ENTITLEMENTS"
     /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string ${APP_IDENTIFIER}" "$EFFECTIVE_ENTITLEMENTS"
