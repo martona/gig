@@ -24,10 +24,12 @@ namespace gig {
 // dim state after the dialog closes (Cancel discards it like any other edit).
 // `viewMode` is 0 = show all cameras, 1 = show active cameras only (tiles
 // driven by Frigate's activity feed); `motionActivity` opts raw motion in as
-// an activity trigger (tracked objects always count).
+// an activity trigger (tracked objects always count); `keepHiddenStreams`
+// keeps off-screen cameras' streams connected (off = tear down + reconnect on
+// demand, saving power at the cost of a 1-2s wake).
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
-                        int& viewMode, bool& motionActivity,
+                        int& viewMode, bool& motionActivity, bool& keepHiddenStreams,
                         bool& forgetRequested, const std::string& statusMessage = {},
                         const std::function<void(int dimPercent)>& onDimPreview = {});
 

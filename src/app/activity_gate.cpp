@@ -89,4 +89,36 @@ ActivityGate::Result ActivityGate::evaluate(
     return result;
 }
 
+void StreamPolicy::reset()
+{
+    lastOnScreenAt_.clear();
+    desired_.clear();
+}
+
+const std::vector<char>& StreamPolicy::evaluate(
+    int cameraCount, const std::vector<int>& onScreen, bool keepHidden, double now)
+{
+    const std::size_t count = static_cast<std::size_t>(std::max(0, cameraCount));
+    if (lastOnScreenAt_.size() != count) {
+        // Fresh session (or camera-set change): everything counts as just seen,
+        // so nothing tears down before a full stop-delay has really elapsed.
+        lastOnScreenAt_.assign(count, now);
+        desired_.assign(count, 1);
+    }
+    if (keepHidden) {
+        std::fill(lastOnScreenAt_.begin(), lastOnScreenAt_.end(), now);
+        std::fill(desired_.begin(), desired_.end(), 1);
+        return desired_;
+    }
+    for (const int cam : onScreen) {
+        if (cam >= 0 && cam < static_cast<int>(count)) {
+            lastOnScreenAt_[static_cast<std::size_t>(cam)] = now;
+        }
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        desired_[i] = (now - lastOnScreenAt_[i]) < kStopDelaySeconds ? 1 : 0;
+    }
+    return desired_;
+}
+
 } // namespace gig

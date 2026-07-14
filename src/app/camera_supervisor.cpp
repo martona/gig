@@ -45,6 +45,12 @@ CameraSupervisor::CameraSupervisor(
     // One activity counter per slot (value-initialized to 0). Lives for the
     // supervisor's lifetime, independent of decoder churn.
     slotBytes_ = std::make_unique<std::atomic<std::uint64_t>[]>(slots_.size());
+
+    // All slots stream by default; the on-demand policy flips these.
+    slotEnabled_ = std::make_unique<std::atomic<bool>[]>(slots_.size());
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        slotEnabled_[i].store(true, std::memory_order_relaxed);
+    }
 }
 
 CameraSupervisor::~CameraSupervisor()
@@ -140,13 +146,52 @@ void CameraSupervisor::pollLoop()
         reconcile();
 
         std::unique_lock<std::mutex> lock(pollMutex_);
-        pollCv_.wait_for(lock, config_.pollInterval, [this] { return stopRequested_.load(); });
+        pollCv_.wait_for(lock, config_.pollInterval, [this] {
+            return stopRequested_.load() || reconcileRequested_.load();
+        });
+        reconcileRequested_ = false;
     }
 }
 
 void CameraSupervisor::reconcile()
 {
+    // Apply the stream policy FIRST, independent of health-poll success: a
+    // teardown/wake must not wait out a down control plane, and a woken
+    // camera should be connecting while the byte counters are fetched.
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        CameraSlot& slot = slots_[i];
+        const bool enabled = slotEnabled_[i].load(std::memory_order_relaxed);
+        if (enabled && !slot.wasEnabled) {
+            // Re-enable edge: forget stale liveness accumulated while we were
+            // not consuming, so an old Offline verdict can't block the restart.
+            slot.liveness = Liveness::Unknown;
+            slot.haveByteBaseline = false;
+        }
+        slot.wasEnabled = enabled;
+        if (!enabled && slot.decoder) {
+            stopDecoder(i);
+        } else if (enabled && !slot.decoder && slot.liveness != Liveness::Offline) {
+            startDecoder(i);
+        }
+    }
+
+    bool anyDisabled = false;
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        anyDisabled = anyDisabled || !slotEnabled_[i].load(std::memory_order_relaxed);
+    }
+
     const StreamBytes bytes = fetchStreamBytes(*healthClient_);
+    if (!bytes.ok && bytes.schemaError && anyDisabled) {
+        // With every consumer torn down (stream policy), go2rtc idles the
+        // producers and they marshal without byte fields -- that reads as a
+        // "schema change" but isn't one. The control plane answered; there is
+        // just nothing to assess this cycle. Stay quiet, keep all state.
+        std::lock_guard<std::mutex> lock(healthMutex_);
+        healthOk_ = true;
+        healthSchemaError_ = false;
+        healthLastOk_ = std::chrono::steady_clock::now();
+        return;
+    }
     if (!bytes.ok) {
         // Never flip every camera offline on a fetch/parse failure -- that is the
         // go2rtc-reshuffle trap. Log (loudly on a schema change) and leave the
@@ -176,6 +221,19 @@ void CameraSupervisor::reconcile()
     int online = 0;
     for (std::size_t i = 0; i < slots_.size(); ++i) {
         CameraSlot& slot = slots_[i];
+        if (!slotEnabled_[i].load(std::memory_order_relaxed)) {
+            // A disabled slot's producer may have idled BECAUSE we stopped
+            // consuming it (we might be its only consumer), so its byte
+            // counter says nothing about camera health. Keep the last
+            // verdict for the live count, drop the baseline so re-enable
+            // starts fresh, and skip reclassification entirely -- a policy-
+            // hidden camera must never read as a down camera.
+            slot.haveByteBaseline = false;
+            if (slot.liveness == Liveness::Online) {
+                ++online;
+            }
+            continue;
+        }
         const auto found = bytes.bytesByStream.find(slot.info.streamName);
         const std::uint64_t current = (found != bytes.bytesByStream.end()) ? found->second : 0;
 
@@ -208,7 +266,8 @@ void CameraSupervisor::reconcile()
             slot.liveness = newLiveness;
         }
 
-        const bool shouldRun = (slot.liveness != Liveness::Offline);
+        const bool shouldRun = (slot.liveness != Liveness::Offline)
+            && slotEnabled_[i].load(std::memory_order_relaxed);
         if (shouldRun && !slot.decoder) {
             startDecoder(i);
         } else if (!shouldRun && slot.decoder) {
@@ -260,6 +319,37 @@ void CameraSupervisor::startDecoder(std::size_t index)
         config_.startupStagger * static_cast<int>(index),
         slotBytes_ ? &slotBytes_[index] : nullptr);
     slot.decoder->start();
+}
+
+void CameraSupervisor::setSlotEnabled(std::size_t index, bool enabled)
+{
+    if (index >= slots_.size()) {
+        return;
+    }
+    const bool was = slotEnabled_[index].exchange(enabled);
+    if (was == enabled) {
+        return;
+    }
+    if (pollThread_.joinable()) {
+        // Poll thread owns slot lifecycle: kick it so the change applies now
+        // (a woken camera must start connecting before the user's eyes arrive),
+        // and this thread never blocks on a decoder join. The flag flips under
+        // pollMutex_ so the waiter can't miss the wake between its predicate
+        // check and enqueueing on the cv (no lost notify) -- the atomic-exchange
+        // guard above means a re-push would never notify again.
+        {
+            std::lock_guard<std::mutex> lock(pollMutex_);
+            reconcileRequested_ = true;
+        }
+        pollCv_.notify_all();
+        return;
+    }
+    // No poll thread (single-url mode): the caller thread owns lifecycle.
+    if (enabled && !slots_[index].decoder) {
+        startDecoder(index);
+    } else if (!enabled && slots_[index].decoder) {
+        stopDecoder(index);
+    }
 }
 
 void CameraSupervisor::stopDecoder(std::size_t index)

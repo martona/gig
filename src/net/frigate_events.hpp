@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -46,6 +47,31 @@ public:
         // its "does raw motion count?" policy to the linger window too.
         double lastObjectAt = 0.0;
         double lastMotionAt = 0.0;
+        // Per-label active object counts ("<cam>/person" etc.) -- feeds the
+        // label reason suffix ("driveway - person"). std::map so iteration
+        // (and the joined reason string) is deterministic.
+        std::map<std::string, int> objects;
+        // "<cam>/status/detect" heartbeat (every ~10s per camera): last
+        // payload + arrival stamp. A camera counts as DOWN only after we've
+        // heard from it at least once -- never-heard is unknown, not down
+        // (right after a connect everything is unheard; no false alarms).
+        bool statusOnline = true;
+        double lastStatusAt = 0.0;
+
+        // Staleness threshold DELIBERATELY beyond the socket's own idle
+        // watchdog (45s idle timeout; beast's timer granularity means the
+        // recycle can land up to ~67s after the last frame): if the whole
+        // LINK dies silently, the watchdog must recycle it (clearing these
+        // states) before any camera reads as stale -- otherwise a dead AP
+        // would briefly report "N cameras are down" when zero cameras are.
+        // A genuinely dead camera doesn't wait this long anyway: Frigate
+        // publishes an explicit non-"online" status within ~20s.
+        static constexpr double kStatusStaleSeconds = 75.0;
+        bool down(double now) const
+        {
+            return lastStatusAt > 0.0
+                && (!statusOnline || now - lastStatusAt > kStatusStaleSeconds);
+        }
     };
 
     FrigateEvents(std::string baseUrl, TlsOptions tls,
@@ -103,5 +129,25 @@ private:
     std::unordered_map<std::string, int> cameraIndex_;
     std::vector<CameraState> states_;
 };
+
+// Why a camera counts as active, for the label suffix ("driveway - person"):
+// the active object labels joined (alphabetical -- std::map order), else
+// "motion" while raw motion is ON, else empty (nothing happening).
+inline std::string activityReason(const FrigateEvents::CameraState& state)
+{
+    std::string reason;
+    for (const auto& [label, count] : state.objects) {
+        if (count > 0) {
+            if (!reason.empty()) {
+                reason += ", ";
+            }
+            reason += label;
+        }
+    }
+    if (reason.empty() && state.motion) {
+        reason = "motion";
+    }
+    return reason;
+}
 
 } // namespace gig

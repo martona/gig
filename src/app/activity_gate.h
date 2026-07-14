@@ -59,4 +59,28 @@ private:
     double connectedAt_ = 0.0;
 };
 
+// Decides which camera STREAMS stay connected when "Keep hidden cameras
+// streaming" is off: a camera on screen right now must stream; one that left
+// the screen stays warm for kStopDelaySeconds (so peeks, focus flips and
+// activity blips don't thrash decoders), then tears down. Waking is always
+// immediate. Separate from ActivityGate's visibility hysteresis on purpose:
+// this one trades power for a 1-2s reconnect, that one trades layout churn.
+class StreamPolicy {
+public:
+    static constexpr double kStopDelaySeconds = 20.0;
+
+    // onScreen = camera indices currently RENDERED (the visible subset, or
+    // just the focused camera in a full hero view). keepHidden = the feature
+    // is off; everything streams. Returns desired per-camera stream states
+    // (index-aligned; char to avoid vector<bool> weirdness).
+    const std::vector<char>& evaluate(int cameraCount, const std::vector<int>& onScreen,
+                                      bool keepHidden, double now);
+
+    void reset(); // session rebuilt: supervisor starts with everything enabled
+
+private:
+    std::vector<double> lastOnScreenAt_;
+    std::vector<char> desired_;
+};
+
 } // namespace gig

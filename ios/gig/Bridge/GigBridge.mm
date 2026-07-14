@@ -105,6 +105,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.orbitStepSeconds = static_cast<NSInteger>(store->getInt("orbit-step").value_or(40));
     settings.activityView = store->getInt("view-mode").value_or(0) == 1;
     settings.motionActivity = store->getBool("motion-activity").value_or(false);
+    settings.keepHiddenStreams = store->getBool("stream-hidden").value_or(true);
     return settings;
 }
 
@@ -133,6 +134,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setInt("orbit-step", std::clamp<NSInteger>(settings.orbitStepSeconds, 1, 600));
     store->setInt("view-mode", settings.activityView ? 1 : 0);
     store->setBool("motion-activity", settings.motionActivity);
+    store->setBool("stream-hidden", settings.keepHiddenStreams);
 }
 
 // TODO(onboarding-project): temporary; remove with the Forget Settings UI.
@@ -190,6 +192,9 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     // Real-time per-camera activity from Frigate's /ws (drives activity view
     // + wake-on-activity). Lives per session: rebuilt on each connect.
     std::unique_ptr<gig::FrigateEvents> _events;
+    // Bumped on every session rebuild; the render host resets its per-session
+    // derived state (gate/stream policy) when it changes.
+    std::uint64_t _sessionEpoch;
     // The last connect failure's classification (drives the error screen's CTA).
     bool _lastConfigError;
 }
@@ -218,6 +223,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 - (GIGEngineStatus *)connectLocked
 {
     // Fresh session each connect (mirrors a desktop reconnect).
+    ++_sessionEpoch;
     _events.reset();
     if (_session) {
         _session->stop();
@@ -413,6 +419,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
         return out; // busy: connect/disconnect in flight on another thread
     }
     out.valid = true;
+    out.sessionEpoch = _sessionEpoch;
     if (_session) {
         out.frames = _session->snapshotFrames();
         out.bytes = _session->tileByteCounts();
@@ -423,6 +430,17 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
         out.feedConnected = _events->connected();
     }
     return out;
+}
+
+- (void)applyStreamPolicyInternal:(const std::vector<char> &)desired
+{
+    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !_session) {
+        return;
+    }
+    for (std::size_t i = 0; i < desired.size(); ++i) {
+        _session->setCameraStreamEnabled(i, desired[i] != 0);
+    }
 }
 
 @end

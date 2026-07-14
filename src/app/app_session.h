@@ -110,6 +110,11 @@ public:
     // "receiving" activity animation; empty when stopped.
     std::vector<std::uint64_t> tileByteCounts() const;
 
+    // On-demand stream policy pass-through: tear down / reconnect one camera's
+    // stream (see CameraSupervisor::setSlotEnabled). No-op when stopped; a
+    // rebuilt session starts with every camera enabled.
+    void setCameraStreamEnabled(std::size_t index, bool enabled);
+
 private:
     std::shared_ptr<D3D11DecodeContext> decodeContext_;
     std::shared_ptr<TlsSessionCache> sessionCache_;

@@ -28,6 +28,11 @@
 // new this tick and keep all derived state (subset, focus) untouched.
 struct GIGEngineTickSnapshot {
     bool valid = false;
+    // Bumped on every session rebuild (connect). The host resets its
+    // per-session derived state (gate, stream policy, subset) when this
+    // changes -- a fresh supervisor starts fully enabled, and stale policy
+    // timestamps must not tear its decoders down moments after they start.
+    std::uint64_t sessionEpoch = 0;
     std::vector<std::shared_ptr<VideoFrame>> frames; // stable camera order
     std::vector<std::uint64_t> bytes;                // signal-scope activity
     std::vector<std::string> labels;                 // display labels
@@ -39,5 +44,11 @@ struct GIGEngineTickSnapshot {
 
 // Non-blocking consistent snapshot for the display-link tick.
 - (GIGEngineTickSnapshot)tickSnapshotInternal;
+
+// Push the desired per-camera stream states (the on-demand stream policy).
+// Non-blocking: silently skipped while the engine is busy -- the caller
+// re-pushes every tick, so a missed application self-heals. Each unchanged
+// entry is a no-op inside the supervisor.
+- (void)applyStreamPolicyInternal:(const std::vector<char> &)desired;
 
 @end

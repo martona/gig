@@ -36,3 +36,4 @@
 #define IDC_ORBIT_STEP      2025
 #define IDC_VIEW_MODE       2026
 #define IDC_MOTION_ACTIVITY 2027
+#define IDC_STREAM_HIDDEN   2028

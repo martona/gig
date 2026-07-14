@@ -171,6 +171,10 @@ struct StartupConfig {
     // Whether raw motion counts as activity (opt-in: wind-blown shadows
     // trigger it); tracked objects (<cam>/all) always count.
     bool motionActivity = false;
+    // Keep off-screen cameras streaming (default). Off = tear a hidden
+    // camera's stream down after a short delay and reconnect when it appears
+    // (saves decode power; costs ~1-2s + the scope animation on wake).
+    bool keepHiddenStreams = true;
 };
 
 // Read all settings from the platform store, applying the same derivation +
@@ -198,6 +202,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.orbitStepSeconds = std::clamp(static_cast<int>(store.getInt("orbit-step").value_or(40)), 1, 600);
     cfg.viewMode = std::clamp(static_cast<int>(store.getInt("view-mode").value_or(0)), 0, 1);
     cfg.motionActivity = store.getBool("motion-activity").value_or(false);
+    cfg.keepHiddenStreams = store.getBool("stream-hidden").value_or(true);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -234,13 +239,14 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode,
                 int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
-                int viewMode, bool motionActivity)
+                int viewMode, bool motionActivity, bool keepHiddenStreams)
 {
     store.setInt("dim-level", dimLevelPercent);
     store.setInt("dim-delay", dimDelaySeconds);
     store.setInt("orbit-step", orbitStepSeconds);
     store.setInt("view-mode", viewMode);
     store.setBool("motion-activity", motionActivity);
+    store.setBool("stream-hidden", keepHiddenStreams);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
     store.setString("stream-url", s.streamUrlTemplate);
@@ -304,7 +310,7 @@ void saveWindowGeometry(gig::SettingsStore& store, const WindowGeometry& g)
 // currently-connected display -- guards against a monitor unplugged or a
 // resolution change since last run that would strand the window off-screen.
 // The "all quiet" liveness line for the current wall-clock minute.
-std::string quietLineNow()
+std::string quietLineNow(int camerasDown)
 {
     const std::time_t now = std::time(nullptr);
     std::tm local {};
@@ -313,7 +319,7 @@ std::string quietLineNow()
 #else
     localtime_r(&now, &local);
 #endif
-    return gig::quietStatusLine(local);
+    return gig::quietStatusLine(local, camerasDown);
 }
 
 bool geometryUsable(const WindowGeometry& g)
@@ -486,12 +492,16 @@ int main(int argc, char** argv)
         // (camera indices, all of them outside activity mode); it doubles as
         // the map from renderer tile index -> camera slot for hit-testing.
         gig::ActivityGate activityGate;
+        gig::StreamPolicy streamPolicy;
         std::unique_ptr<gig::FrigateEvents> activityFeed;
         std::vector<int> visibleTiles;
+        std::vector<std::string> tileReasons; // last pushed, subset-aligned
         auto restartActivityFeed = [&]() {
             activityFeed.reset();
             activityGate.reset();
+            streamPolicy.reset(); // a rebuilt supervisor starts fully enabled
             visibleTiles.clear(); // force a re-derive (and label re-push) next tick
+            tileReasons.clear();
             if (session.running() && !cfg.session.baseUrl.empty()) {
                 activityFeed = std::make_unique<gig::FrigateEvents>(
                     cfg.session.baseUrl, cfg.session.tls, sessionCache, cookieJar);
@@ -678,6 +688,7 @@ int main(int argc, char** argv)
             int orbitStep = cfg.orbitStepSeconds;
             int viewMode = cfg.viewMode;
             bool motionActivity = cfg.motionActivity;
+            bool keepHiddenStreams = cfg.keepHiddenStreams;
             bool forget = false;
             // Live idle-dim preview: while the slider moves, apply the previewed
             // luminance to the main view behind the modal dialog by rendering one
@@ -688,10 +699,11 @@ int main(int argc, char** argv)
                 renderer->render(session.snapshotFrames());
             };
             if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, dimLevel, dimDelay,
-                                        orbitStep, viewMode, motionActivity, forget,
-                                        lastConnectError, onDimPreview)) {
+                                        orbitStep, viewMode, motionActivity, keepHiddenStreams,
+                                        forget, lastConnectError, onDimPreview)) {
                 saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode),
-                           dimLevel, dimDelay, orbitStep, viewMode, motionActivity);
+                           dimLevel, dimDelay, orbitStep, viewMode, motionActivity,
+                           keepHiddenStreams);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 OverlayStats overlayStats;
@@ -851,12 +863,13 @@ int main(int argc, char** argv)
             // papers over /ws having no state replay on connect.
             const double sinceInteraction =
                 std::chrono::duration<double>(frameStart - lastInteraction).count();
-            const gig::ActivityGate::Result activity = activityGate.evaluate(
-                cfg.viewMode == 1, cfg.motionActivity,
-                activityFeed && activityFeed->connected(), sinceInteraction,
+            const bool feedUp = activityFeed && activityFeed->connected();
+            const std::vector<gig::FrigateEvents::CameraState> feedStates =
                 activityFeed ? activityFeed->snapshot()
-                             : std::vector<gig::FrigateEvents::CameraState> {},
-                static_cast<int>(session.cameraCount()));
+                             : std::vector<gig::FrigateEvents::CameraState> {};
+            const gig::ActivityGate::Result activity = activityGate.evaluate(
+                cfg.viewMode == 1, cfg.motionActivity, feedUp, sinceInteraction,
+                feedStates, static_cast<int>(session.cameraCount()));
             if (activity.wakeEdge) {
                 lastActivityWake = frameStart;
             }
@@ -892,6 +905,49 @@ int main(int argc, char** argv)
                         : std::string());
                 }
                 renderer->setCameraLabels(shownLabels);
+            }
+
+            // Activity-reason suffixes ("driveway - person"): rebuilt each tick
+            // from the feed (a reason can change while the subset doesn't) and
+            // pushed only on change. The renderer appends them to the labels
+            // and force-shows the label while a reason is active.
+            bool reasonsChanged = false;
+            {
+                std::vector<std::string> reasons(visibleTiles.size());
+                if (feedUp) {
+                    for (std::size_t i = 0; i < visibleTiles.size(); ++i) {
+                        const int cam = visibleTiles[i];
+                        if (cam >= 0 && cam < static_cast<int>(feedStates.size())) {
+                            reasons[i] = gig::activityReason(feedStates[static_cast<std::size_t>(cam)]);
+                        }
+                    }
+                }
+                if (reasons != tileReasons) {
+                    tileReasons = std::move(reasons);
+                    renderer->setTileReasons(tileReasons);
+                    reasonsChanged = true;
+                }
+            }
+
+            // On-demand stream policy: what's RENDERED must stream; everything
+            // else winds down after the stop delay (unless the keep setting is
+            // on). setCameraStreamEnabled is a no-op when unchanged, so pushing
+            // the whole vector every tick is cheap and self-healing.
+            {
+                std::vector<int> onScreen;
+                const int focused = renderer->focusedTile();
+                if (focused >= 0 && focused < static_cast<int>(visibleTiles.size())) {
+                    onScreen.push_back(visibleTiles[static_cast<std::size_t>(focused)]);
+                } else {
+                    onScreen = visibleTiles;
+                }
+                const std::vector<char>& desired = streamPolicy.evaluate(
+                    static_cast<int>(session.cameraCount()), onScreen,
+                    cfg.keepHiddenStreams,
+                    gig::FrigateEvents::nowSeconds());
+                for (std::size_t i = 0; i < desired.size(); ++i) {
+                    session.setCameraStreamEnabled(i, desired[i] != 0);
+                }
             }
 
             // Refresh the toolbar/banner stats first (1s cadence), before the draw
@@ -933,7 +989,15 @@ int main(int argc, char** argv)
                 stats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
                 applyScreenState(stats);
                 if (activity.filtered && activity.quiet) {
-                    stats.quietStatus = quietLineNow();
+                    // Down = the /ws heartbeat says so (explicit non-online or
+                    // 35s stale) -- NOT our streaming state, which the
+                    // on-demand stream policy tears down on purpose.
+                    int camerasDown = 0;
+                    const double nowSeconds = gig::FrigateEvents::nowSeconds();
+                    for (const gig::FrigateEvents::CameraState& s : feedStates) {
+                        camerasDown += s.down(nowSeconds) ? 1 : 0;
+                    }
+                    stats.quietStatus = quietLineNow(camerasDown);
                 }
 
                 renderer->setDiagnostics(stats);
@@ -990,7 +1054,7 @@ int main(int argc, char** argv)
             const bool recentInput = (frameStart - lastInteraction) < inputRenderTail;
             const bool dirty = !minimized
                 && (newFrame || statsRefreshed || recentInput || dimming || visibleChanged
-                    || renderer->isAnimating() || renderer->logViewVisible()
+                    || reasonsChanged || renderer->isAnimating() || renderer->logViewVisible()
                     || renderer->wantsRepaint()); // burn-in orbit step
 
             if (dirty) {

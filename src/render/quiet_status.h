@@ -11,7 +11,10 @@ namespace gig {
 // burn-in. Shared by the desktop status panel and the iOS SwiftUI overlay so
 // all platforms say (and place) exactly the same thing.
 
-inline std::string quietStatusLine(const std::tm& local)
+// camerasDown (from the /ws heartbeat liveness, NOT the streaming state, which
+// the on-demand stream policy deliberately tears down) appends
+// ", but 2 cameras are down" to the otherwise-reassuring line.
+inline std::string quietStatusLine(const std::tm& local, int camerasDown = 0)
 {
     static const char* kHours[12] = {
         "twelve", "one", "two", "three", "four", "five",
@@ -51,7 +54,13 @@ inline std::string quietStatusLine(const std::tm& local)
         };
         phrase = std::string(kTo[fives / 5 - 7]) + " " + hourWord((hour + 1) % 24);
     }
-    return "It's " + phrase + " and everything is quiet.";
+    std::string line = "It's " + phrase + " and everything is quiet";
+    if (camerasDown == 1) {
+        line += ", but one camera is down";
+    } else if (camerasDown > 1) {
+        line += ", but " + std::to_string(camerasDown) + " cameras are down";
+    }
+    return line + ".";
 }
 
 // Deterministic wandering placement for the line, as fractions of the drawable

@@ -552,6 +552,7 @@ struct ContentView: View {
         VideoHost.shared().setDim(levelPercent: s.dimLevelPercent, delaySeconds: s.dimDelaySeconds)
         VideoHost.shared().setOrbitStep(seconds: s.orbitStepSeconds)
         VideoHost.shared().setViewMode(activity: s.activityView, motionCounts: s.motionActivity)
+        VideoHost.shared().setKeepHiddenStreams(s.keepHiddenStreams)
     }
 }
 

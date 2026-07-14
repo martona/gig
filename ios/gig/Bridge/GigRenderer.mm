@@ -87,8 +87,11 @@
     // mode). Activity wakes the dim WITHOUT counting as interaction (it must
     // not un-hide chrome or peek the full grid).
     gig::ActivityGate _gate;
+    gig::StreamPolicy _streamPolicy;
+    std::uint64_t _lastSessionEpoch;
     BOOL _viewModeActivity;
     BOOL _motionActivity;
+    BOOL _keepHiddenStreams;
     std::vector<int> _visibleTiles;
     CFTimeInterval _lastActivityWake;
     NSString *_quietText;
@@ -115,6 +118,7 @@
         _dimDelaySeconds = 600;
         _orbitStepSeconds = 40;
         _dimPreview = -1.0;
+        _keepHiddenStreams = YES;
         _lastInteraction = CACurrentMediaTime();
         _lastActivityWake = _lastInteraction;
         _quietText = @"";
@@ -152,6 +156,11 @@
     _viewModeActivity = activity;
     _motionActivity = motionCounts;
     _needsRender = YES;
+}
+
+- (void)setKeepHiddenStreams:(BOOL)keep
+{
+    _keepHiddenStreams = keep;
 }
 
 - (NSString *)quietStatusText
@@ -296,6 +305,17 @@
         if (!snap.valid) {
             return; // engine busy (connect in flight): keep the last frame + state
         }
+        if (snap.sessionEpoch != _lastSessionEpoch) {
+            // Session rebuilt (settings save / foreground reconnect): the new
+            // supervisor starts fully enabled, so stale policy timestamps and
+            // gate bookkeeping from the old session must not apply to it
+            // (desktop does the same via restartActivityFeed).
+            _lastSessionEpoch = snap.sessionEpoch;
+            _gate.reset();
+            _streamPolicy.reset();
+            _visibleTiles.clear();
+            _needsRender = YES;
+        }
 
         // Activity view: derive the visible tile subset from the /ws feed.
         // Interaction "peeks" the full grid (same idle clock as chrome-hide);
@@ -327,16 +347,42 @@
             _needsRender = YES;
         }
 
+        // On-demand stream policy: what's RENDERED must stream; everything
+        // else winds down after the stop delay. Pushed every tick (unchanged
+        // entries are no-ops in the supervisor; a busy engine skips and the
+        // next tick self-heals).
+        {
+            std::vector<int> onScreen;
+            const int focused = _scene->focusedTile();
+            if (focused >= 0 && focused < static_cast<int>(_visibleTiles.size())) {
+                onScreen.push_back(_visibleTiles[static_cast<std::size_t>(focused)]);
+            } else {
+                onScreen = _visibleTiles;
+            }
+            const std::vector<char>& desired = _streamPolicy.evaluate(
+                static_cast<int>(snap.frames.size()), onScreen,
+                _keepHiddenStreams == YES, gig::FrigateEvents::nowSeconds());
+            [engine applyStreamPolicyInternal:desired];
+        }
+
         // The wandering "all quiet" line lives in the SwiftUI overlay --
         // independent of the Metal dirty gate, so refresh it before the
         // early-out below (it must move once a minute on a static screen).
         NSString *quietText = @"";
         CGPoint quietPos = CGPointZero;
         if (activity.filtered && activity.quiet) {
+            // Down = the /ws heartbeat says so (explicit non-online or 35s
+            // stale) -- NOT our streaming state, which the on-demand stream
+            // policy tears down on purpose.
+            int camerasDown = 0;
+            const double nowSeconds = gig::FrigateEvents::nowSeconds();
+            for (const gig::FrigateEvents::CameraState &s : snap.activity) {
+                camerasDown += s.down(nowSeconds) ? 1 : 0;
+            }
             const std::time_t nowWall = std::time(nullptr);
             std::tm local {};
             localtime_r(&nowWall, &local);
-            const std::string line = gig::quietStatusLine(local);
+            const std::string line = gig::quietStatusLine(local, camerasDown);
             float fx = 0.0f;
             float fy = 0.0f;
             gig::quietStatusPlacement(static_cast<long long>(nowWall / 60), fx, fy);
@@ -363,17 +409,29 @@
         const bool dimming = _dimFactor != dimTarget;
 
         // Visible-subset frames/bytes/labels, index-aligned with the tiles.
+        // Labels carry the activity-reason suffix ("driveway - person");
+        // hasReason force-shows the label while the activity lasts.
         std::vector<std::shared_ptr<VideoFrame>> frames;
         std::vector<std::uint64_t> bytes;
         std::vector<std::string> labels;
+        std::vector<bool> hasReason;
         frames.reserve(_visibleTiles.size());
         bytes.reserve(_visibleTiles.size());
         labels.reserve(_visibleTiles.size());
+        hasReason.reserve(_visibleTiles.size());
         for (const int cam : _visibleTiles) {
             const auto slot = static_cast<std::size_t>(cam);
             frames.push_back(slot < snap.frames.size() ? snap.frames[slot] : nullptr);
             bytes.push_back(slot < snap.bytes.size() ? snap.bytes[slot] : 0);
-            labels.push_back(slot < snap.labels.size() ? snap.labels[slot] : std::string());
+            std::string label = slot < snap.labels.size() ? snap.labels[slot] : std::string();
+            std::string reason = snap.feedConnected && slot < snap.activity.size()
+                ? gig::activityReason(snap.activity[slot])
+                : std::string();
+            if (!reason.empty() && !label.empty()) {
+                label += " - " + reason;
+            }
+            labels.push_back(std::move(label));
+            hasReason.push_back(!reason.empty());
         }
 
         // Dirty gate: skip the whole encode when nothing can have changed on
@@ -427,7 +485,7 @@
         _lastAnimating = scene.animating ? YES : NO;
         _needsRender = NO;
 
-        [self updateOverlay:scene cameraCount:frames.size() labels:labels];
+        [self updateOverlay:scene cameraCount:frames.size() labels:labels hasReason:hasReason];
     }
 }
 
@@ -437,7 +495,15 @@
 - (void)updateOverlay:(const gig::MetalScene::Frame &)scene
           cameraCount:(std::size_t)cameraCount
                labels:(const std::vector<std::string> &)names
+            hasReason:(const std::vector<bool> &)hasReason
 {
+    // A tile's label shows during the signal phase (ErrorOnly rule) OR while
+    // an activity reason is attached -- the "driveway - person" status must be
+    // visible on live video, which is exactly when it exists.
+    auto labelWanted = [&](std::size_t index) {
+        return _scene->tileShowingSignal(index)
+            || (index < hasReason.size() && hasReason[index]);
+    };
     const bool zoomTransition = scene.zoomProgress > 0.0f && scene.zoomProgress < 1.0f;
     const int focused = _scene->focusedTile();
 
@@ -461,18 +527,23 @@
             std::snprintf(buf, sizeof(buf), "%zu:%d,%d,%d,%d|", index, (int)rect.origin.x, (int)rect.origin.y,
                           (int)rect.size.width, (int)rect.size.height);
             fingerprint += buf;
+            // Text is dynamic now (the reason suffix comes and goes), so it
+            // must participate in the change fingerprint.
+            fingerprint += names[index];
+            fingerprint += '|';
         };
 
         if (scene.fullyFocused) {
-            // ErrorOnly rule in focus view: label the (frameless) focused camera.
-            if (focused >= 0 && _scene->tileShowingSignal(static_cast<std::size_t>(focused))) {
+            // Focus view: label the focused camera during its signal phase or
+            // while it carries an activity reason.
+            if (focused >= 0 && labelWanted(static_cast<std::size_t>(focused))) {
                 appendLabel(static_cast<std::size_t>(focused),
                             CGRectMake(0, 0, _pointSize.width, _pointSize.height));
             }
         } else if (scene.layout) {
             for (std::size_t i = 0; i < cameraCount && i < scene.layout->tiles.size(); ++i) {
-                if (!_scene->tileShowingSignal(i)) {
-                    continue; // ErrorOnly: label only while the tile shows the signal scope
+                if (!labelWanted(i)) {
+                    continue;
                 }
                 const gig::TileRect &cell = scene.layout->tiles[i];
                 appendLabel(i, CGRectMake(cell.x, cell.y, cell.width, cell.height));

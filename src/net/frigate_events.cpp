@@ -319,10 +319,13 @@ std::string FrigateEvents::runOnce(double& liveSeconds)
 
 void FrigateEvents::handleMessage(const std::string& text)
 {
-    // {"topic": "<cam>/all", "payload": 1} / {"topic": "<cam>/motion", "payload": "ON"}.
-    // Everything else (events/reviews firehose, stats, heartbeats, per-label
-    // counts) is deliberately ignored -- the heartbeats still count as traffic
-    // for the idle watchdog just by arriving.
+    // Consumed topics (everything else -- events/reviews firehose, stats,
+    // set/state control echoes -- is ignored, though it still counts as
+    // traffic for the idle watchdog just by arriving):
+    //   "<cam>/all"           bare int, tracked objects (the activity trigger)
+    //   "<cam>/motion"        "ON"/"OFF"
+    //   "<cam>/<label>"       bare int per object label (reason suffix)
+    //   "<cam>/status/detect" "online" heartbeat every ~10s (down detection)
     boost::system::error_code parseEc;
     const boost::json::value parsed = boost::json::parse(text, parseEc);
     if (parseEc || !parsed.is_object()) {
@@ -342,25 +345,32 @@ void FrigateEvents::handleMessage(const std::string& text)
     const std::string camera(topic.substr(0, slash));
     const std::string_view kind = topic.substr(slash + 1);
 
+    int numeric = 0;
+    bool isNumeric = false;
+    if (payload->is_int64()) {
+        numeric = static_cast<int>(payload->get_int64());
+        isNumeric = true;
+    } else if (payload->is_uint64()) {
+        numeric = static_cast<int>(payload->get_uint64());
+        isNumeric = true;
+    } else if (payload->is_double()) {
+        numeric = static_cast<int>(payload->get_double());
+        isNumeric = true;
+    }
+
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    const auto found = cameraIndex_.find(camera);
+    if (found == cameraIndex_.end()) {
+        return;
+    }
+    CameraState& state = states_[static_cast<std::size_t>(found->second)];
+
     if (kind == "all") {
-        int count = 0;
-        if (payload->is_int64()) {
-            count = static_cast<int>(payload->get_int64());
-        } else if (payload->is_uint64()) {
-            count = static_cast<int>(payload->get_uint64());
-        } else if (payload->is_double()) {
-            count = static_cast<int>(payload->get_double());
-        } else {
+        if (!isNumeric) {
             return;
         }
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        const auto found = cameraIndex_.find(camera);
-        if (found == cameraIndex_.end()) {
-            return;
-        }
-        CameraState& state = states_[static_cast<std::size_t>(found->second)];
         const bool wasPositive = state.objectCount > 0;
-        state.objectCount = std::max(0, count);
+        state.objectCount = std::max(0, numeric);
         if (state.objectCount > 0 || wasPositive) {
             state.lastObjectAt = nowSeconds(); // linger runs from the DROP edge
         }
@@ -371,17 +381,27 @@ void FrigateEvents::handleMessage(const std::string& text)
             return;
         }
         const bool on = payload->get_string() == "ON";
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        const auto found = cameraIndex_.find(camera);
-        if (found == cameraIndex_.end()) {
-            return;
-        }
-        CameraState& state = states_[static_cast<std::size_t>(found->second)];
         const bool wasOn = state.motion;
         state.motion = on;
         if (on || wasOn) {
             state.lastMotionAt = nowSeconds();
         }
+        return;
+    }
+    if (kind == "status/detect") {
+        if (!payload->is_string()) {
+            return;
+        }
+        state.statusOnline = payload->get_string() == "online";
+        state.lastStatusAt = nowSeconds();
+        return;
+    }
+    // "<cam>/<label>" object-count topics (person, car, dog, ...): a single
+    // path segment with a numeric payload. The numeric check alone filters
+    // the string-payload siblings (review_status, snapshots, ...) and the
+    // '/'-check above already excluded "<label>/active" and "x/state" paths.
+    if (isNumeric && kind.find('/') == std::string_view::npos) {
+        state.objects[std::string(kind)] = std::max(0, numeric);
     }
 }
 

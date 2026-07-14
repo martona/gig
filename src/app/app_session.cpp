@@ -164,6 +164,13 @@ std::vector<std::uint64_t> AppSession::tileByteCounts() const
     return supervisor_ ? supervisor_->tileByteCounts() : std::vector<std::uint64_t>{};
 }
 
+void AppSession::setCameraStreamEnabled(std::size_t index, bool enabled)
+{
+    if (supervisor_) {
+        supervisor_->setSlotEnabled(index, enabled);
+    }
+}
+
 ControlPlaneStatus AppSession::controlPlaneStatus() const
 {
     ControlPlaneStatus status;

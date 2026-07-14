@@ -657,6 +657,11 @@ public:
         cameraLabels_ = labels;
     }
 
+    void setTileReasons(const std::vector<std::string>& reasons) override
+    {
+        tileReasons_ = reasons;
+    }
+
     void setDiagnostics(const OverlayStats& stats) override
     {
         overlayStats_ = stats;
@@ -1582,19 +1587,32 @@ private:
         }
     }
 
+    bool tileHasReason(std::size_t index) const
+    {
+        return index < tileReasons_.size() && !tileReasons_[index].empty();
+    }
+
     std::string labelFor(std::size_t index) const
     {
-        return index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
+        std::string label = index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
+        if (!label.empty() && tileHasReason(index)) {
+            label += " - " + tileReasons_[index]; // "driveway - person"
+        }
+        return label;
     }
 
     // Whether tile `index`'s label should draw this frame, per the label mode.
-    // ErrorOnly shows it only while the tile is in the signal phase (no frame).
+    // ErrorOnly shows it while the tile is in the signal phase (no frame) OR
+    // while an activity reason is attached -- the "driveway - person" status
+    // must be visible on live video, which is exactly when it exists. Hide
+    // still hides everything (the user's explicit choice).
     bool labelVisible(std::size_t index) const
     {
         switch (labelMode_) {
         case LabelMode::Hide: return false;
         case LabelMode::Always: return true;
-        case LabelMode::ErrorOnly: return index < tiles_.size() && tiles_[index].showedSignal;
+        case LabelMode::ErrorOnly:
+            return (index < tiles_.size() && tiles_[index].showedSignal) || tileHasReason(index);
         }
         return false;
     }
@@ -2029,6 +2047,7 @@ private:
     int hoveredTile_ = -1;                          // tile under the mouse (-1 = none)
     gig::TextOverlay overlay_;
     std::vector<std::string> cameraLabels_;
+    std::vector<std::string> tileReasons_; // activity reasons, label-aligned
     OverlayStats overlayStats_;
     LabelMode labelMode_ = LabelMode::ErrorOnly;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();

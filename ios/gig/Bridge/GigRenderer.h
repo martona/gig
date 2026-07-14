@@ -71,6 +71,10 @@ NS_SWIFT_NAME(VideoHost)
 - (void)setViewModeActivity:(BOOL)activity motionCounts:(BOOL)motionCounts
     NS_SWIFT_NAME(setViewMode(activity:motionCounts:));
 
+// Keep off-screen cameras streaming (default YES). NO = the on-demand stream
+// policy tears hidden cameras down and reconnects them when they appear.
+- (void)setKeepHiddenStreams:(BOOL)keep NS_SWIFT_NAME(setKeepHiddenStreams(_:));
+
 @property (nonatomic, assign, readonly) BOOL zoomed;
 
 // True once `delaySeconds` of no interaction have elapsed: the SwiftUI layer

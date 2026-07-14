@@ -76,6 +76,19 @@ public:
     // from "actually stuck". Read from the UI thread; bumped by decoder threads.
     std::vector<std::uint64_t> tileByteCounts() const;
 
+    // The on-demand stream policy: a disabled slot's decoder is torn down (its
+    // tile blanks); re-enabling reconnects it. All slots start enabled. With
+    // the health poll running the change is applied BY the poll thread (kicked
+    // immediately, so a woken camera connects right away and the caller never
+    // blocks on a join); without polling (single-url mode) it applies inline
+    // on the caller thread, which owns slot lifecycle in that mode. A disabled
+    // slot keeps its LAST liveness verdict (its go2rtc producer may idle
+    // precisely because we stopped consuming it, so its byte counter proves
+    // nothing) -- a policy-hidden camera never reads as a down camera; health
+    // is re-assessed on re-enable. Safe to call from the UI thread; no-op when
+    // unchanged.
+    void setSlotEnabled(std::size_t index, bool enabled);
+
 private:
     enum class Liveness { Unknown, Online, Offline };
     static const char* livenessName(Liveness liveness);
@@ -86,6 +99,7 @@ private:
         std::uint64_t lastByteCount = 0;
         bool haveByteBaseline = false;
         Liveness liveness = Liveness::Unknown;
+        bool wasEnabled = true; // poll-thread only: enable-edge detection
     };
 
     void pollLoop();
@@ -103,6 +117,9 @@ private:
     // One byte counter per slot, owned here so it outlives any decoder and the UI
     // never touches a decoder being torn down. Bumped by the AVIO read path.
     std::unique_ptr<std::atomic<std::uint64_t>[]> slotBytes_;
+    // Desired stream state per slot (setSlotEnabled), written by the UI thread,
+    // consumed by reconcile() -- all slots_ mutation stays on the poll thread.
+    std::unique_ptr<std::atomic<bool>[]> slotEnabled_;
 
     mutable std::mutex frameMutex_;
     std::vector<std::shared_ptr<VideoFrame>> latestFrames_; // guarded by frameMutex_
@@ -112,6 +129,9 @@ private:
     std::mutex pollMutex_;
     std::condition_variable pollCv_;
     std::atomic_bool stopRequested_ { false };
+    // Breaks the poll wait early (its predicate would otherwise sleep out the
+    // full interval on a bare notify): a slot-enable change must reconcile NOW.
+    std::atomic_bool reconcileRequested_ { false };
     std::thread pollThread_;
 
     std::atomic<std::uint64_t> decodedFrames_ { 0 };

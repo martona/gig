@@ -182,6 +182,7 @@ public:
     int focusedTile() const override { return scene_->focusedTile(); }
 
     void setCameraLabels(const std::vector<std::string>& labels) override { cameraLabels_ = labels; }
+    void setTileReasons(const std::vector<std::string>& reasons) override { tileReasons_ = reasons; }
     void setDiagnostics(const OverlayStats& stats) override { overlayStats_ = stats; }
     void setLabelMode(LabelMode mode) override { labelMode_ = mode; }
     void setHoveredTile(int index) override { scene_->setHoveredTile(index); }
@@ -306,17 +307,30 @@ private:
         return texture;
     }
 
-    std::string labelFor(std::size_t index) const
+    bool tileHasReason(std::size_t index) const
     {
-        return index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
+        return index < tileReasons_.size() && !tileReasons_[index].empty();
     }
 
+    std::string labelFor(std::size_t index) const
+    {
+        std::string label = index < cameraLabels_.size() ? cameraLabels_[index] : std::string();
+        if (!label.empty() && tileHasReason(index)) {
+            label += " - " + tileReasons_[index]; // "driveway - person"
+        }
+        return label;
+    }
+
+    // ErrorOnly shows the label during the signal phase OR while an activity
+    // reason is attached ("driveway - person" must be visible on live video,
+    // which is exactly when it exists). Hide still hides everything.
     bool labelVisible(std::size_t index) const
     {
         switch (labelMode_) {
         case LabelMode::Hide: return false;
         case LabelMode::Always: return true;
-        case LabelMode::ErrorOnly: return scene_->tileShowingSignal(index);
+        case LabelMode::ErrorOnly:
+            return scene_->tileShowingSignal(index) || tileHasReason(index);
         }
         return false;
     }
@@ -711,6 +725,7 @@ private:
     std::unique_ptr<gig::MetalScene> scene_;
 
     std::vector<std::string> cameraLabels_;
+    std::vector<std::string> tileReasons_; // activity reasons, label-aligned
     OverlayStats overlayStats_;
     LabelMode labelMode_ = LabelMode::ErrorOnly;
 

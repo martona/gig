@@ -112,13 +112,13 @@ static int dimDelayIndexFor(int seconds)
 
 void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
-                        int& viewMode, bool& motionActivity,
+                        int& viewMode, bool& motionActivity, bool& keepHiddenStreams,
                         const std::function<void(int)>& onDimPreview)
 {
     @autoreleasepool {
         constexpr CGFloat kWidth = 560;
         constexpr CGFloat kRow = 30;
-        const CGFloat height = 704;
+        const CGFloat height = 734;
 
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWidth, height)
                                                        styleMask:NSWindowStyleMaskTitled
@@ -253,6 +253,9 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
         row();
         NSButton* motionCheck = check(@"Raw motion counts as activity (noisier)", motionActivity);
         row();
+        NSButton* keepStreamsCheck = check(@"Keep hidden cameras streaming (faster switching, more power)",
+                                           keepHiddenStreams);
+        row();
 
         section(@"Advanced connection");
         label(@"Stream template:");
@@ -295,6 +298,7 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
         orbitStepSeconds = std::clamp(static_cast<int>(orbitField.intValue), 1, 600);
         viewMode = viewPopup.indexOfSelectedItem == 1 ? 1 : 0;
         motionActivity = (motionCheck.state == NSControlStateValueOn);
+        keepHiddenStreams = (keepStreamsCheck.state == NSControlStateValueOn);
         config.streamUrlTemplate = fromField(streamField);
     }
 }
@@ -303,7 +307,7 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
-                        int& viewMode, bool& motionActivity,
+                        int& viewMode, bool& motionActivity, bool& keepHiddenStreams,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -321,6 +325,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         int workingOrbitStep = orbitStepSeconds;
         int workingViewMode = viewMode;
         bool workingMotionActivity = motionActivity;
+        bool workingKeepHidden = keepHiddenStreams;
 
         constexpr CGFloat kWidth = 520;
         const CGFloat height = 196;
@@ -391,9 +396,11 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         int* orbitStepPtr = &workingOrbitStep;
         int* viewModePtr = &workingViewMode;
         bool* motionActivityPtr = &workingMotionActivity;
+        bool* keepHiddenPtr = &workingKeepHidden;
         controller.onAdvanced = ^{
             showAdvancedDialog(*workingPtr, *overlayPtr, *labelPtr, *dimLevelPtr, *dimDelayPtr,
-                               *orbitStepPtr, *viewModePtr, *motionActivityPtr, onDimPreview);
+                               *orbitStepPtr, *viewModePtr, *motionActivityPtr, *keepHiddenPtr,
+                               onDimPreview);
         };
 
         [window center];
@@ -420,6 +427,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         orbitStepSeconds = workingOrbitStep;
         viewMode = workingViewMode;
         motionActivity = workingMotionActivity;
+        keepHiddenStreams = workingKeepHidden;
         return true;
     }
 }

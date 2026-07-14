@@ -91,6 +91,12 @@ public:
     virtual void setCameraLabels(const std::vector<std::string>& labels) = 0;
     virtual void setDiagnostics(const OverlayStats& stats) = 0;
 
+    // Per-tile activity reasons ("person", "motion", ...), index-aligned with
+    // the labels. A non-empty reason is appended to the tile label
+    // ("driveway - person") and forces the label visible under ErrorOnly
+    // (Hide still hides everything). Empty entries = no activity.
+    virtual void setTileReasons(const std::vector<std::string>& reasons) { (void)reasons; }
+
     // When to draw the per-tile labels. Changes rarely (settings only), so it's a
     // setter rather than per-frame state.
     virtual void setLabelMode(LabelMode mode) { (void)mode; }
