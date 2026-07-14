@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Mac App Store builds must run in the App Sandbox. gig is a pure network
+         client on macOS (Frigate REST + /ws + go2rtc streams), so outgoing
+         connections are the only capability it needs; NSUserDefaults and the
+         Keychain (the settings store) work inside the sandbox with no extra
+         entitlements. If QR pairing (docs/PAIRING.md) ever has the desktop app
+         listen or advertise on the LAN, add com.apple.security.network.server. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
