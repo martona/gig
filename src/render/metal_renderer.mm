@@ -30,9 +30,9 @@
 // resolve fade, hover, click-to-zoom, grid layout) lives in the shared
 // gig::MetalScene (metal_scene.mm, also used by the iOS host); this file owns the
 // SDL window/Metal-layer plumbing and all the desktop chrome -- dear imgui (Metal
-// backend) toolbar / status banner / log view, camera labels + the diagnostics
-// tile via imgui draw lists, SF Symbol toolbar glyphs, HiDPI font rebake, and
-// on-demand rendering via isAnimating().
+// backend) toolbar / status banner / log view, camera labels via imgui draw
+// lists, SF Symbol toolbar glyphs, HiDPI font rebake, and on-demand rendering
+// via isAnimating().
 
 namespace {
 
@@ -152,11 +152,10 @@ public:
             // Chromeless: the grid is full-bleed and the toolbar is an auto-hiding
             // translucent overlay (burn-in) -- no reserved strip anymore.
             params.reservedTopPoints = 0.0f;
-            params.extraCell = overlayStats_.showDiagnostics; // trailing diagnostics cell
-            // Idle-dim is applied by the imgui pass here (over video + labels +
-            // diagnostics, under the toolbar), NOT inside the scene -- otherwise
-            // the imgui-drawn labels/diagnostics would stay bright over a dimmed
-            // video. So the scene renders undimmed; the shell dims.
+            // Idle-dim is applied by the imgui pass here (over video + labels,
+            // under the toolbar), NOT inside the scene -- otherwise the
+            // imgui-drawn labels would stay bright over a dimmed video. So the
+            // scene renders undimmed; the shell dims.
             params.dimFactor = 1.0f;
             params.orbitStepSeconds = orbitStepSeconds_;
             const gig::MetalScene::Frame scene = scene_->render(encoder, frames, params);
@@ -335,7 +334,7 @@ private:
         return false;
     }
 
-    // ---- ImGui (toolbar / banner / log) + camera labels + diagnostics ----------
+    // ---- ImGui (toolbar / banner / log) + camera labels ------------------------
 
     void renderImGui(id<MTLCommandBuffer> commandBuffer, id<MTLRenderCommandEncoder> encoder,
                      MTLRenderPassDescriptor* pass, const std::vector<std::shared_ptr<VideoFrame>>& frames,
@@ -348,8 +347,8 @@ private:
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        // Camera labels + diagnostics tile via the background draw list (points; over
-        // the video, under the toolbar window).
+        // Camera labels via the background draw list (points; over the video,
+        // under the toolbar window).
         ImDrawList* bg = ImGui::GetBackgroundDrawList();
         const int focusedTile = scene_->focusedTile();
         if (fullyFocused) {
@@ -362,13 +361,10 @@ private:
                     drawLabel(bg, layout.tiles[i], labelFor(i), 1.0f);
                 }
             }
-            if (overlayStats_.showDiagnostics && frames.size() < layout.tiles.size()) {
-                drawDiagnostics(bg, layout.tiles[frames.size()]);
-            }
         }
 
-        // Idle-dim wash on the BACKGROUND draw list: covers video + labels +
-        // diagnostics but sits under the toolbar/banner/log/status windows (they
+        // Idle-dim wash on the BACKGROUND draw list: covers video + labels
+        // but sits under the toolbar/banner/log/status windows (they
         // are separate imgui windows, always above the background list). alpha =
         // 1 - dim is an exact luminance multiply. (The scene renders undimmed;
         // dimming happens here so imgui text isn't left bright over dimmed video.)
@@ -429,39 +425,6 @@ private:
                           IM_COL32(0, 0, 0, 140));
         dl->AddText(font, fontSize, ImVec2(cellPts.x + pad, cellPts.y + pad), IM_COL32(230, 242, 255, 255),
                     shown.c_str());
-    }
-
-    void drawDiagnostics(ImDrawList* dl, const gig::TileRect& cellPts)
-    {
-        if (cellPts.width <= 0.0f || cellPts.height <= 0.0f) {
-            return;
-        }
-        dl->AddRectFilled(ImVec2(cellPts.x, cellPts.y), ImVec2(cellPts.x + cellPts.width, cellPts.y + cellPts.height),
-                          IM_COL32(10, 13, 18, 235));
-        ImFont* font = ImGui::GetFont();
-        const float fontSize = ImGui::GetFontSize();
-        const float pad = 8.0f;
-        float y = cellPts.y + pad;
-        const float x = cellPts.x + pad;
-        const ImU32 heading = IM_COL32(166, 199, 255, 255);
-        const ImU32 body = IM_COL32(217, 230, 255, 255);
-        const float lh = fontSize + 4.0f;
-        char line[128] = {};
-
-        dl->AddText(font, fontSize, ImVec2(x, y), heading, "diagnostics");
-        y += lh * 1.4f;
-        std::snprintf(line, sizeof(line), "cams good: %d  bad: %d", overlayStats_.camerasOnline, overlayStats_.camerasOffline);
-        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
-        y += lh;
-        std::snprintf(line, sizeof(line), "frames: %d/s, %llu total", static_cast<int>(overlayStats_.fps + 0.5),
-                      static_cast<unsigned long long>(overlayStats_.framesTotal));
-        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
-        y += lh;
-        std::snprintf(line, sizeof(line), "bandwidth: %d kbps", overlayStats_.kbps);
-        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
-        y += lh;
-        std::snprintf(line, sizeof(line), "cpu: %.2f%%", overlayStats_.cpuPercent);
-        dl->AddText(font, fontSize, ImVec2(x, y), body, line);
     }
 
     void buildToolbar()

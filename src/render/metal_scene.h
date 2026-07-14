@@ -10,7 +10,7 @@
 //
 // The HOST owns the CAMetalLayer, command queue, drawable, render pass and
 // encoder (macOS appends imgui into the same pass after the scene encodes), plus
-// all chrome: toolbar, status banner, log view, labels and the diagnostics tile.
+// all chrome: toolbar, status banner, log view and labels.
 //
 // ObjC++ only: include this from .mm files (it imports Metal/CoreVideo and holds
 // ARC-managed ObjC objects in C++ members).
@@ -35,7 +35,6 @@ public:
         float pointHeight = 0.0f;
         float scale = 1.0f;            // pixels per point
         float reservedTopPoints = 0.0f; // chrome strip above the grid (grid view only)
-        bool extraCell = false;        // reserve one trailing grid cell (mac diagnostics tile)
         float dimFactor = 1.0f;        // idle-dim luminance multiplier (1 = normal)
         float orbitStepSeconds = 40.0f; // burn-in pixel-orbit step interval (>= 1)
     };
@@ -79,12 +78,12 @@ public:
     bool tileShowingSignal(std::size_t index) const;
 
     // Hit-test a point-space position against the CURRENT grid layout (camera
-    // cells only, diagnostics cell excluded). -1 = none. Grid view only; a
-    // focused view is the host's "tap anywhere returns" case.
+    // cells, bounds-checked against the camera count). -1 = none. Grid view
+    // only; a focused view is the host's "tap anywhere returns" case.
     int tileAt(float x, float y) const;
 
-    // Like tileAt but over ALL grid cells (index == cameraCount is the extra
-    // diagnostics cell when the host reserved one).
+    // Like tileAt but over all laid-out grid cells without the camera-count
+    // bound (the two are equal now that no extra cell exists).
     int cellAt(float x, float y) const;
 
     // True when the burn-in orbit has stepped since the last render() -- the host

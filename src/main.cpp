@@ -158,7 +158,6 @@ bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* event)
 // AppSession) plus the UI-only diagnostics overlay (applied to the renderer).
 struct StartupConfig {
     gig::AppConfig session;
-    bool showOverlay = true;
     LabelMode labelMode = LabelMode::ErrorOnly;
     // Burn-in idle dim: after dimDelaySeconds without interaction, the video
     // ramps to dimLevelPercent luminance (0 delay = never dim).
@@ -190,7 +189,6 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     gig::AppConfig& s = cfg.session;
     s.baseUrl = store.getString("base").value_or(std::string());
     s.url = store.getString("url").value_or(std::string());
-    s.streamUrlTemplate = store.getString("stream-url").value_or(std::string());
     s.user = store.getString("user").value_or(std::string());
     s.password = store.getString("password", /*encrypted=*/true).value_or(std::string());
     s.loginRefreshSeconds = static_cast<int>(store.getInt("login-refresh").value_or(600));
@@ -198,7 +196,6 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     s.tls.certFile = store.getString("cert").value_or(std::string());
     s.tls.keyFile = store.getString("key").value_or(std::string());
     s.softwareDecode = store.getBool("software").value_or(false);
-    cfg.showOverlay = store.getBool("overlay").value_or(false); // debug tile off by default; status lives in the toolbar
     const int labelMode = static_cast<int>(store.getInt("cam-labels").value_or(1)); // default: show on error only
     cfg.labelMode = static_cast<LabelMode>((labelMode >= 0 && labelMode <= 2) ? labelMode : 1);
     cfg.dimLevelPercent = std::clamp(static_cast<int>(store.getInt("dim-level").value_or(60)), 10, 100);
@@ -242,7 +239,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // Persist the editable settings back to the store (mirror of loadConfig's keys).
 // The password is DPAPI-encrypted; an empty password removes the value rather
 // than storing an empty blob. useSystemStore is derived on load, never stored.
-void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode,
+void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode labelMode,
                 int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
                 int viewMode, bool motionActivity, bool activeOnly, bool keepHiddenStreams)
 {
@@ -255,7 +252,6 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOve
     store.setBool("stream-hidden", keepHiddenStreams);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
-    store.setString("stream-url", s.streamUrlTemplate);
     store.setString("user", s.user);
     if (s.password.empty()) {
         store.remove("password");
@@ -267,7 +263,6 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOve
     store.setString("cert", s.tls.certFile);
     store.setString("key", s.tls.keyFile);
     store.setBool("software", s.softwareDecode);
-    store.setBool("overlay", showOverlay);
     store.setInt("cam-labels", static_cast<int>(labelMode));
     store.setBool("insecure", !s.tls.verifyServer);
     store.setInt("poll-interval", s.pollIntervalSeconds);
@@ -568,7 +563,6 @@ int main(int argc, char** argv)
         };
 
         OverlayStats initialStats;
-        initialStats.showDiagnostics = cfg.showOverlay;
         if (!applied.ok) {
             // Came up without a session: welcome or error screen, immediately.
             initialStats.link = OverlayStats::LinkState::Disconnected;
@@ -628,7 +622,6 @@ int main(int argc, char** argv)
                 // applyConfig blocks this thread (login/discovery); put the
                 // connecting screen up for the duration by rendering one frame.
                 OverlayStats connecting;
-                connecting.showDiagnostics = cfg.showOverlay;
                 connecting.screen = OverlayStats::StatusScreen::Connecting;
                 connecting.statusHost = connConfig.baseUrl.empty() ? connConfig.url : connConfig.baseUrl;
                 renderer->setDiagnostics(connecting);
@@ -651,7 +644,6 @@ int main(int argc, char** argv)
             }
             // Reflect the outcome immediately (don't wait for the 1s stats tick).
             OverlayStats after;
-            after.showDiagnostics = cfg.showOverlay;
             after.link = session.running() ? OverlayStats::LinkState::Ok
                                            : OverlayStats::LinkState::Disconnected;
             after.statusDetail = lastConnectError;
@@ -662,7 +654,7 @@ int main(int argc, char** argv)
 
         // Camera tile under a window-space point, or -1. The renderer owns the
         // laid-out rects (which include the burn-in orbit offset only it knows),
-        // so hit-testing asks it; index == cameraCount is the diagnostics cell.
+        // so hit-testing asks it.
         // NOTE: returns the renderer TILE index (an index into visibleTiles),
         // which equals the camera slot only outside activity mode.
         auto cameraTileAt = [&](float x, float y) -> int {
@@ -687,7 +679,6 @@ int main(int argc, char** argv)
         // Shared by F2, the toolbar's Settings button, and the status panel's CTAs.
         auto openSettings = [&]() {
             gig::AppConfig edited = cfg.session;
-            bool overlay = cfg.showOverlay;
             int labelMode = static_cast<int>(cfg.labelMode);
             int dimLevel = cfg.dimLevelPercent;
             int dimDelay = cfg.dimDelaySeconds;
@@ -705,17 +696,14 @@ int main(int argc, char** argv)
                 renderer->setDimFactor(currentDim);
                 renderer->render(session.snapshotFrames());
             };
-            if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, dimLevel, dimDelay,
+            if (gig::showSettingsDialog(mainHwnd, edited, labelMode, dimLevel, dimDelay,
                                         orbitStep, viewMode, motionActivity, activeOnly,
                                         keepHiddenStreams, forget, lastConnectError, onDimPreview)) {
-                saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode),
+                saveConfig(*settings, edited, static_cast<LabelMode>(labelMode),
                            dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
                            keepHiddenStreams);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
-                OverlayStats overlayStats;
-                overlayStats.showDiagnostics = cfg.showOverlay;
-                renderer->setDiagnostics(overlayStats);
                 applyAndReport(cfg.session);
             } else if (forget) {
                 // TODO(onboarding-project): temporary. Wipe everything and restart
@@ -746,7 +734,6 @@ int main(int argc, char** argv)
                 lastStatsFrames = 0;
                 lastRenderedFrames = 0;
                 OverlayStats welcome;
-                welcome.showDiagnostics = cfg.showOverlay;
                 applyScreenState(welcome);
                 renderer->setDiagnostics(welcome);
             }
@@ -815,11 +802,6 @@ int main(int argc, char** argv)
                         renderer->setFocusedTile(-1); // any click returns to the grid
                     } else if (const int idx = cameraTileAt(event.button.x, event.button.y); idx >= 0) {
                         renderer->setFocusedTile(idx);
-                    } else if (cfg.showOverlay
-                        && renderer->hitTestCell(event.button.x, event.button.y)
-                            == static_cast<int>(visibleTiles.size())) {
-                        // The synthetic diagnostics tile (not a camera) toggles the log view.
-                        renderer->setLogViewVisible(!renderer->logViewVisible());
                     }
                 } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
                     // Hover affordance: in focus view the whole image is the hot
@@ -972,7 +954,6 @@ int main(int argc, char** argv)
                 lastTitleFrames = total;
 
                 OverlayStats stats;
-                stats.showDiagnostics = cfg.showOverlay;
                 stats.camerasOnline = session.liveCameraCount();
                 stats.camerasOffline = static_cast<int>(session.cameraCount()) - session.liveCameraCount();
                 stats.fps = fps;

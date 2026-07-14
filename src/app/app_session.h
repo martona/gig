@@ -22,7 +22,6 @@ class CameraSupervisor;
 struct AppConfig {
     std::string baseUrl;            // Frigate control-plane base; enables discovery
     std::string url;                // single stream, used only when baseUrl is empty
-    std::string streamUrlTemplate;
     std::string user;               // login; needs both halves + baseUrl
     std::string password;
     int loginRefreshSeconds = 600;

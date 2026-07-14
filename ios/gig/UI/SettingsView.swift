@@ -57,14 +57,34 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    TextField("PEM CA path (optional)", text: $caPath)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                     Toggle("Insecure (skip verification)", isOn: $insecure)
                 } header: {
                     Text("TLS")
                 } footer: {
-                    Text("Certificates trusted by iOS (public CAs or an installed CA profile) work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
+                    Text("Certificates trusted by iOS work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Picker("Show", selection: $activityView) {
+                            Text("All cameras").tag(false)
+                            Text("Active cameras only").tag(true)
+                        }
+                        Text("Active-only keeps the wall empty until a camera sees something. Tap anywhere to peek at every camera.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                    toggleRow("Raw motion counts as activity", isOn: $motionActivity,
+                              note: "Noisy on windy days — moving shadows and foliage count too.")
+                    toggleRow("Ignore stationary objects", isOn: $activeOnly,
+                              note: "Parked cars and settled packages stop counting ~10 seconds after they stop moving.")
+                    toggleRow("Keep hidden cameras streaming", isOn: $keepHiddenStreams,
+                              note: "Off saves power; a hidden camera reconnects in a second or two when it appears.")
+                } header: {
+                    Text("View")
+                } footer: {
+                    Text("Activity also wakes the display from idle dim.")
                 }
 
                 Section {
@@ -84,32 +104,22 @@ struct SettingsView: View {
                     Picker("Dim after", selection: $dimDelay) {
                         ForEach(Self.dimDelays, id: \.0) { Text($0.1).tag($0.0) }
                     }
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 3) {
                         HStack {
                             Text("Pixel-shift step")
                             Spacer()
                             Text("\(Int(orbitStep)) s").foregroundStyle(.secondary)
                         }
                         Slider(value: $orbitStep, in: 1...120, step: 1)
+                        Text("The image drifts ~1px per step to spread OLED wear — lower is more motion.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
+                    .padding(.vertical, 2)
                 } header: {
                     Text("Screen protection")
                 } footer: {
-                    Text("Reduces brightness when idle to limit OLED burn-in. The image also drifts ~1px every few seconds (pixel shift) to spread wear — lower step = more motion.")
-                }
-
-                Section {
-                    Picker("Show", selection: $activityView) {
-                        Text("All cameras").tag(false)
-                        Text("Active cameras only").tag(true)
-                    }
-                    Toggle("Raw motion counts as activity", isOn: $motionActivity)
-                    Toggle("Ignore stationary objects", isOn: $activeOnly)
-                    Toggle("Keep hidden cameras streaming", isOn: $keepHiddenStreams)
-                } header: {
-                    Text("View")
-                } footer: {
-                    Text("Active-only keeps the wall empty until a camera sees something (tracked objects; raw motion optionally — it's noisy on windy days). Ignoring stationary objects drops parked cars and settled packages ~10s after they stop moving. Tap anywhere to peek at every camera; activity also wakes the display from idle dim. Turning off hidden-camera streaming saves power; a camera reconnects in a second or two when it appears.")
+                    Text("Reduces brightness when idle to limit OLED burn-in.")
                 }
 
                 // TODO(onboarding-project): temporary section; remove when done.
@@ -146,6 +156,18 @@ struct SettingsView: View {
             .onAppear(perform: load)
             .onDisappear { dimPreview(-1) } // resume idle-driven dimming
         }
+    }
+
+    // A toggle with its own one-line explanation underneath -- the section
+    // footer stays short instead of narrating every switch in one paragraph.
+    private func toggleRow(_ title: String, isOn: Binding<Bool>, note: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Toggle(title, isOn: isOn)
+            Text(note)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
     }
 
     private func load() {

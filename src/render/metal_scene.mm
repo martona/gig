@@ -365,7 +365,7 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
         const int gridWidth = std::max(1, pointWidth - 2 * static_cast<int>(kOrbitRadiusPts));
         const int gridHeight = std::max(1, pointHeight - static_cast<int>(chromeTop)
             - 2 * static_cast<int>(kOrbitRadiusPts));
-        const int effective = static_cast<int>(frames.size()) + (params.extraCell ? 1 : 0);
+        const int effective = static_cast<int>(frames.size());
         // Cache the layout: it depends only on (count, size, orbit step), so
         // recompute only when one changes -- not every render.
         if (effective != gridCacheCount_ || gridWidth != gridCacheWidth_

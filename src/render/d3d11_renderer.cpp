@@ -529,21 +529,19 @@ public:
                 // Chromeless: the grid is full-bleed (the toolbar overlays it when
                 // visible); only the orbit margin insets it.
                 const int gridHeight = std::max(1, static_cast<int>(backBufferHeight_) - 2 * orbitMargin);
-                // Reserve one extra cell for the synthetic diagnostics tile.
-                const bool showDiagnostics = overlayStats_.showDiagnostics;
-                const int effectiveCount = static_cast<int>(frames.size()) + (showDiagnostics ? 1 : 0);
+                const int tileCount = static_cast<int>(frames.size());
                 // Cache the layout: it depends only on (count, size, orbit step),
                 // so recompute only when one changes -- not every render.
                 const int gridWidth = std::max(1, static_cast<int>(backBufferWidth_) - 2 * orbitMargin);
-                if (effectiveCount != gridCacheCount_ || gridWidth != gridCacheWidth_
+                if (tileCount != gridCacheCount_ || gridWidth != gridCacheWidth_
                     || gridHeight != gridCacheHeight_
                     || orbitX != gridCacheOrbitX_ || orbitY != gridCacheOrbitY_) {
-                    gridLayoutCache_ = gig::computeGridLayout(effectiveCount, gridWidth, gridHeight);
+                    gridLayoutCache_ = gig::computeGridLayout(tileCount, gridWidth, gridHeight);
                     for (gig::TileRect& tile : gridLayoutCache_.tiles) {
                         tile.x += static_cast<float>(orbitMargin + orbitX);
                         tile.y += static_cast<float>(orbitMargin + orbitY);
                     }
-                    gridCacheCount_ = effectiveCount;
+                    gridCacheCount_ = tileCount;
                     gridCacheWidth_ = gridWidth;
                     gridCacheHeight_ = gridHeight;
                     gridCacheOrbitX_ = orbitX;
@@ -583,9 +581,6 @@ public:
                     if (labelVisible(i)) {
                         drawTileLabel(layout.tiles[i], labelFor(i), 1.0f);
                     }
-                }
-                if (showDiagnostics && frames.size() < layout.tiles.size()) {
-                    drawDiagnosticsTile(layout.tiles[frames.size()]);
                 }
                 overlay_.flush(context_.Get());
             }
@@ -1636,43 +1631,6 @@ private:
         const float stripHeight = overlay_.lineHeight(scale) + 2.0f * pad;
         overlay_.rect(cell.x, cell.y, stripWidth, stripHeight, gig::OverlayColor { 0.0f, 0.0f, 0.0f, 0.55f });
         overlay_.text(cell.x + pad, cell.y + pad, scale, gig::OverlayColor { 0.9f, 0.95f, 1.0f, 1.0f }, shown);
-    }
-
-    void drawDiagnosticsTile(const gig::TileRect& cell)
-    {
-        if (!overlay_.ready() || cell.width <= 0.0f || cell.height <= 0.0f) {
-            return;
-        }
-
-        overlay_.rect(cell.x, cell.y, cell.width, cell.height, gig::OverlayColor { 0.04f, 0.05f, 0.07f, 0.92f });
-
-        const float pad = 8.0f;
-        // Scale text down so the widest line fits the cell.
-        constexpr int widestLineChars = 30;
-        float scale = (cell.width - 2.0f * pad) / (static_cast<float>(widestLineChars) * overlay_.glyphWidth(1.0f));
-        scale = std::clamp(scale, 0.35f, 1.0f);
-        const float lineHeight = overlay_.lineHeight(scale) + 2.0f;
-        const float x = cell.x + pad;
-        float y = cell.y + pad;
-
-        const gig::OverlayColor heading { 0.65f, 0.78f, 1.0f, 1.0f };
-        const gig::OverlayColor body { 0.85f, 0.9f, 1.0f, 1.0f };
-
-        char line[128] = {};
-        overlay_.text(x, y, scale, heading, "diagnostics");
-        y += lineHeight * 1.4f;
-        std::snprintf(line, sizeof(line), "cams good: %d  bad: %d", overlayStats_.camerasOnline, overlayStats_.camerasOffline);
-        overlay_.text(x, y, scale, body, line);
-        y += lineHeight;
-        std::snprintf(line, sizeof(line), "frames: %d/s, %llu total",
-            static_cast<int>(overlayStats_.fps + 0.5), static_cast<unsigned long long>(overlayStats_.framesTotal));
-        overlay_.text(x, y, scale, body, line);
-        y += lineHeight;
-        std::snprintf(line, sizeof(line), "bandwidth: %d kbps", overlayStats_.kbps);
-        overlay_.text(x, y, scale, body, line);
-        y += lineHeight;
-        std::snprintf(line, sizeof(line), "cpu: %.2f%%", overlayStats_.cpuPercent);
-        overlay_.text(x, y, scale, body, line);
     }
 
     void loadImguiFont()

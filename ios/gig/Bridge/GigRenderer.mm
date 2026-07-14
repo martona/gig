@@ -474,7 +474,6 @@
         params.pointHeight = static_cast<float>(_pointSize.height);
         params.scale = static_cast<float>(_scale);
         params.reservedTopPoints = 0.0f; // the SwiftUI toolbar lives OUTSIDE the Metal view
-        params.extraCell = false;        // no diagnostics tile on iOS (dropped by decision)
         params.dimFactor = _dimFactor;
         params.orbitStepSeconds = static_cast<float>(_orbitStepSeconds);
         const gig::MetalScene::Frame scene = _scene->render(encoder, frames, params);

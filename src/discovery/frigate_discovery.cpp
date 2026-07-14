@@ -219,11 +219,10 @@ std::string buildStreamUrl(const std::string& templ, const std::string& streamNa
 
 } // namespace
 
-std::vector<CameraStream> discoverCameras(HttpClient& client, const std::string& streamUrlTemplate)
+std::vector<CameraStream> discoverCameras(HttpClient& client)
 {
-    const std::string streamTemplate = streamUrlTemplate.empty()
-        ? trimTrailingSlashes(client.baseUrl()) + "/api/go2rtc/api/stream.ts?src={src}"
-        : streamUrlTemplate;
+    const std::string streamTemplate =
+        trimTrailingSlashes(client.baseUrl()) + "/api/go2rtc/api/stream.ts?src={src}";
 
     logInfo() << "discovery: GET " << trimTrailingSlashes(client.baseUrl()) << "/api/config";
     const HttpResponse response = client.get("/api/config");

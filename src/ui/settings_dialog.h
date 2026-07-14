@@ -8,7 +8,7 @@
 namespace gig {
 
 // Modal native settings dialog (Win32 dark dialog on Windows; AppKit window on
-// macOS). Pre-fills from `config`, `showOverlay`, and `labelMode` (0 hide / 1
+// macOS). Pre-fills from `config` and `labelMode` (0 hide / 1
 // show-on-error-only / 2 always); on OK writes the edited values back into them and
 // returns true. Cancel returns false and leaves them untouched. `parent` is the
 // owner window (HWND on Windows; ignored on macOS). `statusMessage` (e.g. a prior
@@ -28,7 +28,7 @@ namespace gig {
 // STATIONARY objects (a parked car stops counting ~10s after it parks);
 // `keepHiddenStreams` keeps off-screen cameras' streams connected (off = tear
 // down + reconnect on demand, saving power at the cost of a 1-2s wake).
-bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
+bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
                         bool& keepHiddenStreams,

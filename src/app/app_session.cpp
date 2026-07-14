@@ -75,7 +75,7 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
         if (!cfg.baseUrl.empty()) {
             HttpClient client(cfg.baseUrl, cfg.tls, sessionCache_, cookieJar_);
             try {
-                cameras = discoverCameras(client, cfg.streamUrlTemplate);
+                cameras = discoverCameras(client);
             } catch (const std::exception& discoveryError) {
                 // A discovery throw is a connection-time failure (unreachable,
                 // bad response) -- transient, not a config problem.

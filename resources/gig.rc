@@ -10,70 +10,57 @@
 // first run / unusable config). umbra themes them dark in WM_INITDIALOG. The
 // primary dialog holds only what most users touch -- base URL + credentials --
 // with everything else behind the Advanced... button (IDD_SETTINGS_ADVANCED).
-IDD_SETTINGS DIALOGEX 0, 0, 300, 120
+IDD_SETTINGS DIALOGEX 0, 0, 320, 250
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "gig settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "Frigate URL:",         IDC_STATIC,        8,  14,  74, 10
-    EDITTEXT                                IDC_BASE,         86,  12, 206, 12, ES_AUTOHSCROLL
-    LTEXT           "User:",                IDC_STATIC,        8,  31,  74, 10
-    EDITTEXT                                IDC_USER,         86,  29, 206, 12, ES_AUTOHSCROLL
-    LTEXT           "Password:",            IDC_STATIC,        8,  48,  74, 10
-    EDITTEXT                                IDC_PASSWORD,     86,  46, 206, 12, ES_AUTOHSCROLL | ES_PASSWORD
-    LTEXT           "",                     IDC_STATUS,        8,  68, 284, 20
-    PUSHBUTTON      "Advanced...",          IDC_ADVANCED,      8,  98,  64, 14
-    PUSHBUTTON      "Forget...",            IDC_FORGET,       76,  98,  50, 14
-    DEFPUSHBUTTON   "OK",                   IDOK,            190,  98,  48, 14
-    PUSHBUTTON      "Cancel",               IDCANCEL,        244,  98,  48, 14
+    GROUPBOX        "Connection",           IDC_STATIC,        8,   6, 304, 76
+    LTEXT           "Frigate URL:",         IDC_STATIC,       18,  24,  68, 10
+    EDITTEXT                                IDC_BASE,         90,  22, 212, 12, ES_AUTOHSCROLL
+    LTEXT           "User:",                IDC_STATIC,       18,  42,  68, 10
+    EDITTEXT                                IDC_USER,         90,  40, 212, 12, ES_AUTOHSCROLL
+    LTEXT           "Password:",            IDC_STATIC,       18,  60,  68, 10
+    EDITTEXT                                IDC_PASSWORD,     90,  58, 212, 12, ES_AUTOHSCROLL | ES_PASSWORD
+
+    GROUPBOX        "View",                 IDC_STATIC,        8,  90, 304, 90
+    LTEXT           "Show:",                IDC_STATIC,       18, 108,  68, 10
+    COMBOBOX                                IDC_VIEW_MODE,    90, 106, 140, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Raw motion counts as activity (noisy on windy days)", IDC_MOTION_ACTIVITY, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 126, 286, 10
+    CONTROL         "Ignore stationary objects (parked cars, settled packages)", IDC_ACTIVE_ONLY, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 142, 286, 10
+    CONTROL         "Keep hidden cameras streaming (faster switching, more power)", IDC_STREAM_HIDDEN, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 158, 286, 10
+
+    LTEXT           "",                     IDC_STATUS,        8, 188, 304, 28
+    PUSHBUTTON      "Advanced...",          IDC_ADVANCED,      8, 228,  64, 14
+    PUSHBUTTON      "Forget...",            IDC_FORGET,       76, 228,  50, 14
+    DEFPUSHBUTTON   "OK",                   IDOK,            210, 228,  48, 14
+    PUSHBUTTON      "Cancel",               IDCANCEL,        264, 228,  48, 14
 END
 
-IDD_SETTINGS_ADVANCED DIALOGEX 0, 0, 300, 422
+IDD_SETTINGS_ADVANCED DIALOGEX 0, 0, 320, 226
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Advanced settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "TLS / security",       IDC_STATIC,        8,   8, 280, 10
-    LTEXT           "CA file:",             IDC_STATIC,        8,  24,  74, 10
-    EDITTEXT                                IDC_CA,           86,  22, 160, 12, ES_AUTOHSCROLL
-    PUSHBUTTON      "...",                  IDC_BROWSE_CA,   250,  22,  42, 12
-    LTEXT           "Client cert:",         IDC_STATIC,        8,  41,  74, 10
-    EDITTEXT                                IDC_CERT,         86,  39, 160, 12, ES_AUTOHSCROLL
-    PUSHBUTTON      "...",                  IDC_BROWSE_CERT, 250,  39,  42, 12
-    LTEXT           "Client key:",          IDC_STATIC,        8,  58,  74, 10
-    EDITTEXT                                IDC_KEY,          86,  56, 160, 12, ES_AUTOHSCROLL
-    PUSHBUTTON      "...",                  IDC_BROWSE_KEY,  250,  56,  42, 12
-    LTEXT           "Leave CA / cert / key blank to use the Windows certificate store.", IDC_STATIC, 8, 73, 284, 9
-    CONTROL         "Skip server certificate verification (insecure; disables pinning)", IDC_INSECURE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 85, 284, 10
-    LTEXT           "Tuning",               IDC_STATIC,        8, 103, 280, 10
-    LTEXT           "Login refresh (s):",   IDC_STATIC,        8, 119,  74, 10
-    EDITTEXT                                IDC_LOGIN_REFRESH,86, 117,  50, 12, ES_AUTOHSCROLL | ES_NUMBER
-    LTEXT           "Poll interval (s):",   IDC_STATIC,        8, 136,  74, 10
-    EDITTEXT                                IDC_POLL,         86, 134,  50, 12, ES_AUTOHSCROLL | ES_NUMBER
-    CONTROL         "Force software decode", IDC_SOFTWARE,    "Button", BS_AUTOCHECKBOX | WS_TABSTOP,  86, 151, 206, 10
-    CONTROL         "Show diagnostics overlay", IDC_OVERLAY,  "Button", BS_AUTOCHECKBOX | WS_TABSTOP,  86, 165, 206, 10
-    LTEXT           "Camera labels:",       IDC_STATIC,        8, 181,  74, 10
-    COMBOBOX                                IDC_LABELMODE,    86, 179, 120, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Screen protection",    IDC_STATIC,        8, 200, 280, 10
-    LTEXT           "Dim to:",              IDC_STATIC,        8, 216,  40, 10
-    CONTROL         "", IDC_DIM_LEVEL, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 48, 214, 198, 14
-    LTEXT           "60%",                  IDC_DIM_LEVEL_VAL, 250, 216, 42, 10
-    LTEXT           "Dim after:",           IDC_STATIC,        8, 235,  74, 10
-    COMBOBOX                                IDC_DIM_DELAY,    86, 233, 120, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Pixel-shift step (s):", IDC_STATIC,       8, 254,  90, 10
-    EDITTEXT                                IDC_ORBIT_STEP,  100, 252,  40, 12, ES_AUTOHSCROLL | ES_NUMBER
-    LTEXT           "The image nudges ~1px every N seconds to spread OLED wear (lower = more motion).", IDC_STATIC, 8, 270, 284, 16
-    LTEXT           "View",                 IDC_STATIC,        8, 294, 280, 10
-    LTEXT           "Show:",                IDC_STATIC,        8, 310,  74, 10
-    COMBOBOX                                IDC_VIEW_MODE,    86, 308, 120, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    CONTROL         "Raw motion counts as activity (noisier)", IDC_MOTION_ACTIVITY, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 86, 325, 206, 10
-    CONTROL         "Ignore stationary objects (parked cars, settled packages)", IDC_ACTIVE_ONLY, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 86, 340, 206, 10
-    CONTROL         "Keep hidden cameras streaming (faster switching, more power)", IDC_STREAM_HIDDEN, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 86, 355, 206, 10
-    LTEXT           "Advanced connection",  IDC_STATIC,        8, 372, 280, 10
-    LTEXT           "Stream template:",     IDC_STATIC,        8, 388,  74, 10
-    EDITTEXT                                IDC_STREAM_URL,   86, 386, 206, 12, ES_AUTOHSCROLL
-    DEFPUSHBUTTON   "OK",                   IDOK,            190, 402,  48, 14
-    PUSHBUTTON      "Cancel",               IDCANCEL,        244, 402,  48, 14
+    GROUPBOX        "Security",             IDC_STATIC,        8,   6, 304, 38
+    CONTROL         "Skip server certificate verification (insecure; disables pinning)", IDC_INSECURE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 22, 286, 10
+
+    GROUPBOX        "Display",              IDC_STATIC,        8,  52, 304, 42
+    LTEXT           "Camera labels:",       IDC_STATIC,       18,  70,  68, 10
+    COMBOBOX                                IDC_LABELMODE,    90,  68, 140, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    GROUPBOX        "Screen protection",    IDC_STATIC,        8, 102, 304, 102
+    LTEXT           "Dim to:",              IDC_STATIC,       18, 120,  40, 10
+    CONTROL         "", IDC_DIM_LEVEL, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 62, 118, 196, 14
+    LTEXT           "60%",                  IDC_DIM_LEVEL_VAL, 264, 120, 40, 10
+    LTEXT           "Dim after:",           IDC_STATIC,       18, 140,  68, 10
+    COMBOBOX                                IDC_DIM_DELAY,    90, 138, 140, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Pixel-shift step (s):", IDC_STATIC,      18, 160,  80, 10
+    EDITTEXT                                IDC_ORBIT_STEP,  102, 158,  40, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "The image nudges ~1px every N seconds to spread OLED wear (lower = more motion).", IDC_STATIC, 18, 176, 286, 20
+
+    DEFPUSHBUTTON   "OK",                   IDOK,            210, 204,  48, 14
+    PUSHBUTTON      "Cancel",               IDCANCEL,        264, 204,  48, 14
 END
 
 // Application manifest (Common Controls v6 for umbra theming + supportedOS).

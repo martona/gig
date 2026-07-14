@@ -14,14 +14,12 @@ struct CameraStream {
 };
 
 // Fetch /api/config through `client` and map every camera to its primary
-// go2rtc live stream, in config order (stable slot order).
-//
-// `streamUrlTemplate` is a stream URL containing a "{src}" placeholder that is
-// replaced with each camera's go2rtc stream name. If empty, it defaults to
-// `<client base>/api/go2rtc/api/stream.ts?src={src}`.
+// go2rtc live stream, in config order (stable slot order). Each camera's video
+// URL is Frigate's authenticated restream endpoint,
+// `<client base>/api/go2rtc/api/stream.ts?src=<stream>`.
 //
 // Throws std::runtime_error on fetch or parse failure. Cameras with no
 // resolvable go2rtc stream are logged and skipped.
-std::vector<CameraStream> discoverCameras(HttpClient& client, const std::string& streamUrlTemplate);
+std::vector<CameraStream> discoverCameras(HttpClient& client);
 
 } // namespace gig

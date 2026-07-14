@@ -11,7 +11,6 @@
 #include <SDL3/SDL.h>
 
 struct OverlayStats {
-    bool showDiagnostics = true;
     int camerasOnline = 0;
     int camerasOffline = 0;
     double fps = 0.0;
@@ -128,8 +127,8 @@ public:
 
     // The grid cell under a LOGICAL-point position, from the renderer's OWN laid-
     // out rects (which include the burn-in orbit offset the caller can't know):
-    // 0..N-1 = cameras, N = the diagnostics cell when shown, -1 = none. Only
-    // meaningful in grid view (a focused view is the caller's tap-anywhere case).
+    // 0..N-1 = tiles, -1 = none. Only meaningful in grid view (a focused view
+    // is the caller's tap-anywhere case).
     virtual int hitTestCell(float x, float y) const { (void)x; (void)y; return -1; }
 
     // Idle-dim luminance multiplier (1 = normal), pushed every frame by the run
