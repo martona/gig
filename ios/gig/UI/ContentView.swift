@@ -238,6 +238,10 @@ final class OverlayModel: ObservableObject {
     @Published var labels: [Label] = []
     @Published var zoomed = false
     @Published var chromeHidden = false
+    // Activity view, empty grid: the wandering "all quiet" line ("" = hidden);
+    // position is fractional (0..1) within the video area.
+    @Published var quietText = ""
+    @Published var quietPos = CGPoint.zero
 
     init() {
         VideoHost.shared().onOverlayChanged = { [weak self] in
@@ -253,6 +257,8 @@ final class OverlayModel: ObservableObject {
         }
         zoomed = host.zoomed
         chromeHidden = host.chromeHidden
+        quietText = host.quietStatusText
+        quietPos = host.quietStatusPosition
     }
 }
 
@@ -437,6 +443,28 @@ struct ContentView: View {
                     .offset(x: label.rect.minX + 4, y: label.rect.minY + 4)
                     .allowsHitTesting(false)
             }
+            // Activity view, nothing active: the wandering liveness line
+            // ("It's ten past four and everything is quiet."). It moves once a
+            // minute. Clamp the placement so the FULL sentence stays on screen
+            // (mirrors the desktop status panel) instead of ellipsizing when
+            // the hash lands near the right edge of a portrait phone.
+            if !overlay.quietText.isEmpty {
+                GeometryReader { geo in
+                    let font = UIFont.preferredFont(forTextStyle: .callout)
+                    let textSize = (overlay.quietText as NSString)
+                        .size(withAttributes: [.font: font])
+                    let x = min(geo.size.width * overlay.quietPos.x,
+                                max(8, geo.size.width - textSize.width - 8))
+                    let y = min(geo.size.height * overlay.quietPos.y,
+                                max(8, geo.size.height - textSize.height - 8))
+                    Text(overlay.quietText)
+                        .font(.callout)
+                        .foregroundStyle(Color(white: 0.62))
+                        .fixedSize()
+                        .offset(x: x, y: y)
+                }
+                .allowsHitTesting(false)
+            }
             statusScreen
         }
         .ignoresSafeArea(edges: .bottom)
@@ -518,11 +546,12 @@ struct ContentView: View {
         }
     }
 
-    // Push the persisted burn-in config into the video host.
+    // Push the persisted burn-in + view-mode config into the video host.
     private func applyDimSettings() {
         let s = SettingsBridge.current()
         VideoHost.shared().setDim(levelPercent: s.dimLevelPercent, delaySeconds: s.dimDelaySeconds)
         VideoHost.shared().setOrbitStep(seconds: s.orbitStepSeconds)
+        VideoHost.shared().setViewMode(activity: s.activityView, motionCounts: s.motionActivity)
     }
 }
 

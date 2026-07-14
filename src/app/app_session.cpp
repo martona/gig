@@ -39,6 +39,7 @@ void AppSession::stop()
         supervisor_.reset();
     }
     cameraLabels_.clear();
+    cameraNames_.clear();
 }
 
 ApplyResult AppSession::applyConfig(const AppConfig& cfg)
@@ -94,11 +95,17 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
             return { false, "connected, but Frigate reported no cameras", ApplyFailure::Transient };
         }
 
-        // 3. Labels for the renderer (stable camera order).
+        // 3. Labels for the renderer (stable camera order), plus the raw
+        //    Frigate camera names (the /api/config keys) in the same order --
+        //    the activity feed's topics are keyed by those, and the label may
+        //    be the go2rtc stream name instead.
         cameraLabels_.clear();
         cameraLabels_.reserve(cameras.size());
+        cameraNames_.clear();
+        cameraNames_.reserve(cameras.size());
         for (const CameraStream& camera : cameras) {
             cameraLabels_.push_back(camera.streamName.empty() ? camera.cameraName : camera.streamName);
+            cameraNames_.push_back(camera.cameraName);
         }
 
         // 4. Supervisor (owns the decoders + the health poll).

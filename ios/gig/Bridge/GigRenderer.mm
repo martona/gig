@@ -12,12 +12,15 @@
 #import "GigRenderer.h"
 #import "GigBridgeInternal.h"
 
+#include "app/activity_gate.h"
 #include "render/metal_scene.h"
+#include "render/quiet_status.h"
 
 #include "log.hpp"
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -78,6 +81,18 @@
     std::uint64_t _lastFrameStamp;
     BOOL _lastAnimating;
     BOOL _needsRender;
+
+    // Activity view: the gate turns the /ws feed into the visible tile subset;
+    // _visibleTiles maps tile index -> camera slot (identity outside activity
+    // mode). Activity wakes the dim WITHOUT counting as interaction (it must
+    // not un-hide chrome or peek the full grid).
+    gig::ActivityGate _gate;
+    BOOL _viewModeActivity;
+    BOOL _motionActivity;
+    std::vector<int> _visibleTiles;
+    CFTimeInterval _lastActivityWake;
+    NSString *_quietText;
+    CGPoint _quietPos;
 }
 
 + (instancetype)shared
@@ -101,6 +116,9 @@
         _orbitStepSeconds = 40;
         _dimPreview = -1.0;
         _lastInteraction = CACurrentMediaTime();
+        _lastActivityWake = _lastInteraction;
+        _quietText = @"";
+        _quietPos = CGPointZero;
     }
     return self;
 }
@@ -127,6 +145,23 @@
 {
     _dimPreview = factor;
     _needsRender = YES;
+}
+
+- (void)setViewModeActivity:(BOOL)activity motionCounts:(BOOL)motionCounts
+{
+    _viewModeActivity = activity;
+    _motionActivity = motionCounts;
+    _needsRender = YES;
+}
+
+- (NSString *)quietStatusText
+{
+    return _quietText ?: @"";
+}
+
+- (CGPoint)quietStatusPosition
+{
+    return _quietPos;
 }
 
 - (BOOL)chromeHidden
@@ -255,17 +290,91 @@
             self.onOverlayChanged();
         }
     }
-    float dimTarget = 1.0f;
-    if (_dimPreview >= 0.0) {
-        dimTarget = std::clamp(static_cast<float>(_dimPreview), 0.1f, 1.0f);
-    } else if (_dimDelaySeconds > 0 && idle >= static_cast<double>(_dimDelaySeconds)) {
-        dimTarget = static_cast<float>(_dimLevelPercent) / 100.0f;
-    }
-    const bool dimming = _dimFactor != dimTarget;
-
     @autoreleasepool {
         GIGEngine *engine = [GIGEngine shared];
-        const std::vector<std::shared_ptr<VideoFrame>> frames = [engine snapshotFramesInternal];
+        const GIGEngineTickSnapshot snap = [engine tickSnapshotInternal];
+        if (!snap.valid) {
+            return; // engine busy (connect in flight): keep the last frame + state
+        }
+
+        // Activity view: derive the visible tile subset from the /ws feed.
+        // Interaction "peeks" the full grid (same idle clock as chrome-hide);
+        // startup counts as interaction, which also covers /ws having no
+        // state replay on connect.
+        const gig::ActivityGate::Result activity = _gate.evaluate(
+            _viewModeActivity == YES, _motionActivity == YES, snap.feedConnected,
+            idle, snap.activity, static_cast<int>(snap.frames.size()));
+        if (activity.wakeEdge) {
+            _lastActivityWake = CACurrentMediaTime();
+        }
+        if (activity.visible != _visibleTiles) {
+            // Keep focus on the same CAMERA across the reshuffle; drop it if
+            // that camera left the subset (a stale out-of-range focus wedges
+            // the zoom state).
+            const int focused = _scene->focusedTile();
+            int remapped = -1;
+            if (focused >= 0 && focused < static_cast<int>(_visibleTiles.size())) {
+                const int cam = _visibleTiles[static_cast<std::size_t>(focused)];
+                const auto pos = std::find(activity.visible.begin(), activity.visible.end(), cam);
+                if (pos != activity.visible.end()) {
+                    remapped = static_cast<int>(pos - activity.visible.begin());
+                }
+            }
+            // Immediate (no zoom transition): the animation state refers to
+            // the OLD index space and would visibly zoom the wrong camera.
+            _scene->setFocusedTileImmediate(remapped);
+            _visibleTiles = activity.visible;
+            _needsRender = YES;
+        }
+
+        // The wandering "all quiet" line lives in the SwiftUI overlay --
+        // independent of the Metal dirty gate, so refresh it before the
+        // early-out below (it must move once a minute on a static screen).
+        NSString *quietText = @"";
+        CGPoint quietPos = CGPointZero;
+        if (activity.filtered && activity.quiet) {
+            const std::time_t nowWall = std::time(nullptr);
+            std::tm local {};
+            localtime_r(&nowWall, &local);
+            const std::string line = gig::quietStatusLine(local);
+            float fx = 0.0f;
+            float fy = 0.0f;
+            gig::quietStatusPlacement(static_cast<long long>(nowWall / 60), fx, fy);
+            quietText = [NSString stringWithUTF8String:line.c_str()] ?: @"";
+            quietPos = CGPointMake(fx, fy);
+        }
+        if (![quietText isEqualToString:_quietText] || !CGPointEqualToPoint(quietPos, _quietPos)) {
+            _quietText = quietText;
+            _quietPos = quietPos;
+            if (self.onOverlayChanged) {
+                self.onOverlayChanged();
+            }
+        }
+
+        // Activity wakes the display: the dim clock runs off the LEAST idle of
+        // interaction vs camera activity (chrome-hide stays interaction-only).
+        const CFTimeInterval dimIdle = std::min(idle, CACurrentMediaTime() - _lastActivityWake);
+        float dimTarget = 1.0f;
+        if (_dimPreview >= 0.0) {
+            dimTarget = std::clamp(static_cast<float>(_dimPreview), 0.1f, 1.0f);
+        } else if (_dimDelaySeconds > 0 && dimIdle >= static_cast<double>(_dimDelaySeconds)) {
+            dimTarget = static_cast<float>(_dimLevelPercent) / 100.0f;
+        }
+        const bool dimming = _dimFactor != dimTarget;
+
+        // Visible-subset frames/bytes/labels, index-aligned with the tiles.
+        std::vector<std::shared_ptr<VideoFrame>> frames;
+        std::vector<std::uint64_t> bytes;
+        std::vector<std::string> labels;
+        frames.reserve(_visibleTiles.size());
+        bytes.reserve(_visibleTiles.size());
+        labels.reserve(_visibleTiles.size());
+        for (const int cam : _visibleTiles) {
+            const auto slot = static_cast<std::size_t>(cam);
+            frames.push_back(slot < snap.frames.size() ? snap.frames[slot] : nullptr);
+            bytes.push_back(slot < snap.bytes.size() ? snap.bytes[slot] : 0);
+            labels.push_back(slot < snap.labels.size() ? snap.labels[slot] : std::string());
+        }
 
         // Dirty gate: skip the whole encode when nothing can have changed on
         // screen. A frameless tile's signal scope keeps the scene animating, so
@@ -285,7 +394,7 @@
                                                   : std::max(dimTarget, _dimFactor - stepD);
         }
 
-        _scene->setTileActivity([engine tileByteCountsInternal]);
+        _scene->setTileActivity(bytes);
 
         _layer.drawableSize = CGSizeMake(pixelW, pixelH);
         id<CAMetalDrawable> drawable = [_layer nextDrawable];
@@ -318,7 +427,7 @@
         _lastAnimating = scene.animating ? YES : NO;
         _needsRender = NO;
 
-        [self updateOverlay:scene cameraCount:frames.size() engine:engine];
+        [self updateOverlay:scene cameraCount:frames.size() labels:labels];
     }
 }
 
@@ -327,7 +436,7 @@
 // layout/count changes, zoom start/end).
 - (void)updateOverlay:(const gig::MetalScene::Frame &)scene
           cameraCount:(std::size_t)cameraCount
-               engine:(GIGEngine *)engine
+               labels:(const std::vector<std::string> &)names
 {
     const bool zoomTransition = scene.zoomProgress > 0.0f && scene.zoomProgress < 1.0f;
     const int focused = _scene->focusedTile();
@@ -340,7 +449,6 @@
 
     NSMutableArray<GIGTileLabel *> *labels = [NSMutableArray array];
     if (!zoomTransition) {
-        const std::vector<std::string> names = [engine cameraLabelsInternal];
         auto appendLabel = [&](std::size_t index, CGRect rect) {
             if (index >= names.size() || names[index].empty()) {
                 return;

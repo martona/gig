@@ -97,6 +97,8 @@ struct DialogState {
     int* dimLevel;  // idle-dim luminance percent (10..100)
     int* dimDelay;  // idle-dim delay seconds (0 = never)
     int* orbitStep; // pixel-orbit step seconds (>= 1)
+    int* viewMode;  // 0 all cameras / 1 active cameras only
+    bool* motionActivity; // raw motion counts as activity (opt-in)
     std::string status;
     std::function<void(int)> onDimPreview; // live dim preview while the slider moves
 };
@@ -192,6 +194,16 @@ void populateAdvanced(HWND dlg, const DialogState& state)
                  static_cast<WPARAM>(dimDelayIndex(state.dimDelay ? *state.dimDelay : 600)), 0);
     SetDlgItemInt(dlg, IDC_ORBIT_STEP, static_cast<UINT>(state.orbitStep ? *state.orbitStep : 40), FALSE);
 
+    // View mode: the whole wall, or only cameras with current activity.
+    HWND viewCombo = GetDlgItem(dlg, IDC_VIEW_MODE);
+    SendMessageW(viewCombo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(viewCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All cameras"));
+    SendMessageW(viewCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Active cameras only"));
+    const int viewSel = (state.viewMode && *state.viewMode == 1) ? 1 : 0;
+    SendMessageW(viewCombo, CB_SETCURSEL, static_cast<WPARAM>(viewSel), 0);
+    CheckDlgButton(dlg, IDC_MOTION_ACTIVITY,
+                   (state.motionActivity && *state.motionActivity) ? BST_CHECKED : BST_UNCHECKED);
+
     setDlgTextUtf8(dlg, IDC_STREAM_URL, c.streamUrlTemplate);
 }
 
@@ -224,6 +236,15 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
     }
     if (state.orbitStep) {
         *state.orbitStep = std::clamp(static_cast<int>(GetDlgItemInt(dlg, IDC_ORBIT_STEP, nullptr, FALSE)), 1, 600);
+    }
+    if (state.viewMode) {
+        const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_VIEW_MODE), CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR) {
+            *state.viewMode = sel == 1 ? 1 : 0;
+        }
+    }
+    if (state.motionActivity) {
+        *state.motionActivity = IsDlgButtonChecked(dlg, IDC_MOTION_ACTIVITY) == BST_CHECKED;
     }
     c.streamUrlTemplate = getDlgTextUtf8(dlg, IDC_STREAM_URL);
     // tls.useSystemStore is re-derived from ca/cert/key on reload; rwTimeoutUs
@@ -352,6 +373,7 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        int& viewMode, bool& motionActivity,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -369,8 +391,11 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     int workingDimLevel = dimLevelPercent;
     int workingDimDelay = dimDelaySeconds;
     int workingOrbitStep = orbitStepSeconds;
+    int workingViewMode = viewMode;
+    bool workingMotionActivity = motionActivity;
     DialogState state { &working, &workingOverlay, &workingLabelMode,
                         &workingDimLevel, &workingDimDelay, &workingOrbitStep,
+                        &workingViewMode, &workingMotionActivity,
                         statusMessage, onDimPreview };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
@@ -388,6 +413,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
     dimLevelPercent = workingDimLevel;
     dimDelaySeconds = workingDimDelay;
     orbitStepSeconds = workingOrbitStep;
+    viewMode = workingViewMode;
+    motionActivity = workingMotionActivity;
     return true;
 }
 

@@ -35,6 +35,12 @@ NS_SWIFT_NAME(Settings)
 @property (nonatomic, assign) NSInteger dimDelaySeconds;
 // Seconds between burn-in pixel-orbit steps (>= 1; default 40).
 @property (nonatomic, assign) NSInteger orbitStepSeconds;
+// Activity view: show only cameras with current activity (Frigate /ws feed);
+// the grid stays empty when nothing is happening. Any tap peeks the full wall.
+@property (nonatomic, assign) BOOL activityView;
+// Whether raw motion counts as activity (noisy: wind-blown shadows trigger
+// it); tracked objects always count.
+@property (nonatomic, assign) BOOL motionActivity;
 @end
 
 NS_SWIFT_NAME(SettingsBridge)

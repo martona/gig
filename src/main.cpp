@@ -1,11 +1,14 @@
+#include "app/activity_gate.h"
 #include "app/app_session.h"
 #include "log.hpp"
 #include "net/cert_pin.hpp"
 #include "net/cookie_jar.hpp"
+#include "net/frigate_events.hpp"
 #include "net/tls_session_cache.hpp"
 #include "net/win_cert_store.h"
 #include "platform/settings_store.hpp"
 #include "render/grid_layout.h"
+#include "render/quiet_status.h"
 #include "render/video_renderer.h"
 #include "video_frame.h"
 
@@ -14,6 +17,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -161,6 +165,12 @@ struct StartupConfig {
     int dimLevelPercent = 60;
     int dimDelaySeconds = 600;
     int orbitStepSeconds = 40; // burn-in pixel-orbit step interval
+    // View mode: 0 = all cameras (the classic wall), 1 = active cameras only
+    // (tiles appear/disappear with Frigate's real-time activity feed).
+    int viewMode = 0;
+    // Whether raw motion counts as activity (opt-in: wind-blown shadows
+    // trigger it); tracked objects (<cam>/all) always count.
+    bool motionActivity = false;
 };
 
 // Read all settings from the platform store, applying the same derivation +
@@ -186,6 +196,8 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.dimLevelPercent = std::clamp(static_cast<int>(store.getInt("dim-level").value_or(60)), 10, 100);
     cfg.dimDelaySeconds = std::max(0, static_cast<int>(store.getInt("dim-delay").value_or(600)));
     cfg.orbitStepSeconds = std::clamp(static_cast<int>(store.getInt("orbit-step").value_or(40)), 1, 600);
+    cfg.viewMode = std::clamp(static_cast<int>(store.getInt("view-mode").value_or(0)), 0, 1);
+    cfg.motionActivity = store.getBool("motion-activity").value_or(false);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -221,11 +233,14 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // The password is DPAPI-encrypted; an empty password removes the value rather
 // than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, bool showOverlay, LabelMode labelMode,
-                int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds)
+                int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
+                int viewMode, bool motionActivity)
 {
     store.setInt("dim-level", dimLevelPercent);
     store.setInt("dim-delay", dimDelaySeconds);
     store.setInt("orbit-step", orbitStepSeconds);
+    store.setInt("view-mode", viewMode);
+    store.setBool("motion-activity", motionActivity);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
     store.setString("stream-url", s.streamUrlTemplate);
@@ -288,6 +303,19 @@ void saveWindowGeometry(gig::SettingsStore& store, const WindowGeometry& g)
 // Usable only if the size is sane AND the title bar can be grabbed on some
 // currently-connected display -- guards against a monitor unplugged or a
 // resolution change since last run that would strand the window off-screen.
+// The "all quiet" liveness line for the current wall-clock minute.
+std::string quietLineNow()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm local {};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    return gig::quietStatusLine(local);
+}
+
 bool geometryUsable(const WindowGeometry& g)
 {
     if (g.w < 320 || g.h < 240 || g.w > 16384 || g.h > 16384) {
@@ -453,6 +481,24 @@ int main(int argc, char** argv)
             gig::logInfo() << "auto-reconnect in " << autoRetryDelaySeconds << "s";
         };
 
+        // Activity view: the /ws feed + the gate that turns it into a visible
+        // tile subset. visibleTiles is what the renderer currently shows
+        // (camera indices, all of them outside activity mode); it doubles as
+        // the map from renderer tile index -> camera slot for hit-testing.
+        gig::ActivityGate activityGate;
+        std::unique_ptr<gig::FrigateEvents> activityFeed;
+        std::vector<int> visibleTiles;
+        auto restartActivityFeed = [&]() {
+            activityFeed.reset();
+            activityGate.reset();
+            visibleTiles.clear(); // force a re-derive (and label re-push) next tick
+            if (session.running() && !cfg.session.baseUrl.empty()) {
+                activityFeed = std::make_unique<gig::FrigateEvents>(
+                    cfg.session.baseUrl, cfg.session.tls, sessionCache, cookieJar);
+                activityFeed->start(session.cameraNames());
+            }
+        };
+
         gig::ApplyResult applied;
         if (!configEmpty()) {
             applied = session.applyConfig(cfg.session);
@@ -485,6 +531,7 @@ int main(int argc, char** argv)
                 }
             }
         }
+        restartActivityFeed();
         renderer->setCameraLabels(session.cameraLabels());
         renderer->setLabelMode(cfg.labelMode);
 
@@ -539,6 +586,11 @@ int main(int argc, char** argv)
         constexpr auto inputRenderTail = std::chrono::milliseconds(1000);
         std::uint64_t lastRenderedFrames = 0;
         auto lastInteraction = std::chrono::steady_clock::now();
+        // A camera becoming active wakes a dimmed wall (that's the point of a
+        // security monitor at 3am) -- but deliberately does NOT count as user
+        // interaction, or every event would also un-hide chrome and peek the
+        // full grid.
+        auto lastActivityWake = lastInteraction;
 
         // Idle-dim (burn-in): ramp the video luminance to the configured level
         // after the configured idle delay; snap back to full on any interaction.
@@ -567,6 +619,7 @@ int main(int argc, char** argv)
                 renderer->render(session.snapshotFrames());
             }
             const gig::ApplyResult result = session.applyConfig(connConfig);
+            restartActivityFeed();
             renderer->setCameraLabels(session.cameraLabels());
             lastTitleFrames = 0;
             lastStatsFrames = 0;
@@ -594,9 +647,11 @@ int main(int argc, char** argv)
         // Camera tile under a window-space point, or -1. The renderer owns the
         // laid-out rects (which include the burn-in orbit offset only it knows),
         // so hit-testing asks it; index == cameraCount is the diagnostics cell.
+        // NOTE: returns the renderer TILE index (an index into visibleTiles),
+        // which equals the camera slot only outside activity mode.
         auto cameraTileAt = [&](float x, float y) -> int {
             const int cell = renderer->hitTestCell(x, y);
-            return (cell >= 0 && cell < static_cast<int>(session.cameraCount())) ? cell : -1;
+            return (cell >= 0 && cell < static_cast<int>(visibleTiles.size())) ? cell : -1;
         };
 
         // True fullscreen (borderless desktop), distinct from maximization.
@@ -621,6 +676,8 @@ int main(int argc, char** argv)
             int dimLevel = cfg.dimLevelPercent;
             int dimDelay = cfg.dimDelaySeconds;
             int orbitStep = cfg.orbitStepSeconds;
+            int viewMode = cfg.viewMode;
+            bool motionActivity = cfg.motionActivity;
             bool forget = false;
             // Live idle-dim preview: while the slider moves, apply the previewed
             // luminance to the main view behind the modal dialog by rendering one
@@ -631,9 +688,10 @@ int main(int argc, char** argv)
                 renderer->render(session.snapshotFrames());
             };
             if (gig::showSettingsDialog(mainHwnd, edited, overlay, labelMode, dimLevel, dimDelay,
-                                        orbitStep, forget, lastConnectError, onDimPreview)) {
+                                        orbitStep, viewMode, motionActivity, forget,
+                                        lastConnectError, onDimPreview)) {
                 saveConfig(*settings, edited, overlay, static_cast<LabelMode>(labelMode),
-                           dimLevel, dimDelay, orbitStep);
+                           dimLevel, dimDelay, orbitStep, viewMode, motionActivity);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 OverlayStats overlayStats;
@@ -649,6 +707,9 @@ int main(int argc, char** argv)
                 // renderer's focus, and the frame-delta latches (a dead session's
                 // counters would wrap the next fps calculation).
                 gig::logWarning() << "forgetting all settings (user request)";
+                activityFeed.reset();
+                activityGate.reset();
+                visibleTiles.clear();
                 session.stop();
                 settings->clear();
                 settings->setInt("schema-version", 1);
@@ -737,7 +798,7 @@ int main(int argc, char** argv)
                         renderer->setFocusedTile(idx);
                     } else if (cfg.showOverlay
                         && renderer->hitTestCell(event.button.x, event.button.y)
-                            == static_cast<int>(session.cameraCount())) {
+                            == static_cast<int>(visibleTiles.size())) {
                         // The synthetic diagnostics tile (not a camera) toggles the log view.
                         renderer->setLogViewVisible(!renderer->logViewVisible());
                     }
@@ -783,6 +844,56 @@ int main(int argc, char** argv)
             }
 #endif
 
+            // Activity view: derive the visible tile subset from the /ws feed.
+            // Startup and reconnects count as interaction (lastInteraction
+            // begins "now"), so the wall opens showing everything and settles
+            // into the filtered view after the peek window -- which also
+            // papers over /ws having no state replay on connect.
+            const double sinceInteraction =
+                std::chrono::duration<double>(frameStart - lastInteraction).count();
+            const gig::ActivityGate::Result activity = activityGate.evaluate(
+                cfg.viewMode == 1, cfg.motionActivity,
+                activityFeed && activityFeed->connected(), sinceInteraction,
+                activityFeed ? activityFeed->snapshot()
+                             : std::vector<gig::FrigateEvents::CameraState> {},
+                static_cast<int>(session.cameraCount()));
+            if (activity.wakeEdge) {
+                lastActivityWake = frameStart;
+            }
+            const bool visibleChanged = activity.visible != visibleTiles;
+            if (visibleChanged) {
+                // Keep focus on the same CAMERA across the reshuffle; drop it
+                // if that camera left the subset (a stale focused index past
+                // the new tile count wedges the zoom state).
+                const int focused = renderer->focusedTile();
+                int remapped = -1;
+                if (focused >= 0 && focused < static_cast<int>(visibleTiles.size())) {
+                    const int cam = visibleTiles[static_cast<std::size_t>(focused)];
+                    const auto pos = std::find(activity.visible.begin(), activity.visible.end(), cam);
+                    if (pos != activity.visible.end()) {
+                        remapped = static_cast<int>(pos - activity.visible.begin());
+                    }
+                }
+                // Immediate (no zoom transition): the animation state refers to
+                // the OLD index space and would visibly zoom the wrong camera.
+                renderer->setFocusedTileImmediate(remapped);
+                renderer->setHoveredTile(-1);
+                visibleTiles = activity.visible;
+                // Re-run the stats tick next loop so quietStatus (and the
+                // banner counts) track the subset change within a frame.
+                lastTitleUpdate = frameStart - std::chrono::seconds(2);
+                // Labels must track the subset so tile text matches what's shown.
+                const std::vector<std::string>& labels = session.cameraLabels();
+                std::vector<std::string> shownLabels;
+                shownLabels.reserve(visibleTiles.size());
+                for (const int cam : visibleTiles) {
+                    shownLabels.push_back(cam < static_cast<int>(labels.size())
+                        ? labels[static_cast<std::size_t>(cam)]
+                        : std::string());
+                }
+                renderer->setCameraLabels(shownLabels);
+            }
+
             // Refresh the toolbar/banner stats first (1s cadence), before the draw
             // decision, so a stats change can itself mark this tick dirty -- that
             // keeps the live fps/cpu numbers moving even when no new frame arrives
@@ -821,6 +932,9 @@ int main(int argc, char** argv)
                 stats.healthDegraded = cp.schemaError;
                 stats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
                 applyScreenState(stats);
+                if (activity.filtered && activity.quiet) {
+                    stats.quietStatus = quietLineNow();
+                }
 
                 renderer->setDiagnostics(stats);
                 lastCpuPercent = stats.cpuPercent;
@@ -851,8 +965,9 @@ int main(int argc, char** argv)
             // Idle-dim ramp. Target = full while a status screen is up, recently
             // interacted, or dimming disabled; else the configured level after the
             // delay. Ramp ~1.5%/frame so it's a gentle fade, not a snap.
+            const auto sinceDimWake = std::min(frameStart - lastInteraction, frameStart - lastActivityWake);
             const bool idleForDim = cfg.dimDelaySeconds > 0
-                && (frameStart - lastInteraction) >= std::chrono::seconds(cfg.dimDelaySeconds)
+                && sinceDimWake >= std::chrono::seconds(cfg.dimDelaySeconds)
                 && session.running();
             const float dimTarget = idleForDim ? static_cast<float>(cfg.dimLevelPercent) / 100.0f : 1.0f;
             const bool dimming = currentDim != dimTarget;
@@ -874,13 +989,29 @@ int main(int argc, char** argv)
             const bool newFrame = decodedNow != lastRenderedFrames;
             const bool recentInput = (frameStart - lastInteraction) < inputRenderTail;
             const bool dirty = !minimized
-                && (newFrame || statsRefreshed || recentInput || dimming
+                && (newFrame || statsRefreshed || recentInput || dimming || visibleChanged
                     || renderer->isAnimating() || renderer->logViewVisible()
                     || renderer->wantsRepaint()); // burn-in orbit step
 
             if (dirty) {
-                const std::vector<std::shared_ptr<VideoFrame>> frames = session.snapshotFrames();
-                renderer->setTileActivity(session.tileByteCounts()); // drives the per-tile signal animation
+                // Render only the visible subset; frames/byte-counts must stay
+                // index-aligned with the tiles (and with the labels pushed on
+                // the last subset change).
+                const std::vector<std::shared_ptr<VideoFrame>> allFrames = session.snapshotFrames();
+                const std::vector<std::uint64_t> allBytes = session.tileByteCounts();
+                std::vector<std::shared_ptr<VideoFrame>> frames;
+                std::vector<std::uint64_t> bytes;
+                frames.reserve(visibleTiles.size());
+                bytes.reserve(visibleTiles.size());
+                for (const int cam : visibleTiles) {
+                    frames.push_back(cam < static_cast<int>(allFrames.size())
+                        ? allFrames[static_cast<std::size_t>(cam)]
+                        : nullptr);
+                    bytes.push_back(cam < static_cast<int>(allBytes.size())
+                        ? allBytes[static_cast<std::size_t>(cam)]
+                        : 0);
+                }
+                renderer->setTileActivity(bytes); // drives the per-tile signal animation
                 renderer->render(frames);
                 lastRenderedFrames = decodedNow;
 
@@ -925,6 +1056,7 @@ int main(int argc, char** argv)
         }
 
         gig::logInfo() << "shutting down";
+        activityFeed.reset();
         session.stop();
         gig::setCertPinStore(nullptr); // no more TLS; unregister before pinStore dies
         return 0;

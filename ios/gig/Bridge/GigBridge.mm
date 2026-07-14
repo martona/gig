@@ -103,6 +103,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.dimLevelPercent = static_cast<NSInteger>(store->getInt("dim-level").value_or(60));
     settings.dimDelaySeconds = static_cast<NSInteger>(store->getInt("dim-delay").value_or(600));
     settings.orbitStepSeconds = static_cast<NSInteger>(store->getInt("orbit-step").value_or(40));
+    settings.activityView = store->getInt("view-mode").value_or(0) == 1;
+    settings.motionActivity = store->getBool("motion-activity").value_or(false);
     return settings;
 }
 
@@ -129,6 +131,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setInt("dim-level", std::clamp<NSInteger>(settings.dimLevelPercent, 10, 100));
     store->setInt("dim-delay", std::max<NSInteger>(settings.dimDelaySeconds, 0));
     store->setInt("orbit-step", std::clamp<NSInteger>(settings.orbitStepSeconds, 1, 600));
+    store->setInt("view-mode", settings.activityView ? 1 : 0);
+    store->setBool("motion-activity", settings.motionActivity);
 }
 
 // TODO(onboarding-project): temporary; remove with the Forget Settings UI.
@@ -183,6 +187,9 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     std::shared_ptr<gig::CookieJar> _cookieJar;
     std::unique_ptr<gig::CertPinStore> _pinStore;
     std::unique_ptr<gig::AppSession> _session;
+    // Real-time per-camera activity from Frigate's /ws (drives activity view
+    // + wake-on-activity). Lives per session: rebuilt on each connect.
+    std::unique_ptr<gig::FrigateEvents> _events;
     // The last connect failure's classification (drives the error screen's CTA).
     bool _lastConfigError;
 }
@@ -211,6 +218,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 - (GIGEngineStatus *)connectLocked
 {
     // Fresh session each connect (mirrors a desktop reconnect).
+    _events.reset();
     if (_session) {
         _session->stop();
         _session.reset();
@@ -248,12 +256,17 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     if (!result.ok) {
         gig::logError() << "iOS connect failed: " << result.error;
     }
+    if (result.ok && !cfg.baseUrl.empty()) {
+        _events = std::make_unique<gig::FrigateEvents>(cfg.baseUrl, cfg.tls, _sessionCache, _cookieJar);
+        _events->start(_session->cameraNames());
+    }
     return [self statusLocked:(result.ok ? std::string("ok") : result.error)];
 }
 
 - (void)disconnect
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    _events.reset();
     if (_session) {
         _session->stop();
         _session.reset();
@@ -312,6 +325,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 - (void)forgetRuntimeState
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    _events.reset();
     if (_session) {
         _session->stop();
         _session.reset();
@@ -391,31 +405,24 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 @implementation GIGEngine (Internal)
 
-- (std::vector<std::shared_ptr<VideoFrame>>)snapshotFramesInternal
+- (GIGEngineTickSnapshot)tickSnapshotInternal
 {
+    GIGEngineTickSnapshot out;
     std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
-    if (!lock.owns_lock() || !_session) {
-        return {};
+    if (!lock.owns_lock()) {
+        return out; // busy: connect/disconnect in flight on another thread
     }
-    return _session->snapshotFrames();
-}
-
-- (std::vector<std::uint64_t>)tileByteCountsInternal
-{
-    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
-    if (!lock.owns_lock() || !_session) {
-        return {};
+    out.valid = true;
+    if (_session) {
+        out.frames = _session->snapshotFrames();
+        out.bytes = _session->tileByteCounts();
+        out.labels = _session->cameraLabels();
     }
-    return _session->tileByteCounts();
-}
-
-- (std::vector<std::string>)cameraLabelsInternal
-{
-    std::unique_lock<std::mutex> lock(_mutex, std::try_to_lock);
-    if (!lock.owns_lock() || !_session) {
-        return {};
+    if (_events) {
+        out.activity = _events->snapshot();
+        out.feedConnected = _events->connected();
     }
-    return _session->cameraLabels();
+    return out;
 }
 
 @end

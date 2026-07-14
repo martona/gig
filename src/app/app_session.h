@@ -90,6 +90,11 @@ public:
     // pushes these to the renderer after a successful applyConfig.
     const std::vector<std::string>& cameraLabels() const { return cameraLabels_; }
 
+    // The raw Frigate camera names (/api/config keys) in the same order --
+    // what the /ws activity topics are keyed by. May differ from the labels,
+    // which prefer the go2rtc stream name.
+    const std::vector<std::string>& cameraNames() const { return cameraNames_; }
+
     // Per-frame snapshot + live stats, passed through to the current supervisor
     // (safe zero/empty values when stopped).
     std::vector<std::shared_ptr<VideoFrame>> snapshotFrames() const;
@@ -113,6 +118,7 @@ private:
     std::unique_ptr<FrigateAuth> auth_;
     std::unique_ptr<CameraSupervisor> supervisor_;
     std::vector<std::string> cameraLabels_;
+    std::vector<std::string> cameraNames_;
 };
 
 } // namespace gig

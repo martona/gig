@@ -34,3 +34,5 @@
 #define IDC_DIM_DELAY       2023
 #define IDC_DIM_LEVEL_VAL   2024
 #define IDC_ORBIT_STEP      2025
+#define IDC_VIEW_MODE       2026
+#define IDC_MOTION_ACTIVITY 2027

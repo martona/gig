@@ -29,6 +29,8 @@ struct SettingsView: View {
     @State private var dimLevel: Double = 60
     @State private var dimDelay = 600
     @State private var orbitStep: Double = 40
+    @State private var activityView = false
+    @State private var motionActivity = false
     @State private var confirmForget = false
 
     // Delay choices (seconds); matches the desktop dropdown.
@@ -94,6 +96,18 @@ struct SettingsView: View {
                     Text("Reduces brightness when idle to limit OLED burn-in. The image also drifts ~1px every few seconds (pixel shift) to spread wear — lower step = more motion.")
                 }
 
+                Section {
+                    Picker("Show", selection: $activityView) {
+                        Text("All cameras").tag(false)
+                        Text("Active cameras only").tag(true)
+                    }
+                    Toggle("Raw motion counts as activity", isOn: $motionActivity)
+                } header: {
+                    Text("View")
+                } footer: {
+                    Text("Active-only keeps the wall empty until a camera sees something (tracked objects; raw motion optionally — it's noisy on windy days). Tap anywhere to peek at every camera; activity also wakes the display from idle dim.")
+                }
+
                 // TODO(onboarding-project): temporary section; remove when done.
                 Section {
                     Button("Forget Settings…", role: .destructive) { confirmForget = true }
@@ -140,6 +154,8 @@ struct SettingsView: View {
         dimLevel = Double(s.dimLevelPercent)
         dimDelay = s.dimDelaySeconds
         orbitStep = Double(s.orbitStepSeconds)
+        activityView = s.activityView
+        motionActivity = s.motionActivity
     }
 
     private func save() {
@@ -152,6 +168,8 @@ struct SettingsView: View {
         s.dimLevelPercent = Int(dimLevel)
         s.dimDelaySeconds = dimDelay
         s.orbitStepSeconds = Int(orbitStep)
+        s.activityView = activityView
+        s.motionActivity = motionActivity
         SettingsBridge.save(s)
     }
 }

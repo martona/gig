@@ -67,6 +67,9 @@ public:
     bool initialize(id<MTLDevice> device, MTLPixelFormat pixelFormat);
 
     void setFocusedTile(int index);
+    // Focus without the zoom transition -- for tile-index remaps (activity-view
+    // subset changes), where animating would zoom the wrong camera.
+    void setFocusedTileImmediate(int index);
     int focusedTile() const { return focusedTile_; }
     void setHoveredTile(int index) { hoveredTile_ = index; }
     void setTileActivity(const std::vector<std::uint64_t>& byteCounts) { tileBytes_ = byteCounts; }

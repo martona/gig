@@ -41,6 +41,11 @@ struct OverlayStats {
     int secondsSinceData = 0;    // since last good control-plane contact (Reconnecting)
     std::string statusHost;      // host/base shown in the banner
     std::string statusDetail;    // short reason (Disconnected)
+
+    // "Active cameras" view mode with nothing active: the grid is deliberately
+    // empty and this liveness line ("It's ten past four and everything is
+    // quiet.") wanders across the window instead. Empty = don't draw.
+    std::string quietStatus;
 };
 
 // When to draw the per-tile camera label. ErrorOnly shows it only while a tile
@@ -75,6 +80,12 @@ public:
     // Focus a single tile so it fills the window; -1 returns to the grid.
     virtual void setFocusedTile(int index) = 0;
     virtual int focusedTile() const = 0;
+
+    // Focus without the zoom transition. Used when tile INDICES were remapped
+    // (the activity view changed the visible subset): the animation state
+    // refers to the old index space, so animating would zoom a tile that now
+    // holds a different camera. Default falls back to the animated setter.
+    virtual void setFocusedTileImmediate(int index) { setFocusedTile(index); }
 
     // Per-camera labels (stable camera order) and live diagnostics for the HUD.
     virtual void setCameraLabels(const std::vector<std::string>& labels) = 0;

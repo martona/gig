@@ -178,6 +178,7 @@ public:
     bool isAnimating() const override { return animating_; }
 
     void setFocusedTile(int index) override { scene_->setFocusedTile(index); }
+    void setFocusedTileImmediate(int index) override { scene_->setFocusedTileImmediate(index); }
     int focusedTile() const override { return scene_->focusedTile(); }
 
     void setCameraLabels(const std::vector<std::string>& labels) override { cameraLabels_ = labels; }
@@ -364,9 +365,11 @@ private:
                               IM_COL32(0, 0, 0, static_cast<int>((1.0f - dimFactor_) * 255.0f + 0.5f)));
         }
 
-        if (overlayStats_.screen != OverlayStats::StatusScreen::None) {
-            // Full-window welcome/connecting/error panel (no running session). It
-            // carries the status message, so the slim banner is suppressed.
+        {
+            // Full-window welcome/connecting/error panel (no running session) --
+            // it carries the status message, so the slim banner is suppressed.
+            // Called for screen==None too: that branch only draws the activity
+            // view's wandering "all quiet" line (when set) and returns.
             const gig::StatusPanelAction panel =
                 gig::buildStatusPanel(overlayStats_, kToolbarLogicalHeight);
             if (panel.openSettings) {

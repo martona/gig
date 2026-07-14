@@ -112,12 +112,13 @@ static int dimDelayIndexFor(int seconds)
 
 void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        int& viewMode, bool& motionActivity,
                         const std::function<void(int)>& onDimPreview)
 {
     @autoreleasepool {
         constexpr CGFloat kWidth = 560;
         constexpr CGFloat kRow = 30;
-        const CGFloat height = 620;
+        const CGFloat height = 704;
 
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWidth, height)
                                                        styleMask:NSWindowStyleMaskTitled
@@ -243,6 +244,16 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
         [content addSubview:orbitNote];
         y -= 22;
 
+        section(@"View");
+        label(@"Show:");
+        NSPopUpButton* viewPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(174, y - 2, 220, 26) pullsDown:NO];
+        [viewPopup addItemsWithTitles:@[ @"All cameras", @"Active cameras only" ]];
+        [viewPopup selectItemAtIndex:(viewMode == 1 ? 1 : 0)];
+        [content addSubview:viewPopup];
+        row();
+        NSButton* motionCheck = check(@"Raw motion counts as activity (noisier)", motionActivity);
+        row();
+
         section(@"Advanced connection");
         label(@"Stream template:");
         NSTextField* streamField = field(config.streamUrlTemplate, kWidth - 190);
@@ -282,6 +293,8 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
             }
         }
         orbitStepSeconds = std::clamp(static_cast<int>(orbitField.intValue), 1, 600);
+        viewMode = viewPopup.indexOfSelectedItem == 1 ? 1 : 0;
+        motionActivity = (motionCheck.state == NSControlStateValueOn);
         config.streamUrlTemplate = fromField(streamField);
     }
 }
@@ -290,6 +303,7 @@ void showAdvancedDialog(AppConfig& config, bool& showOverlay, int& labelMode,
 
 bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
+                        int& viewMode, bool& motionActivity,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -305,6 +319,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         int workingDimLevel = dimLevelPercent;
         int workingDimDelay = dimDelaySeconds;
         int workingOrbitStep = orbitStepSeconds;
+        int workingViewMode = viewMode;
+        bool workingMotionActivity = motionActivity;
 
         constexpr CGFloat kWidth = 520;
         const CGFloat height = 196;
@@ -373,9 +389,11 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         int* dimLevelPtr = &workingDimLevel;
         int* dimDelayPtr = &workingDimDelay;
         int* orbitStepPtr = &workingOrbitStep;
+        int* viewModePtr = &workingViewMode;
+        bool* motionActivityPtr = &workingMotionActivity;
         controller.onAdvanced = ^{
             showAdvancedDialog(*workingPtr, *overlayPtr, *labelPtr, *dimLevelPtr, *dimDelayPtr,
-                               *orbitStepPtr, onDimPreview);
+                               *orbitStepPtr, *viewModePtr, *motionActivityPtr, onDimPreview);
         };
 
         [window center];
@@ -400,6 +418,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, bool& showOverlay, int&
         dimLevelPercent = workingDimLevel;
         dimDelaySeconds = workingDimDelay;
         orbitStepSeconds = workingOrbitStep;
+        viewMode = workingViewMode;
+        motionActivity = workingMotionActivity;
         return true;
     }
 }

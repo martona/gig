@@ -637,6 +637,16 @@ public:
         focusedTile_ = index;
     }
 
+    void setFocusedTileImmediate(int index) override
+    {
+        // No transition: the caller remapped tile indices (activity-view subset
+        // change), so animTile_ would point at a tile now holding a different
+        // camera -- the zoom-out would visibly play the wrong feed.
+        focusedTile_ = index;
+        animTile_ = -1;
+        animProgress_ = (index >= 0) ? 1.0f : 0.0f;
+    }
+
     int focusedTile() const override
     {
         return focusedTile_;
@@ -1715,9 +1725,11 @@ private:
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
-        if (overlayStats_.screen != OverlayStats::StatusScreen::None) {
-            // Full-window welcome/connecting/error panel (no running session). It
-            // carries the status message, so the slim banner is suppressed.
+        {
+            // Full-window welcome/connecting/error panel (no running session) --
+            // it carries the status message, so the slim banner is suppressed.
+            // Called for screen==None too: that branch only draws the activity
+            // view's wandering "all quiet" line (when set) and returns.
             const gig::StatusPanelAction panel =
                 gig::buildStatusPanel(overlayStats_, toolbarHeightPx());
             if (panel.openSettings) {

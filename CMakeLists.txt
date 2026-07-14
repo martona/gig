@@ -88,6 +88,8 @@ add_executable(gig WIN32 MACOSX_BUNDLE
     src/main.cpp
     src/log.cpp
     src/log.hpp
+    src/app/activity_gate.cpp
+    src/app/activity_gate.h
     src/app/app_session.cpp
     src/app/app_session.h
     src/app/camera_supervisor.cpp
@@ -106,6 +108,8 @@ add_executable(gig WIN32 MACOSX_BUNDLE
     src/net/cookie_jar.hpp
     src/net/frigate_auth.cpp
     src/net/frigate_auth.hpp
+    src/net/frigate_events.cpp
+    src/net/frigate_events.hpp
     src/net/http_client.cpp
     src/net/http_client.hpp
     src/net/tls_client.cpp
@@ -119,6 +123,7 @@ add_executable(gig WIN32 MACOSX_BUNDLE
     src/platform/settings_store.hpp
     src/render/grid_layout.cpp
     src/render/grid_layout.h
+    src/render/quiet_status.h
     src/render/video_renderer.h
 )
 

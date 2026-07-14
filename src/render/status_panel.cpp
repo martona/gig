@@ -1,5 +1,9 @@
 #include "render/status_panel.h"
 
+#include "render/quiet_status.h"
+
+#include <algorithm>
+#include <ctime>
 #include <string>
 
 #include <imgui.h>
@@ -56,6 +60,25 @@ StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLog
 {
     StatusPanelAction action;
     if (stats.screen == OverlayStats::StatusScreen::None) {
+        // Activity view with an empty grid: draw the wandering "all quiet"
+        // liveness line over the bare background (there are no tiles under
+        // it). Placement is deterministic per wall-clock minute so it moves
+        // once a minute, everywhere, in the same spot on every platform.
+        if (!stats.quietStatus.empty()) {
+            const ImGuiViewport* viewport = ImGui::GetMainViewport();
+            float fx = 0.0f;
+            float fy = 0.0f;
+            quietStatusPlacement(static_cast<long long>(std::time(nullptr) / 60), fx, fy);
+            const ImVec2 textSize = ImGui::CalcTextSize(stats.quietStatus.c_str());
+            const float x = viewport->WorkPos.x
+                + std::clamp(viewport->WorkSize.x * fx, 8.0f,
+                             std::max(8.0f, viewport->WorkSize.x - textSize.x - 8.0f));
+            const float y = viewport->WorkPos.y + topOffsetLogical
+                + std::clamp((viewport->WorkSize.y - topOffsetLogical) * fy, 8.0f,
+                             std::max(8.0f, viewport->WorkSize.y - topOffsetLogical - textSize.y - 8.0f));
+            ImGui::GetBackgroundDrawList()->AddText(
+                ImVec2(x, y), IM_COL32(150, 158, 170, 200), stats.quietStatus.c_str());
+        }
         return action;
     }
 

@@ -66,6 +66,11 @@ NS_SWIFT_NAME(VideoHost)
 // resume normal idle-driven dimming.
 - (void)setDimPreview:(CGFloat)factor NS_SWIFT_NAME(setDimPreview(_:));
 
+// Activity view config (from settings): activity = show only cameras with
+// current Frigate activity; motionCounts = raw motion also counts (noisier).
+- (void)setViewModeActivity:(BOOL)activity motionCounts:(BOOL)motionCounts
+    NS_SWIFT_NAME(setViewMode(activity:motionCounts:));
+
 @property (nonatomic, assign, readonly) BOOL zoomed;
 
 // True once `delaySeconds` of no interaction have elapsed: the SwiftUI layer
@@ -75,7 +80,14 @@ NS_SWIFT_NAME(VideoHost)
 // Labels currently visible (empty while the zoom animation runs).
 - (NSArray<GIGTileLabel *> *)visibleLabels;
 
-// Fired on the main thread whenever visibleLabels/zoomed/chromeHidden changed.
+// Activity view, empty grid: the wandering "It's ten past four and everything
+// is quiet." line. Empty string = hidden. Position is the text's top-left as
+// FRACTIONS of the view (both 0..1); it moves once a minute.
+@property (nonatomic, copy, readonly) NSString *quietStatusText;
+@property (nonatomic, assign, readonly) CGPoint quietStatusPosition;
+
+// Fired on the main thread whenever visibleLabels/zoomed/chromeHidden/
+// quietStatus changed.
 @property (nonatomic, copy, nullable) void (^onOverlayChanged)(void);
 
 @end

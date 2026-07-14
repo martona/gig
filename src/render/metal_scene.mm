@@ -231,6 +231,16 @@ void MetalScene::setFocusedTile(int index)
     focusedTile_ = index;
 }
 
+void MetalScene::setFocusedTileImmediate(int index)
+{
+    // No transition: used when the tile INDICES were remapped (activity-view
+    // subset change), where animating via animTile_ would zoom the tile that
+    // now holds a different camera.
+    focusedTile_ = index;
+    animTile_ = -1;
+    animProgress_ = (index >= 0) ? 1.0f : 0.0f;
+}
+
 bool MetalScene::tileShowingSignal(std::size_t index) const
 {
     return index < tiles_.size() && tiles_[index].showedSignal;

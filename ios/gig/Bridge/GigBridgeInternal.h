@@ -14,6 +14,7 @@
 
 #import "GigBridge.h"
 
+#include "net/frigate_events.hpp"
 #include "video_frame.h"
 
 #include <cstdint>
@@ -21,15 +22,22 @@
 #include <string>
 #include <vector>
 
+// Everything the render tick needs, captured under ONE try_lock so the pieces
+// are mutually consistent (frames/labels/activity from the same instant).
+// valid == false means the engine was busy (connect in flight): render nothing
+// new this tick and keep all derived state (subset, focus) untouched.
+struct GIGEngineTickSnapshot {
+    bool valid = false;
+    std::vector<std::shared_ptr<VideoFrame>> frames; // stable camera order
+    std::vector<std::uint64_t> bytes;                // signal-scope activity
+    std::vector<std::string> labels;                 // display labels
+    std::vector<gig::FrigateEvents::CameraState> activity; // /ws feed states
+    bool feedConnected = false;                      // /ws socket is up
+};
+
 @interface GIGEngine (Internal)
 
-// Per-camera frame snapshot in stable camera order (empty when stopped/busy).
-- (std::vector<std::shared_ptr<VideoFrame>>)snapshotFramesInternal;
-
-// Per-camera cumulative downloaded bytes (drives the signal-scope animation).
-- (std::vector<std::uint64_t>)tileByteCountsInternal;
-
-// Per-camera labels in stable camera order.
-- (std::vector<std::string>)cameraLabelsInternal;
+// Non-blocking consistent snapshot for the display-link tick.
+- (GIGEngineTickSnapshot)tickSnapshotInternal;
 
 @end
