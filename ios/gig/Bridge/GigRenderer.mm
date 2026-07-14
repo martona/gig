@@ -119,6 +119,7 @@
         _dimDelaySeconds = 600;
         _orbitStepSeconds = 40;
         _dimPreview = -1.0;
+        _activeOnly = YES; // matches the persisted default; settings push overrides
         _keepHiddenStreams = YES;
         _lastInteraction = CACurrentMediaTime();
         _lastActivityWake = _lastInteraction;

@@ -31,7 +31,7 @@ struct SettingsView: View {
     @State private var orbitStep: Double = 40
     @State private var activityView = false
     @State private var motionActivity = false
-    @State private var activeOnly = false
+    @State private var activeOnly = true
     @State private var keepHiddenStreams = true
     @State private var confirmForget = false
 

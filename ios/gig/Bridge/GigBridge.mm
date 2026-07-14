@@ -105,7 +105,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.orbitStepSeconds = static_cast<NSInteger>(store->getInt("orbit-step").value_or(40));
     settings.activityView = store->getInt("view-mode").value_or(0) == 1;
     settings.motionActivity = store->getBool("motion-activity").value_or(false);
-    settings.activeOnly = store->getBool("active-only").value_or(false);
+    settings.activeOnly = store->getBool("active-only").value_or(true);
     settings.keepHiddenStreams = store->getBool("stream-hidden").value_or(true);
     return settings;
 }

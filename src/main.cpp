@@ -170,10 +170,11 @@ struct StartupConfig {
     // Whether raw motion counts as activity (opt-in: wind-blown shadows
     // trigger it); tracked objects (<cam>/all) always count.
     bool motionActivity = false;
-    // Ignore STATIONARY objects (opt-in): activity uses Frigate's /active
-    // counters, so a parked car or a package settled on the doorstep stops
-    // counting ~10s after it stops moving.
-    bool activeOnly = false;
+    // Ignore STATIONARY objects (default ON -- the less annoying path):
+    // activity uses Frigate's /active counters, so a parked car or a package
+    // settled on the doorstep stops counting ~10s after it stops moving.
+    // Opt out for presence semantics (a motionless loiterer stays visible).
+    bool activeOnly = true;
     // Keep off-screen cameras streaming (default). Off = tear a hidden
     // camera's stream down after a short delay and reconnect when it appears
     // (saves decode power; costs ~1-2s + the scope animation on wake).
@@ -203,7 +204,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.orbitStepSeconds = std::clamp(static_cast<int>(store.getInt("orbit-step").value_or(40)), 1, 600);
     cfg.viewMode = std::clamp(static_cast<int>(store.getInt("view-mode").value_or(0)), 0, 1);
     cfg.motionActivity = store.getBool("motion-activity").value_or(false);
-    cfg.activeOnly = store.getBool("active-only").value_or(false);
+    cfg.activeOnly = store.getBool("active-only").value_or(true);
     cfg.keepHiddenStreams = store.getBool("stream-hidden").value_or(true);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
