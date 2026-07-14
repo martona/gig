@@ -909,7 +909,8 @@ int main(int argc, char** argv)
                         const int cam = visibleTiles[i];
                         if (cam >= 0 && cam < static_cast<int>(feedStates.size())) {
                             reasons[i] = gig::activityReason(
-                                feedStates[static_cast<std::size_t>(cam)], cfg.activeOnly);
+                                feedStates[static_cast<std::size_t>(cam)],
+                                cfg.motionActivity, cfg.activeOnly);
                         }
                     }
                 }

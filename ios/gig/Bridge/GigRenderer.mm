@@ -428,7 +428,8 @@
             bytes.push_back(slot < snap.bytes.size() ? snap.bytes[slot] : 0);
             std::string label = slot < snap.labels.size() ? snap.labels[slot] : std::string();
             std::string reason = snap.feedConnected && slot < snap.activity.size()
-                ? gig::activityReason(snap.activity[slot], _activeOnly == YES)
+                ? gig::activityReason(snap.activity[slot], _motionActivity == YES,
+                                      _activeOnly == YES)
                 : std::string();
             if (!reason.empty() && !label.empty()) {
                 label += " - " + reason;

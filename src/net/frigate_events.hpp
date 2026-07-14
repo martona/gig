@@ -63,8 +63,12 @@ class CookieJar;
 // Against that, the snapshot is the ONLY witness to pre-join state: after we
 // join, the edge stream is a complete record of everything that CHANGES
 // ("<cam>/all" carries absolute counts, not deltas). The only post-join gap
-// a snapshot can fill is the per-label breakdown + motion flag of objects
-// that never transition again (e.g. a car parked since before we joined).
+// a snapshot can fill is the per-label breakdown of objects that never
+// transition again (e.g. a car parked since before we joined). The
+// snapshot's "motion" field is NOT seeded at all: it is raw instantaneous
+// motion (len(motion_boxes) > 0 at generation), not the debounced
+// "<cam>/motion" topic state -- seeding it latched a spurious, never-
+// corrected motion=true on nearly every camera (see the .cpp).
 //
 // The protocol that squares this (user-specified, 2026-07-14):
 //   1. ACCEPTANCE WINDOW: snapshots count only within kSeedWindowSeconds of
@@ -238,7 +242,11 @@ private:
 // the object labels joined (alphabetical -- std::map order), else "motion"
 // while raw motion is ON, else empty (nothing happening). activeOnly picks
 // the stationary-excluding counts so a parked car doesn't caption its tile.
-inline std::string activityReason(const FrigateEvents::CameraState& state, bool activeOnly)
+// motionCounts mirrors the gate's policy (ActivityGate::evaluate): when the
+// user has motion counting OFF, motion isn't activity -- so it can't be a
+// caption either (a reason force-shows the label even in ErrorOnly mode).
+inline std::string activityReason(const FrigateEvents::CameraState& state, bool motionCounts,
+                                  bool activeOnly)
 {
     std::string reason;
     for (const auto& [label, count] : (activeOnly ? state.activeObjects : state.objects)) {
@@ -249,7 +257,7 @@ inline std::string activityReason(const FrigateEvents::CameraState& state, bool 
             reason += label;
         }
     }
-    if (reason.empty() && state.motion) {
+    if (reason.empty() && motionCounts && state.motion) {
         reason = "motion";
     }
     return reason;

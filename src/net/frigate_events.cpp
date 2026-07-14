@@ -679,14 +679,17 @@ void FrigateEvents::handleActivitySnapshot(const boost::json::value& payload)
             state.activeObjects = std::move(activeObjects);
         }
 
-        if (const boost::json::value* motionValue = cam.if_contains("motion");
-            motionValue && motionValue->is_bool()) {
-            const bool on = motionValue->get_bool();
-            if (on || state.motion) {
-                state.lastMotionAt = now;
-            }
-            state.motion = on;
-        }
+        // The snapshot's "motion" field is DELIBERATELY NOT seeded. Server-
+        // side it is len(motion_boxes) > 0 at generation time -- raw
+        // instantaneous motion (wind, shadows, IR grain), a different signal
+        // from the "<cam>/motion" TOPIC (debounced, ~30s+ off-delay,
+        // publishes only on transition). Seeding it latched motion=true on
+        // nearly every camera at startup, and since the topic never sends a
+        // corrective OFF for a camera whose topic-state was already off,
+        // it latched FOREVER -- captioning every tile "- motion". Motion is
+        // edge-only; the pre-join motion flag stays unknown, which is the
+        // lesser evil (the probe showed the topic fires for few cameras
+        // anyway, and object counts are the real activity signal).
 
         // Step 4: config-only entries land here too -- the server had
         // nothing to say about this camera, which is itself an answer.
