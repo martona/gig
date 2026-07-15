@@ -719,10 +719,18 @@ public:
 
     int hitTestCell(float x, float y) const override
     {
-        // Logical -> pixel space (this renderer lays out in pixels), then scan
-        // the cached rects (which include the burn-in orbit offset).
-        const float px = x * dpiScale_;
-        const float py = y * dpiScale_;
+        // Window coords -> pixel space (this renderer lays out in pixels), then
+        // scan the cached rects (which include the burn-in orbit offset). The
+        // conversion factor is the window's pixel density -- 1.0 on Windows,
+        // where SDL mouse coordinates are already physical pixels -- NOT the
+        // display content scale (dpiScale_), which is 2.0 at 200% UI scaling
+        // and would land the hit test at twice the pointer's offset.
+        float density = window_ ? SDL_GetWindowPixelDensity(window_) : 1.0f;
+        if (!(density > 0.0f)) {
+            density = 1.0f;
+        }
+        const float px = x * density;
+        const float py = y * density;
         for (std::size_t i = 0; i < gridLayoutCache_.tiles.size(); ++i) {
             const gig::TileRect& cell = gridLayoutCache_.tiles[i];
             if (px >= cell.x && px < cell.x + cell.width && py >= cell.y && py < cell.y + cell.height) {
