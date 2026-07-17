@@ -242,6 +242,9 @@ final class OverlayModel: ObservableObject {
     // position is fractional (0..1) within the video area.
     @Published var quietText = ""
     @Published var quietPos = CGPoint.zero
+    // Label-size setting as a text multiplier (Normal/Large/Larger = 1/1.5/2),
+    // applied to the tile labels and the quiet line. Set from settings apply.
+    @Published var labelScale: CGFloat = 1
 
     init() {
         VideoHost.shared().onOverlayChanged = { [weak self] in
@@ -435,7 +438,7 @@ struct ContentView: View {
             VideoSurfaceView()
             ForEach(overlay.labels) { label in
                 Text(label.text)
-                    .font(.caption.monospaced())
+                    .font(.system(size: 12 * overlay.labelScale, design: .monospaced))
                     .foregroundStyle(Color(red: 0.90, green: 0.95, blue: 1.0))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -450,7 +453,8 @@ struct ContentView: View {
             // the hash lands near the right edge of a portrait phone.
             if !overlay.quietText.isEmpty {
                 GeometryReader { geo in
-                    let font = UIFont.preferredFont(forTextStyle: .callout)
+                    let quietSize = 16 * overlay.labelScale // .callout, scaled by the label-size setting
+                    let font = UIFont.systemFont(ofSize: quietSize)
                     let textSize = (overlay.quietText as NSString)
                         .size(withAttributes: [.font: font])
                     let x = min(geo.size.width * overlay.quietPos.x,
@@ -458,7 +462,7 @@ struct ContentView: View {
                     let y = min(geo.size.height * overlay.quietPos.y,
                                 max(8, geo.size.height - textSize.height - 8))
                     Text(overlay.quietText)
-                        .font(.callout)
+                        .font(.system(size: quietSize))
                         .foregroundStyle(Color(white: 0.62))
                         .fixedSize()
                         .offset(x: x, y: y)
@@ -555,6 +559,8 @@ struct ContentView: View {
                                        activeOnly: s.activeOnly)
         VideoHost.shared().setShowBoxes(s.showBoxes)
         VideoHost.shared().setKeepHiddenStreams(s.keepHiddenStreams)
+        let scales: [CGFloat] = [1.0, 1.5, 2.0]
+        overlay.labelScale = scales[max(0, min(2, s.labelSize))]
     }
 }
 

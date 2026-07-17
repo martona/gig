@@ -21,7 +21,9 @@ struct StatusPanelAction {
 };
 
 // `topOffsetLogical` is the toolbar strip height (the panel fills the window
-// below it).
-StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLogical);
+// below it). `quietScale` scales the wandering quiet-status line's text (the
+// user's label-size setting; the panel's own chrome stays fixed).
+StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLogical,
+                                   float quietScale = 1.0f);
 
 } // namespace gig

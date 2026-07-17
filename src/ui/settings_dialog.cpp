@@ -59,6 +59,7 @@ std::string getDlgTextUtf8(HWND dlg, int id)
 struct DialogState {
     AppConfig* config;
     int* labelMode; // 0 hide / 1 show-on-error-only / 2 always
+    int* labelSize; // 0 normal / 1 large (1.5x) / 2 larger (2x)
     int* dimLevel;  // idle-dim luminance percent (10..100)
     int* dimDelay;  // idle-dim delay seconds (0 = never)
     int* orbitStep; // pixel-orbit step seconds (>= 1)
@@ -179,6 +180,17 @@ void populateAdvanced(HWND dlg, const DialogState& state)
     }
     SendMessageW(labelCombo, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
 
+    HWND sizeCombo = GetDlgItem(dlg, IDC_LABELSIZE);
+    SendMessageW(sizeCombo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(sizeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Normal"));
+    SendMessageW(sizeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Large"));
+    SendMessageW(sizeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Larger"));
+    int sizeSel = state.labelSize ? *state.labelSize : 0;
+    if (sizeSel < 0 || sizeSel > 2) {
+        sizeSel = 0;
+    }
+    SendMessageW(sizeCombo, CB_SETCURSEL, static_cast<WPARAM>(sizeSel), 0);
+
     // Screen protection: dim level (%) slider + delay dropdown + orbit step.
     const int dimLevel = state.dimLevel ? std::clamp(*state.dimLevel, 10, 100) : 60;
     SendDlgItemMessageW(dlg, IDC_DIM_LEVEL, TBM_SETRANGE, TRUE, MAKELPARAM(10, 100));
@@ -202,6 +214,12 @@ void readBackAdvanced(HWND dlg, const DialogState& state)
         const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LABELMODE), CB_GETCURSEL, 0, 0);
         if (sel != CB_ERR) {
             *state.labelMode = static_cast<int>(sel);
+        }
+    }
+    if (state.labelSize) {
+        const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LABELSIZE), CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR) {
+            *state.labelSize = static_cast<int>(sel);
         }
     }
     if (state.dimLevel) {
@@ -327,7 +345,7 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 
 } // namespace
 
-bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
+bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
                         bool& showBoxes, bool& keepHiddenStreams,
@@ -344,6 +362,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
     forgetRequested = false;
     AppConfig working = config;
     int workingLabelMode = labelMode;
+    int workingLabelSize = labelSize;
     int workingDimLevel = dimLevelPercent;
     int workingDimDelay = dimDelaySeconds;
     int workingOrbitStep = orbitStepSeconds;
@@ -352,7 +371,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
     bool workingActiveOnly = activeOnly;
     bool workingShowBoxes = showBoxes;
     bool workingKeepHidden = keepHiddenStreams;
-    DialogState state { &working, &workingLabelMode,
+    DialogState state { &working, &workingLabelMode, &workingLabelSize,
                         &workingDimLevel, &workingDimDelay, &workingOrbitStep,
                         &workingViewMode, &workingMotionActivity, &workingActiveOnly,
                         &workingShowBoxes, &workingKeepHidden,
@@ -369,6 +388,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
     }
     config = working;
     labelMode = workingLabelMode;
+    labelSize = workingLabelSize;
     dimLevelPercent = workingDimLevel;
     dimDelaySeconds = workingDimDelay;
     orbitStepSeconds = workingOrbitStep;

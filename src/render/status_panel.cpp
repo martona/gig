@@ -56,7 +56,8 @@ int centeredButtons(float panelWidth, const char* primary, const char* secondary
 
 } // namespace
 
-StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLogical)
+StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLogical,
+                                   float quietScale)
 {
     StatusPanelAction action;
     if (stats.screen == OverlayStats::StatusScreen::None) {
@@ -69,7 +70,10 @@ StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLog
             float fx = 0.0f;
             float fy = 0.0f;
             quietStatusPlacement(static_cast<long long>(std::time(nullptr) / 60), fx, fy);
-            const ImVec2 textSize = ImGui::CalcTextSize(stats.quietStatus.c_str());
+            ImFont* font = ImGui::GetFont();
+            const float fontSize = ImGui::GetFontSize() * std::max(0.5f, quietScale);
+            const ImVec2 textSize =
+                font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, stats.quietStatus.c_str());
             const float x = viewport->WorkPos.x
                 + std::clamp(viewport->WorkSize.x * fx, 8.0f,
                              std::max(8.0f, viewport->WorkSize.x - textSize.x - 8.0f));
@@ -77,7 +81,8 @@ StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLog
                 + std::clamp((viewport->WorkSize.y - topOffsetLogical) * fy, 8.0f,
                              std::max(8.0f, viewport->WorkSize.y - topOffsetLogical - textSize.y - 8.0f));
             ImGui::GetBackgroundDrawList()->AddText(
-                ImVec2(x, y), IM_COL32(150, 158, 170, 200), stats.quietStatus.c_str());
+                font, fontSize, ImVec2(x, y), IM_COL32(150, 158, 170, 200),
+                stats.quietStatus.c_str());
         }
         return action;
     }

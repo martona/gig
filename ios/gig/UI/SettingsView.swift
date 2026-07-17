@@ -33,6 +33,7 @@ struct SettingsView: View {
     @State private var motionActivity = false
     @State private var activeOnly = true
     @State private var showBoxes = true
+    @State private var labelSize = 0
     @State private var keepHiddenStreams = true
     @State private var confirmForget = false
 
@@ -82,6 +83,17 @@ struct SettingsView: View {
                               note: "Parked cars and settled packages stop counting ~10 seconds after they stop moving.")
                     toggleRow("Draw detection boxes", isOn: $showBoxes,
                               note: "Red pulses around a live detection; blue lingers where one just ended.")
+                    VStack(alignment: .leading, spacing: 3) {
+                        Picker("Label size", selection: $labelSize) {
+                            Text("Normal").tag(0)
+                            Text("Large").tag(1)
+                            Text("Larger").tag(2)
+                        }
+                        Text("Applies to the tile labels and the all-quiet line — for walls watched from a distance.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
                     toggleRow("Keep hidden cameras streaming", isOn: $keepHiddenStreams,
                               note: "Off saves power; a hidden camera reconnects in a second or two when it appears.")
                 } header: {
@@ -187,6 +199,7 @@ struct SettingsView: View {
         motionActivity = s.motionActivity
         activeOnly = s.activeOnly
         showBoxes = s.showBoxes
+        labelSize = s.labelSize
         keepHiddenStreams = s.keepHiddenStreams
     }
 
@@ -204,6 +217,7 @@ struct SettingsView: View {
         s.motionActivity = motionActivity
         s.activeOnly = activeOnly
         s.showBoxes = showBoxes
+        s.labelSize = labelSize
         s.keepHiddenStreams = keepHiddenStreams
         SettingsBridge.save(s)
     }

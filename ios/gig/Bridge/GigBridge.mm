@@ -107,6 +107,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.motionActivity = store->getBool("motion-activity").value_or(false);
     settings.activeOnly = store->getBool("active-only").value_or(true);
     settings.showBoxes = store->getBool("boxes").value_or(true);
+    settings.labelSize = std::clamp<NSInteger>(
+        static_cast<NSInteger>(store->getInt("label-size").value_or(0)), 0, 2);
     settings.keepHiddenStreams = store->getBool("stream-hidden").value_or(true);
     return settings;
 }
@@ -138,6 +140,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setBool("motion-activity", settings.motionActivity);
     store->setBool("active-only", settings.activeOnly);
     store->setBool("boxes", settings.showBoxes);
+    store->setInt("label-size", std::clamp<NSInteger>(settings.labelSize, 0, 2));
     store->setBool("stream-hidden", settings.keepHiddenStreams);
 }
 

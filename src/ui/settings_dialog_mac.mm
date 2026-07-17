@@ -197,12 +197,12 @@ NSTextField* addField(NSView* card, CGFloat rowCenterY, CGFloat width, const std
 // PEM CA/cert/key, login-refresh, poll-interval and software-decode have no UI
 // anymore -- the settings-store keys are still honored (registry/defaults-level
 // escape hatches); they ride through the working config unchanged.
-void showAdvancedDialog(AppConfig& config, int& labelMode,
+void showAdvancedDialog(AppConfig& config, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         const std::function<void(int)>& onDimPreview)
 {
     @autoreleasepool {
-        const CGFloat height = 420;
+        const CGFloat height = 468;
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWinW, height)
                                                        styleMask:NSWindowStyleMaskTitled
                                                          backing:NSBackingStoreBuffered
@@ -222,11 +222,16 @@ void showAdvancedDialog(AppConfig& config, int& labelMode,
         NSSwitch* insecureSwitch = addSwitch(security, 28, !config.tls.verifyServer);
 
         addCardHeader(content, top, @"Display");
-        NSView* display = addCard(content, top, 48);
-        addRowText(display, 24, @"Camera labels", nil, 220);
-        NSPopUpButton* labelPopup = addPopup(display, 24, 210,
+        NSView* display = addCard(content, top, 96);
+        addRowText(display, 72, @"Camera labels", nil, 220);
+        NSPopUpButton* labelPopup = addPopup(display, 72, 210,
             @[ @"Hide", @"Show on error only", @"Always show" ],
             std::clamp(labelMode, 0, 2));
+        addSeparator(display, 48);
+        addRowText(display, 24, @"Label size",
+                   @"Applies to the tile labels and the all-quiet line.", 220);
+        NSPopUpButton* sizePopup = addPopup(display, 24, 210,
+            @[ @"Normal", @"Large", @"Larger" ], std::clamp(labelSize, 0, 2));
 
         addCardHeader(content, top, @"Screen protection");
         NSView* burnin = addCard(content, top, 152);
@@ -280,6 +285,7 @@ void showAdvancedDialog(AppConfig& config, int& labelMode,
 
         config.tls.verifyServer = (insecureSwitch.state != NSControlStateValueOn);
         labelMode = static_cast<int>(labelPopup.indexOfSelectedItem);
+        labelSize = std::clamp(static_cast<int>(sizePopup.indexOfSelectedItem), 0, 2);
         dimLevelPercent = std::clamp(static_cast<int>(std::lround(dimSlider.doubleValue)), 10, 100);
         {
             const NSInteger i = dimDelayPopup.indexOfSelectedItem;
@@ -293,7 +299,7 @@ void showAdvancedDialog(AppConfig& config, int& labelMode,
 
 } // namespace
 
-bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
+bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
                         bool& showBoxes, bool& keepHiddenStreams,
@@ -308,6 +314,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
         // values untouched; commit only on the primary OK.
         AppConfig working = config;
         int workingLabelMode = labelMode;
+        int workingLabelSize = labelSize;
         int workingDimLevel = dimLevelPercent;
         int workingDimDelay = dimDelaySeconds;
         int workingOrbitStep = orbitStepSeconds;
@@ -387,11 +394,12 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
 
         AppConfig* workingPtr = &working;
         int* labelPtr = &workingLabelMode;
+        int* labelSizePtr = &workingLabelSize;
         int* dimLevelPtr = &workingDimLevel;
         int* dimDelayPtr = &workingDimDelay;
         int* orbitStepPtr = &workingOrbitStep;
         controller.onAdvanced = ^{
-            showAdvancedDialog(*workingPtr, *labelPtr, *dimLevelPtr, *dimDelayPtr,
+            showAdvancedDialog(*workingPtr, *labelPtr, *labelSizePtr, *dimLevelPtr, *dimDelayPtr,
                                *orbitStepPtr, onDimPreview);
         };
 
@@ -413,6 +421,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
         working.password = fromField(passField);
         config = working;
         labelMode = workingLabelMode;
+        labelSize = workingLabelSize;
         dimLevelPercent = workingDimLevel;
         dimDelaySeconds = workingDimDelay;
         orbitStepSeconds = workingOrbitStep;

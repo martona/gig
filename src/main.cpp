@@ -182,7 +182,20 @@ struct StartupConfig {
     // Draw detection bounding boxes over the video (default on): pulsing red
     // for a live tracked object, blue while it lingers "(gone)".
     bool showBoxes = true;
+    // Tile-label / quiet-status text size: 0 normal, 1 large (1.5x), 2 larger
+    // (2x) -- a wall watched from across the room needs bigger type.
+    int labelSize = 0;
 };
+
+// The label-size setting as the renderer's text multiplier.
+float labelScaleFor(int labelSize)
+{
+    switch (labelSize) {
+    case 1: return 1.5f;
+    case 2: return 2.0f;
+    default: return 1.0f;
+    }
+}
 
 // Read all settings from the platform store, applying the same derivation +
 // validation the ini loader did. Missing values fall back to defaults; the store
@@ -202,6 +215,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     s.softwareDecode = store.getBool("software").value_or(false);
     const int labelMode = static_cast<int>(store.getInt("cam-labels").value_or(1)); // default: show on error only
     cfg.labelMode = static_cast<LabelMode>((labelMode >= 0 && labelMode <= 2) ? labelMode : 1);
+    cfg.labelSize = std::clamp(static_cast<int>(store.getInt("label-size").value_or(0)), 0, 2);
     cfg.dimLevelPercent = std::clamp(static_cast<int>(store.getInt("dim-level").value_or(60)), 10, 100);
     cfg.dimDelaySeconds = std::max(0, static_cast<int>(store.getInt("dim-delay").value_or(600)));
     cfg.orbitStepSeconds = std::clamp(static_cast<int>(store.getInt("orbit-step").value_or(40)), 1, 600);
@@ -245,10 +259,11 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // The password is DPAPI-encrypted; an empty password removes the value rather
 // than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode labelMode,
-                int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
+                int labelSize, int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
                 int viewMode, bool motionActivity, bool activeOnly, bool showBoxes,
                 bool keepHiddenStreams)
 {
+    store.setInt("label-size", std::clamp(labelSize, 0, 2));
     store.setInt("dim-level", dimLevelPercent);
     store.setInt("dim-delay", dimDelaySeconds);
     store.setInt("orbit-step", orbitStepSeconds);
@@ -554,6 +569,7 @@ int main(int argc, char** argv)
         restartActivityFeed();
         renderer->setCameraLabels(session.cameraLabels());
         renderer->setLabelMode(cfg.labelMode);
+        renderer->setLabelScale(labelScaleFor(cfg.labelSize));
 
         // Derive the full-window status screen (status panel) from session/config
         // state. None while a session is up -- the slim banner handles in-session
@@ -689,6 +705,7 @@ int main(int argc, char** argv)
         auto openSettings = [&]() {
             gig::AppConfig edited = cfg.session;
             int labelMode = static_cast<int>(cfg.labelMode);
+            int labelSize = cfg.labelSize;
             int dimLevel = cfg.dimLevelPercent;
             int dimDelay = cfg.dimDelaySeconds;
             int orbitStep = cfg.orbitStepSeconds;
@@ -706,15 +723,16 @@ int main(int argc, char** argv)
                 renderer->setDimFactor(currentDim);
                 renderer->render(session.snapshotFrames());
             };
-            if (gig::showSettingsDialog(mainHwnd, edited, labelMode, dimLevel, dimDelay,
+            if (gig::showSettingsDialog(mainHwnd, edited, labelMode, labelSize, dimLevel, dimDelay,
                                         orbitStep, viewMode, motionActivity, activeOnly,
                                         showBoxes, keepHiddenStreams, forget, lastConnectError,
                                         onDimPreview)) {
-                saveConfig(*settings, edited, static_cast<LabelMode>(labelMode),
+                saveConfig(*settings, edited, static_cast<LabelMode>(labelMode), labelSize,
                            dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
                            showBoxes, keepHiddenStreams);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
+                renderer->setLabelScale(labelScaleFor(cfg.labelSize));
                 applyAndReport(cfg.session);
             } else if (forget) {
                 // TODO(onboarding-project): temporary. Wipe everything and restart
@@ -739,6 +757,7 @@ int main(int argc, char** argv)
                 renderer->setHoveredTile(-1);
                 renderer->setCameraLabels(session.cameraLabels());
                 renderer->setLabelMode(cfg.labelMode);
+                renderer->setLabelScale(labelScaleFor(cfg.labelSize));
                 lastConnectError.clear();
                 lastFailureWasConfig = false;
                 lastTitleFrames = 0;

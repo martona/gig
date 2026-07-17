@@ -47,6 +47,9 @@ NS_SWIFT_NAME(Settings)
 // Draw detection bounding boxes over the video (default on): pulsing red for
 // a live tracked object, blue while it lingers "(gone)".
 @property (nonatomic, assign) BOOL showBoxes;
+// Tile-label / quiet-status text size: 0 normal, 1 large (1.5x), 2 larger
+// (2x) -- a wall watched from across the room needs bigger type.
+@property (nonatomic, assign) NSInteger labelSize;
 // Keep off-screen cameras streaming (default). Off = tear a hidden camera's
 // stream down and reconnect when it appears (saves decode power; costs ~1-2s
 // + the scope animation on wake).

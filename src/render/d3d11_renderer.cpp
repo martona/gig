@@ -524,7 +524,8 @@ public:
                 context_->RSSetViewports(1, &fullViewport);
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
                 if (labelVisible(static_cast<std::size_t>(focusedTile_))) {
-                    drawTileLabel(contentFull, labelFor(static_cast<std::size_t>(focusedTile_)), 2.0f);
+                    drawTileLabel(contentFull, labelFor(static_cast<std::size_t>(focusedTile_)),
+                                  2.0f * labelScale_);
                 }
                 overlay_.flush(context_.Get());
             } else {
@@ -581,7 +582,7 @@ public:
                 overlay_.begin(static_cast<int>(backBufferWidth_), static_cast<int>(backBufferHeight_));
                 for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
                     if (labelVisible(i)) {
-                        drawTileLabel(layout.tiles[i], labelFor(i), 1.0f);
+                        drawTileLabel(layout.tiles[i], labelFor(i), labelScale_);
                     }
                 }
                 overlay_.flush(context_.Get());
@@ -689,6 +690,11 @@ public:
     void setLabelMode(LabelMode mode) override
     {
         labelMode_ = mode;
+    }
+
+    void setLabelScale(float scale) override
+    {
+        labelScale_ = std::clamp(scale, 0.5f, 4.0f);
     }
 
     void setHoveredTile(int index) override
@@ -1786,7 +1792,7 @@ private:
             // Called for screen==None too: that branch only draws the activity
             // view's wandering "all quiet" line (when set) and returns.
             const gig::StatusPanelAction panel =
-                gig::buildStatusPanel(overlayStats_, toolbarHeightPx());
+                gig::buildStatusPanel(overlayStats_, toolbarHeightPx(), labelScale_);
             if (panel.openSettings) {
                 pendingToolbarAction_ = ToolbarAction::Settings;
             } else if (panel.retry) {
@@ -2102,6 +2108,7 @@ private:
     std::uint64_t boxFrame_ = 0; // render counter; pre-incremented, so >= 1 in draws
     OverlayStats overlayStats_;
     LabelMode labelMode_ = LabelMode::ErrorOnly;
+    float labelScale_ = 1.0f; // label/quiet-status size multiplier (settings)
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();
     bool imguiReady_ = false;
     bool logViewVisible_ = false;

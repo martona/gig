@@ -38,7 +38,7 @@ BEGIN
     PUSHBUTTON      "Cancel",               IDCANCEL,        264, 244,  48, 14
 END
 
-IDD_SETTINGS_ADVANCED DIALOGEX 0, 0, 320, 226
+IDD_SETTINGS_ADVANCED DIALOGEX 0, 0, 320, 250
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Advanced settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -46,22 +46,24 @@ BEGIN
     GROUPBOX        "Security",             IDC_STATIC,        8,   6, 304, 38
     CONTROL         "Skip server certificate verification (insecure; disables pinning)", IDC_INSECURE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 22, 286, 10
 
-    GROUPBOX        "Display",              IDC_STATIC,        8,  52, 304, 42
+    GROUPBOX        "Display",              IDC_STATIC,        8,  52, 304, 66
     LTEXT           "Camera labels:",       IDC_STATIC,       18,  70,  68, 10
     COMBOBOX                                IDC_LABELMODE,    90,  68, 140, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Label size:",          IDC_STATIC,       18,  90,  68, 10
+    COMBOBOX                                IDC_LABELSIZE,    90,  88, 140, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    GROUPBOX        "Screen protection",    IDC_STATIC,        8, 102, 304, 102
-    LTEXT           "Dim to:",              IDC_STATIC,       18, 120,  40, 10
-    CONTROL         "", IDC_DIM_LEVEL, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 62, 118, 196, 14
-    LTEXT           "60%",                  IDC_DIM_LEVEL_VAL, 264, 120, 40, 10
-    LTEXT           "Dim after:",           IDC_STATIC,       18, 140,  68, 10
-    COMBOBOX                                IDC_DIM_DELAY,    90, 138, 140, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Pixel-shift step (s):", IDC_STATIC,      18, 160,  80, 10
-    EDITTEXT                                IDC_ORBIT_STEP,  102, 158,  40, 12, ES_AUTOHSCROLL | ES_NUMBER
-    LTEXT           "The image nudges ~1px every N seconds to spread OLED wear (lower = more motion).", IDC_STATIC, 18, 176, 286, 20
+    GROUPBOX        "Screen protection",    IDC_STATIC,        8, 126, 304, 102
+    LTEXT           "Dim to:",              IDC_STATIC,       18, 144,  40, 10
+    CONTROL         "", IDC_DIM_LEVEL, "msctls_trackbar32", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 62, 142, 196, 14
+    LTEXT           "60%",                  IDC_DIM_LEVEL_VAL, 264, 144, 40, 10
+    LTEXT           "Dim after:",           IDC_STATIC,       18, 164,  68, 10
+    COMBOBOX                                IDC_DIM_DELAY,    90, 162, 140, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Pixel-shift step (s):", IDC_STATIC,      18, 184,  80, 10
+    EDITTEXT                                IDC_ORBIT_STEP,  102, 182,  40, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "The image nudges ~1px every N seconds to spread OLED wear (lower = more motion).", IDC_STATIC, 18, 200, 286, 20
 
-    DEFPUSHBUTTON   "OK",                   IDOK,            210, 204,  48, 14
-    PUSHBUTTON      "Cancel",               IDCANCEL,        264, 204,  48, 14
+    DEFPUSHBUTTON   "OK",                   IDOK,            210, 228,  48, 14
+    PUSHBUTTON      "Cancel",               IDCANCEL,        264, 228,  48, 14
 END
 
 // Application manifest (Common Controls v6 for umbra theming + supportedOS).

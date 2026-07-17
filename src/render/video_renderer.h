@@ -107,6 +107,11 @@ public:
     // setter rather than per-frame state.
     virtual void setLabelMode(LabelMode mode) { (void)mode; }
 
+    // Text-size multiplier for the tile labels and the quiet-status line
+    // (settings: Normal/Large/Larger = 1.0/1.5/2.0) -- a wall watched from
+    // across the room needs bigger type than a desktop window.
+    virtual void setLabelScale(float scale) { (void)scale; }
+
     // The camera tile under the mouse (-1 = none), for the hover affordance. Fed
     // from the run loop's mouse-motion handling.
     virtual void setHoveredTile(int index) { (void)index; }

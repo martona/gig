@@ -186,6 +186,7 @@ public:
     {
         scene_->setTileBoxes(boxes);
     }
+    void setLabelScale(float scale) override { labelScale_ = std::clamp(scale, 0.5f, 4.0f); }
     void setDiagnostics(const OverlayStats& stats) override { overlayStats_ = stats; }
     void setLabelMode(LabelMode mode) override { labelMode_ = mode; }
     void setHoveredTile(int index) override { scene_->setHoveredTile(index); }
@@ -357,12 +358,13 @@ private:
         const int focusedTile = scene_->focusedTile();
         if (fullyFocused) {
             if (labelVisible(static_cast<std::size_t>(focusedTile))) {
-                drawLabel(bg, fullPts, labelFor(static_cast<std::size_t>(focusedTile)), 2.0f);
+                drawLabel(bg, fullPts, labelFor(static_cast<std::size_t>(focusedTile)),
+                          2.0f * labelScale_);
             }
         } else {
             for (std::size_t i = 0; i < frames.size() && i < layout.tiles.size(); ++i) {
                 if (labelVisible(i)) {
-                    drawLabel(bg, layout.tiles[i], labelFor(i), 1.0f);
+                    drawLabel(bg, layout.tiles[i], labelFor(i), labelScale_);
                 }
             }
         }
@@ -385,7 +387,7 @@ private:
             // Called for screen==None too: that branch only draws the activity
             // view's wandering "all quiet" line (when set) and returns.
             const gig::StatusPanelAction panel =
-                gig::buildStatusPanel(overlayStats_, kToolbarLogicalHeight);
+                gig::buildStatusPanel(overlayStats_, kToolbarLogicalHeight, labelScale_);
             if (panel.openSettings) {
                 pendingToolbarAction_ = ToolbarAction::Settings;
             } else if (panel.retry) {
@@ -695,6 +697,7 @@ private:
     std::vector<std::string> tileReasons_; // activity reasons, label-aligned
     OverlayStats overlayStats_;
     LabelMode labelMode_ = LabelMode::ErrorOnly;
+    float labelScale_ = 1.0f; // label/quiet-status size multiplier (settings)
 
     float scale_ = 1.0f;
     float bakedScale_ = 0.0f; // display scale the imgui font + SF Symbol glyphs were baked at

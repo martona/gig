@@ -27,3 +27,4 @@
 #define IDC_STREAM_HIDDEN   2028
 #define IDC_ACTIVE_ONLY     2029
 #define IDC_SHOW_BOXES      2030
+#define IDC_LABELSIZE       2031
