@@ -138,6 +138,47 @@ The API key only needs the **Developer** role (enough for notarization). gig is 
 single static bundle with no nested code, so it's signed with the hardened runtime
 (a notarization prerequisite) directly — no `--deep`.
 
+### App Store uploads on CI (iOS + Mac App Store)
+
+Every release run also uploads to App Store Connect: the `appstore-macos` and
+`appstore-ios` jobs in `_release.yml` call `build_macos_mas.sh --upload` and
+`build_ios_appstore.sh --upload` with the same env contract the local flows
+use below. The jobs are independent of the GitHub release (`publish` doesn't
+wait for them) — a store-side failure never blocks the release; re-run just
+the failed job. Until these secrets exist, both jobs skip with a notice.
+
+Add to the same `release-signing` environment (on top of the macOS
+Developer ID entries above, which are reused: `APPLE_KEYCHAIN_PASSWORD`,
+`APPLE_API_KEY_P8`, `APPLE_TEAM_ID`, `APPLE_API_KEY_ID`,
+`APPLE_API_ISSUER_ID`):
+
+- Secrets:
+  - `APPLE_APPSTORE_P12` — base64 of ONE `.p12` bundling every App Store
+    identity **with private keys**: **Apple Distribution** (iOS export; also
+    signs the MAS app if your `_3RDPARTY` identity is the modern unified
+    cert), **Mac Installer Distribution / 3rd Party Mac Developer Installer**
+    (the `.pkg`), **3rd Party Mac Developer Application** (only if that's
+    what `APPLE_CODESIGN_IDENTITY_3RDPARTY` names), and **Apple Development**
+    (the iOS *archive* signs with automatic dev signing before the export
+    re-signs — `build_ios_appstore.sh`'s deliberate model). In Keychain
+    Access select all of them together → export as one `.p12`, then
+    `base64 -i appstore.p12 | pbcopy`.
+  - `APPLE_APPSTORE_P12_PASSWORD` — that `.p12`'s export password.
+  - `APPLE_MAS_GIG_PROVISIONING_PROFILE_B64` — base64 of the Mac App Store
+    `.provisionprofile` (`base64 -i Gig_Mac_App_Store.provisionprofile | pbcopy`).
+  - `APPLE_IOS_GIG_PROVISIONING_PROFILE_B64` — base64 of the iOS App Store
+    `.mobileprovision`.
+- Variables:
+  - `APPLE_CODESIGN_IDENTITY_3RDPARTY` — exactly as in your shell profile below.
+  - `APPLE_CODESIGN_INSTALLER_IDENTITY_3RDPARTY` — ditto.
+  - `APPLE_CODESIGN_IDENTITY_IOS` — optional, only if not "Apple Distribution".
+
+First-run watch items: the runner's default Xcode must still carry `altool`
+(the MAS upload path; deprecated but present through Xcode 16 — if a runner
+image drops it, switch the script to Transporter/`iTMSTransporter`), and the
+iOS archive's `-allowProvisioningUpdates` needs the API key to refresh the
+dev profile (Developer role suffices — verified in the local flow).
+
 ## App Store releases (iOS + Mac App Store)
 
 Both flows run from a terminal on the Mac and share this environment (put it
