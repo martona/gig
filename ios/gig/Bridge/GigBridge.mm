@@ -106,6 +106,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.activityView = store->getInt("view-mode").value_or(0) == 1;
     settings.motionActivity = store->getBool("motion-activity").value_or(false);
     settings.activeOnly = store->getBool("active-only").value_or(true);
+    settings.showBoxes = store->getBool("boxes").value_or(true);
     settings.keepHiddenStreams = store->getBool("stream-hidden").value_or(true);
     return settings;
 }
@@ -136,6 +137,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setInt("view-mode", settings.activityView ? 1 : 0);
     store->setBool("motion-activity", settings.motionActivity);
     store->setBool("active-only", settings.activeOnly);
+    store->setBool("boxes", settings.showBoxes);
     store->setBool("stream-hidden", settings.keepHiddenStreams);
 }
 
@@ -266,7 +268,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     }
     if (result.ok && !cfg.baseUrl.empty()) {
         _events = std::make_unique<gig::FrigateEvents>(cfg.baseUrl, cfg.tls, _sessionCache, _cookieJar);
-        _events->start(_session->cameraNames());
+        _events->start(_session->cameraNames(), _session->cameraDetectSizes());
     }
     return [self statusLocked:(result.ok ? std::string("ok") : result.error)];
 }

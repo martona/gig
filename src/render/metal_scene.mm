@@ -326,6 +326,7 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
     lastDt_ = dt;
     animTime_ += dt;
     updateActivity(dt);
+    ++boxFrame_; // stamps this render's drawTileBoxes easing updates
 
     const float zoomTarget = (focusedTile_ >= 0) ? 1.0f : 0.0f;
     if (animProgress_ != zoomTarget) {
@@ -401,6 +402,18 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
         if (animProgress_ == 0.0f && hoveredTile_ >= 0 && hoveredTile_ < static_cast<int>(frames.size())
             && hoveredTile_ < static_cast<int>(layout->tiles.size())) {
             drawHover(encoder, layout->tiles[static_cast<std::size_t>(hoveredTile_)]);
+        }
+    }
+
+    // Drop easing state for boxes that weren't drawn this frame (object
+    // pruned, tile left the visible subset, or focus hid its tile) -- a
+    // returning box re-appears with the fade-in instead of gliding from a
+    // stale position.
+    for (auto it = easedBoxes_.begin(); it != easedBoxes_.end();) {
+        if (it->second.lastUsedFrame == boxFrame_) {
+            ++it;
+        } else {
+            it = easedBoxes_.erase(it);
         }
     }
 
@@ -725,6 +738,73 @@ void MetalScene::drawHover(id<MTLRenderCommandEncoder> encoder, const TileRect& 
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
+// Detection boxes over tile `index`'s video: red pulsing outlines for live
+// objects, blue for lingering departures, eased per object id so each ~350ms
+// /ws update glides instead of teleporting. `videoVp` is the letterboxed
+// video viewport (pixels) the boxes' normalized coordinates map into -- grid
+// cell, focused view, or the zoom transition's in-flight rect alike.
+// Mirrors D3D11Renderer::drawTileBoxes.
+void MetalScene::drawTileBoxes(id<MTLRenderCommandEncoder> encoder, std::size_t index,
+                               const MTLViewport& videoVp)
+{
+    if (index >= tileBoxes_.size() || tileBoxes_[index].empty()) {
+        return;
+    }
+    // ~250ms exponential glide toward each new target, framerate-independent.
+    const float ease = 1.0f - std::exp(-lastDt_ / 0.08f);
+    // "Vibrating": a ~1Hz intensity pulse, shared phase across all boxes.
+    // Wide swing (0.55..1.0) tuned for a wall viewed from across the room:
+    // the peak is full-strength and the vibration is unmistakable.
+    const float pulse = 0.775f + 0.225f * std::sin(animTime_ * 2.0f * 3.14159265f);
+    for (const TileBox& box : tileBoxes_[index]) {
+        EasedBox& eased = easedBoxes_[box.id];
+        if (eased.lastUsedFrame == 0) {
+            // First sight: appear AT the target (no fly-in), quick alpha ramp.
+            eased.x1 = box.x1;
+            eased.y1 = box.y1;
+            eased.x2 = box.x2;
+            eased.y2 = box.y2;
+            eased.bornAt = animTime_;
+        } else {
+            eased.x1 += (box.x1 - eased.x1) * ease;
+            eased.y1 += (box.y1 - eased.y1) * ease;
+            eased.x2 += (box.x2 - eased.x2) * ease;
+            eased.y2 += (box.y2 - eased.y2) * ease;
+        }
+        eased.lastUsedFrame = boxFrame_;
+
+        MTLViewport vp {};
+        vp.originX = videoVp.originX + eased.x1 * videoVp.width;
+        vp.originY = videoVp.originY + eased.y1 * videoVp.height;
+        vp.width = (eased.x2 - eased.x1) * videoVp.width;
+        vp.height = (eased.y2 - eased.y1) * videoVp.height;
+        vp.znear = 0.0;
+        vp.zfar = 1.0;
+        if (vp.width <= 1.0 || vp.height <= 1.0) {
+            continue;
+        }
+        const float fadeIn = std::clamp((animTime_ - eased.bornAt) / 0.15f, 0.0f, 1.0f);
+        const float alpha = pulse * box.fade * fadeIn;
+        // Border reads at 4 logical px (distance-viewable) but never
+        // overwhelms a tiny box.
+        const float borderPx = std::min(4.0f * scale_,
+                                        static_cast<float>(std::min(vp.width, vp.height)) / 6.0f);
+        [encoder setViewport:vp];
+        HoverConstants c {};
+        c.sizePx[0] = static_cast<float>(vp.width);
+        c.sizePx[1] = static_cast<float>(vp.height);
+        c.borderPx = borderPx;
+        c.color[0] = box.gone ? 0.35f : 1.00f;
+        c.color[1] = box.gone ? 0.62f : 0.22f;
+        c.color[2] = box.gone ? 1.00f : 0.16f;
+        c.color[3] = alpha;
+        [encoder setRenderPipelineState:pipelineHover_];
+        [encoder setFragmentBytes:&c length:sizeof(c) atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        sawAnimatedContent_ = true; // the pulse animates -> keep rendering
+    }
+}
+
 void MetalScene::drawTileContentAt(id<MTLRenderCommandEncoder> encoder, std::size_t index, const TileRect& rectPts)
 {
     if (index >= tiles_.size()) {
@@ -732,8 +812,10 @@ void MetalScene::drawTileContentAt(id<MTLRenderCommandEncoder> encoder, std::siz
     }
     const TileState& tile = tiles_[index];
     if (tile.plane[0]) {
-        [encoder setViewport:videoViewport(rectPts, tile.texW, tile.texH)];
+        const MTLViewport vp = videoViewport(rectPts, tile.texW, tile.texH);
+        [encoder setViewport:vp];
         drawTile(encoder, tile);
+        drawTileBoxes(encoder, index, vp); // boxes track the zooming rect
     } else {
         drawSignal(encoder, rectPts, index, tile.signalEnergy, 1.0f);
     }
@@ -768,7 +850,8 @@ void MetalScene::renderGridTiles(id<MTLRenderCommandEncoder> encoder,
             tile.frameFade = 0.0f;
             tile.showedSignal = false;
         }
-        [encoder setViewport:videoViewport(cell, tile.texW, tile.texH)];
+        const MTLViewport videoVp = videoViewport(cell, tile.texW, tile.texH);
+        [encoder setViewport:videoVp];
         drawTile(encoder, tile);
         if (tile.frameFade >= 0.0f) {
             sawAnimatedContent_ = true;
@@ -780,6 +863,12 @@ void MetalScene::renderGridTiles(id<MTLRenderCommandEncoder> encoder,
             if (tile.frameFade >= kFadeDur) {
                 tile.frameFade = -1.0f;
             }
+        }
+        // The zoom overlay redraws the animating tile at its in-flight rect
+        // and carries its boxes; drawing them here too would double-draw
+        // (and double-advance the easing).
+        if (!(animProgress_ > 0.0f && static_cast<int>(i) == animTile_)) {
+            drawTileBoxes(encoder, i, videoVp);
         }
     }
 }
@@ -807,7 +896,8 @@ void MetalScene::renderSingleTile(id<MTLRenderCommandEncoder> encoder, std::size
         tile.frameFade = 0.0f;
         tile.showedSignal = false;
     }
-    [encoder setViewport:videoViewport(full, tile.texW, tile.texH)];
+    const MTLViewport videoVp = videoViewport(full, tile.texW, tile.texH);
+    [encoder setViewport:videoVp];
     drawTile(encoder, tile);
     if (tile.frameFade >= 0.0f) {
         sawAnimatedContent_ = true;
@@ -820,6 +910,7 @@ void MetalScene::renderSingleTile(id<MTLRenderCommandEncoder> encoder, std::size
             tile.frameFade = -1.0f;
         }
     }
+    drawTileBoxes(encoder, index, videoVp);
 }
 
 void MetalScene::updateActivity(float dt)

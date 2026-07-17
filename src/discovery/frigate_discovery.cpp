@@ -261,7 +261,31 @@ std::vector<CameraStream> discoverCameras(HttpClient& client)
         }
 
         CameraStream cameraStream { cameraName, stream, buildStreamUrl(streamTemplate, stream) };
-        logInfo() << "discovery: " << cameraName << " -> " << stream << "  " << cameraStream.streamUrl;
+        // Detect resolution: the coordinate space of /ws "events" boxes.
+        // Frigate reports the RESOLVED values (auto-detected or configured);
+        // missing/zero just means no box overlay for this camera.
+        if (const json::object* detect = objectField(*camera, "detect")) {
+            const auto dimension = [detect](std::string_view name) {
+                const json::value* value = detect->if_contains(json::string_view(name.data(), name.size()));
+                if (!value) {
+                    return 0;
+                }
+                if (value->is_int64()) {
+                    return static_cast<int>(value->get_int64());
+                }
+                if (value->is_uint64()) {
+                    return static_cast<int>(value->get_uint64());
+                }
+                if (value->is_double()) {
+                    return static_cast<int>(value->get_double());
+                }
+                return 0;
+            };
+            cameraStream.detectWidth = dimension("width");
+            cameraStream.detectHeight = dimension("height");
+        }
+        logInfo() << "discovery: " << cameraName << " -> " << stream << "  " << cameraStream.streamUrl
+                  << " (detect " << cameraStream.detectWidth << "x" << cameraStream.detectHeight << ")";
         result.push_back(std::move(cameraStream));
     }
 

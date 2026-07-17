@@ -296,7 +296,7 @@ void showAdvancedDialog(AppConfig& config, int& labelMode,
 bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
-                        bool& keepHiddenStreams,
+                        bool& showBoxes, bool& keepHiddenStreams,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -312,7 +312,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
         int workingDimDelay = dimDelaySeconds;
         int workingOrbitStep = orbitStepSeconds;
 
-        const CGFloat height = 470;
+        const CGFloat height = 518;
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWinW, height)
                                                        styleMask:NSWindowStyleMaskTitled
                                                          backing:NSBackingStoreBuffered
@@ -338,20 +338,24 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
         // The View card lives HERE, not in Advanced: what the wall shows
         // day-to-day belongs where the user can reach it.
         addCardHeader(content, top, @"View");
-        NSView* view = addCard(content, top, 192);
-        // Show row (192..148, center 170).
-        addRowText(view, 170, @"Show", nil, 220);
-        NSPopUpButton* viewPopup = addPopup(view, 170, 210,
+        NSView* view = addCard(content, top, 240);
+        // Show row (240..196, center 218).
+        addRowText(view, 218, @"Show", nil, 220);
+        NSPopUpButton* viewPopup = addPopup(view, 218, 210,
             @[ @"All cameras", @"Active cameras only" ], viewMode == 1 ? 1 : 0);
-        addSeparator(view, 148);
-        // Switch rows (48 each, centers 124 / 76 / 28).
-        addRowText(view, 124, @"Raw motion counts as activity",
+        addSeparator(view, 196);
+        // Switch rows (48 each, centers 172 / 124 / 76 / 28).
+        addRowText(view, 172, @"Raw motion counts as activity",
                    @"Noisy on windy days — moving shadows and foliage count too.", kSwitchW + 8);
-        NSSwitch* motionSwitch = addSwitch(view, 124, motionActivity);
-        addSeparator(view, 100);
-        addRowText(view, 76, @"Ignore stationary objects",
+        NSSwitch* motionSwitch = addSwitch(view, 172, motionActivity);
+        addSeparator(view, 148);
+        addRowText(view, 124, @"Ignore stationary objects",
                    @"Parked cars and settled packages stop counting once they stop moving.", kSwitchW + 8);
-        NSSwitch* activeOnlySwitch = addSwitch(view, 76, activeOnly);
+        NSSwitch* activeOnlySwitch = addSwitch(view, 124, activeOnly);
+        addSeparator(view, 100);
+        addRowText(view, 76, @"Draw detection boxes",
+                   @"Red pulses around a live detection; blue lingers where one just ended.", kSwitchW + 8);
+        NSSwitch* boxesSwitch = addSwitch(view, 76, showBoxes);
         addSeparator(view, 52);
         addRowText(view, 28, @"Keep hidden cameras streaming",
                    @"Off saves power; a hidden camera reconnects in a second or two.", kSwitchW + 8);
@@ -415,6 +419,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
         viewMode = viewPopup.indexOfSelectedItem == 1 ? 1 : 0;
         motionActivity = (motionSwitch.state == NSControlStateValueOn);
         activeOnly = (activeOnlySwitch.state == NSControlStateValueOn);
+        showBoxes = (boxesSwitch.state == NSControlStateValueOn);
         keepHiddenStreams = (keepStreamsSwitch.state == NSControlStateValueOn);
         return true;
     }

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -472,6 +473,7 @@ public:
             lastDt_ = dt;
             animTime_ += dt;
             updateActivity(dt);
+            ++boxFrame_; // stamps this render's drawTileBoxes easing updates
 
             // Ease the zoom animation toward its target (1 = focused, 0 = grid).
             const float zoomTarget = (focusedTile_ >= 0) ? 1.0f : 0.0f;
@@ -585,6 +587,18 @@ public:
                 overlay_.flush(context_.Get());
             }
 
+            // Drop easing state for boxes that weren't drawn this frame (object
+            // pruned, tile left the visible subset, or focus hid its tile) --
+            // a returning box re-appears with the fade-in instead of gliding
+            // from a stale position.
+            for (auto it = easedBoxes_.begin(); it != easedBoxes_.end();) {
+                if (it->second.lastUsedFrame == boxFrame_) {
+                    ++it;
+                } else {
+                    it = easedBoxes_.erase(it);
+                }
+            }
+
             drawDimOverlay();
 
             // Record the orbit position drawn so wantsRepaint() can clear (the
@@ -655,6 +669,11 @@ public:
     void setTileReasons(const std::vector<std::string>& reasons) override
     {
         tileReasons_ = reasons;
+    }
+
+    void setTileBoxes(const std::vector<gig::TileBoxList>& boxes) override
+    {
+        tileBoxes_ = boxes;
     }
 
     void setDiagnostics(const OverlayStats& stats) override
@@ -1383,35 +1402,40 @@ private:
             const D3D11_VIEWPORT viewport = computeVideoViewport(rect, tile.textureWidth, tile.textureHeight);
             context_->RSSetViewports(1, &viewport);
             drawTile(tile);
+            drawTileBoxes(index, viewport); // boxes track the zooming rect
         } else {
             drawSignal(rect, index, tile.signalEnergy, 1.0f);
         }
     }
 
-    // Subtle hover affordance over a clickable tile: a soft border + faint fill,
-    // drawn in the tile's own pixel viewport (no ImGui coord assumptions).
-    void drawHover(const gig::TileRect& cell)
+    // One pass of the hover border shader over a pixel rect: a soft border of
+    // `borderPx` in the given color (+ the shader's faint interior fill). A
+    // borderPx wider than the rect degenerates into a solid fill (the dim
+    // wash). Shared by the hover affordance, the idle dim, and the detection
+    // boxes.
+    void drawBorderQuad(float x, float y, float width, float height, float borderPx,
+                        const float (&color)[4])
     {
-        if (cell.width <= 0.0f || cell.height <= 0.0f) {
+        if (width <= 0.0f || height <= 0.0f || color[3] <= 0.0f) {
             return;
         }
         D3D11_VIEWPORT viewport = {};
-        viewport.TopLeftX = cell.x;
-        viewport.TopLeftY = cell.y;
-        viewport.Width = cell.width;
-        viewport.Height = cell.height;
+        viewport.TopLeftX = x;
+        viewport.TopLeftY = y;
+        viewport.Width = width;
+        viewport.Height = height;
         viewport.MinDepth = 0.0f;
         viewport.MaxDepth = 1.0f;
         context_->RSSetViewports(1, &viewport);
 
         HoverConstants constants = {};
-        constants.sizePx[0] = cell.width;
-        constants.sizePx[1] = cell.height;
-        constants.borderPx = 2.0f * dpiScale_;
-        constants.color[0] = 0.80f;
-        constants.color[1] = 0.90f;
-        constants.color[2] = 1.0f;
-        constants.color[3] = 0.6f; // max border alpha
+        constants.sizePx[0] = width;
+        constants.sizePx[1] = height;
+        constants.borderPx = borderPx;
+        constants.color[0] = color[0];
+        constants.color[1] = color[1];
+        constants.color[2] = color[2];
+        constants.color[3] = color[3];
         context_->UpdateSubresource(hoverConstantBuffer_.Get(), 0, nullptr, &constants, 0, 0);
 
         UINT stride = sizeof(Vertex);
@@ -1429,6 +1453,70 @@ private:
         context_->OMSetBlendState(alphaBlendState_.Get(), factors, 0xffffffff);
         context_->Draw(4, 0);
         context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    }
+
+    // Subtle hover affordance over a clickable tile: a soft border + faint fill,
+    // drawn in the tile's own pixel viewport (no ImGui coord assumptions).
+    void drawHover(const gig::TileRect& cell)
+    {
+        const float color[4] = { 0.80f, 0.90f, 1.0f, 0.6f }; // rgb + max border alpha
+        drawBorderQuad(cell.x, cell.y, cell.width, cell.height, 2.0f * dpiScale_, color);
+    }
+
+    // Detection boxes over tile `index`'s video: red pulsing outlines for live
+    // objects, blue for lingering departures, eased per object id so each
+    // ~350ms /ws update glides instead of teleporting. `videoViewport` is the
+    // letterboxed video rect the boxes' normalized coordinates map into --
+    // grid cell, focused view, or the zoom transition's in-flight rect alike.
+    void drawTileBoxes(std::size_t index, const D3D11_VIEWPORT& videoViewport)
+    {
+        if (index >= tileBoxes_.size() || tileBoxes_[index].empty()) {
+            return;
+        }
+        // ~250ms exponential glide toward each new target, framerate-independent.
+        const float ease = 1.0f - std::exp(-lastDt_ / 0.08f);
+        // "Vibrating": a ~1Hz intensity pulse, shared phase across all boxes.
+        // Wide swing (0.55..1.0) tuned for a wall viewed from across the room:
+        // the peak is full-strength and the vibration is unmistakable.
+        const float pulse = 0.775f + 0.225f * std::sin(animTime_ * 2.0f * 3.14159265f);
+        for (const gig::TileBox& box : tileBoxes_[index]) {
+            EasedBox& eased = easedBoxes_[box.id];
+            if (eased.lastUsedFrame == 0) {
+                // First sight: appear AT the target (no fly-in), quick alpha ramp.
+                eased.x1 = box.x1;
+                eased.y1 = box.y1;
+                eased.x2 = box.x2;
+                eased.y2 = box.y2;
+                eased.bornAt = animTime_;
+            } else {
+                eased.x1 += (box.x1 - eased.x1) * ease;
+                eased.y1 += (box.y1 - eased.y1) * ease;
+                eased.x2 += (box.x2 - eased.x2) * ease;
+                eased.y2 += (box.y2 - eased.y2) * ease;
+            }
+            eased.lastUsedFrame = boxFrame_;
+
+            const float x = videoViewport.TopLeftX + eased.x1 * videoViewport.Width;
+            const float y = videoViewport.TopLeftY + eased.y1 * videoViewport.Height;
+            const float w = (eased.x2 - eased.x1) * videoViewport.Width;
+            const float h = (eased.y2 - eased.y1) * videoViewport.Height;
+            if (w <= 1.0f || h <= 1.0f) {
+                continue;
+            }
+            const float fadeIn = std::clamp((animTime_ - eased.bornAt) / 0.15f, 0.0f, 1.0f);
+            const float alpha = pulse * box.fade * fadeIn;
+            // Border reads at 4 logical px (distance-viewable) but never
+            // overwhelms a tiny box.
+            const float borderPx = std::min(4.0f * dpiScale_, std::min(w, h) / 6.0f);
+            const float color[4] = {
+                box.gone ? 0.35f : 1.00f,
+                box.gone ? 0.62f : 0.22f,
+                box.gone ? 1.00f : 0.16f,
+                alpha,
+            };
+            drawBorderQuad(x, y, w, h, borderPx, color);
+            sawAnimatedContent_ = true; // the pulse animates -> keep rendering
+        }
     }
 
     // Current burn-in orbit offset (pixels), on the slow circle. Mirrors
@@ -1461,34 +1549,10 @@ private:
         if (dim >= 0.999f) {
             return;
         }
-        D3D11_VIEWPORT viewport = {};
-        viewport.Width = static_cast<float>(backBufferWidth_);
-        viewport.Height = static_cast<float>(backBufferHeight_);
-        viewport.MaxDepth = 1.0f;
-        context_->RSSetViewports(1, &viewport);
-
-        HoverConstants constants = {};
-        constants.sizePx[0] = viewport.Width;
-        constants.sizePx[1] = viewport.Height;
-        constants.borderPx = viewport.Width + viewport.Height; // > any edge -> solid fill
-        constants.color[3] = 1.0f - dim;                       // black wash
-        context_->UpdateSubresource(hoverConstantBuffer_.Get(), 0, nullptr, &constants, 0, 0);
-
-        UINT stride = sizeof(Vertex);
-        UINT offset = 0;
-        ID3D11Buffer* vertexBuffers[] = { vertexBuffer_.Get() };
-        context_->IASetInputLayout(inputLayout_.Get());
-        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
-        context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
-        context_->PSSetShader(hoverPixelShader_.Get(), nullptr, 0);
-        ID3D11Buffer* constantBuffers[] = { hoverConstantBuffer_.Get() };
-        context_->PSSetConstantBuffers(0, 1, constantBuffers);
-
-        const float factors[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        context_->OMSetBlendState(alphaBlendState_.Get(), factors, 0xffffffff);
-        context_->Draw(4, 0);
-        context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+        const float width = static_cast<float>(backBufferWidth_);
+        const float height = static_cast<float>(backBufferHeight_);
+        const float color[4] = { 0.0f, 0.0f, 0.0f, 1.0f - dim }; // black wash
+        drawBorderQuad(0.0f, 0.0f, width, height, width + height /* solid */, color);
     }
 
     // Draws every camera into its grid cell. Assumes the D3D11 lock is held and
@@ -1543,6 +1607,12 @@ private:
                     tile.frameFade = -1.0f;
                 }
             }
+            // The zoom overlay redraws the animating tile at its in-flight
+            // rect and carries its boxes; drawing them here too would double-
+            // draw (and double-advance the easing).
+            if (!(animProgress_ > 0.0f && static_cast<int>(i) == animTile_)) {
+                drawTileBoxes(i, videoViewport);
+            }
         }
     }
 
@@ -1588,6 +1658,7 @@ private:
                 tile.frameFade = -1.0f;
             }
         }
+        drawTileBoxes(index, videoViewport);
     }
 
     bool tileHasReason(std::size_t index) const
@@ -2014,6 +2085,21 @@ private:
     gig::TextOverlay overlay_;
     std::vector<std::string> cameraLabels_;
     std::vector<std::string> tileReasons_; // activity reasons, label-aligned
+    // Detection boxes (subset-aligned) + the per-object-id position easing
+    // that makes each ~350ms /ws update glide. lastUsedFrame stamps let a
+    // sweep drop easing state for objects that stopped being pushed;
+    // bornAt drives the quick appear fade-in.
+    std::vector<gig::TileBoxList> tileBoxes_;
+    struct EasedBox {
+        float x1 = 0.0f;
+        float y1 = 0.0f;
+        float x2 = 0.0f;
+        float y2 = 0.0f;
+        float bornAt = 0.0f;
+        std::uint64_t lastUsedFrame = 0;
+    };
+    std::map<std::string, EasedBox> easedBoxes_;
+    std::uint64_t boxFrame_ = 0; // render counter; pre-incremented, so >= 1 in draws
     OverlayStats overlayStats_;
     LabelMode labelMode_ = LabelMode::ErrorOnly;
     std::shared_ptr<D3D11DecodeContext> decodeContext_ = std::make_shared<D3D11DecodeContext>();

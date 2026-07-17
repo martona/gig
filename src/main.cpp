@@ -179,6 +179,9 @@ struct StartupConfig {
     // camera's stream down after a short delay and reconnect when it appears
     // (saves decode power; costs ~1-2s + the scope animation on wake).
     bool keepHiddenStreams = true;
+    // Draw detection bounding boxes over the video (default on): pulsing red
+    // for a live tracked object, blue while it lingers "(gone)".
+    bool showBoxes = true;
 };
 
 // Read all settings from the platform store, applying the same derivation +
@@ -206,6 +209,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.motionActivity = store.getBool("motion-activity").value_or(false);
     cfg.activeOnly = store.getBool("active-only").value_or(true);
     cfg.keepHiddenStreams = store.getBool("stream-hidden").value_or(true);
+    cfg.showBoxes = store.getBool("boxes").value_or(true);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
@@ -242,7 +246,8 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 // than storing an empty blob. useSystemStore is derived on load, never stored.
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode labelMode,
                 int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
-                int viewMode, bool motionActivity, bool activeOnly, bool keepHiddenStreams)
+                int viewMode, bool motionActivity, bool activeOnly, bool showBoxes,
+                bool keepHiddenStreams)
 {
     store.setInt("dim-level", dimLevelPercent);
     store.setInt("dim-delay", dimDelaySeconds);
@@ -250,6 +255,7 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode la
     store.setInt("view-mode", viewMode);
     store.setBool("motion-activity", motionActivity);
     store.setBool("active-only", activeOnly);
+    store.setBool("boxes", showBoxes);
     store.setBool("stream-hidden", keepHiddenStreams);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
@@ -497,17 +503,19 @@ int main(int argc, char** argv)
         gig::StreamPolicy streamPolicy;
         std::unique_ptr<gig::FrigateEvents> activityFeed;
         std::vector<int> visibleTiles;
-        std::vector<std::string> tileReasons; // last pushed, subset-aligned
+        std::vector<std::string> tileReasons;  // last pushed, subset-aligned
+        std::vector<gig::TileBoxList> tileBoxes; // last pushed, subset-aligned
         auto restartActivityFeed = [&]() {
             activityFeed.reset();
             activityGate.reset();
             streamPolicy.reset(); // a rebuilt supervisor starts fully enabled
             visibleTiles.clear(); // force a re-derive (and label re-push) next tick
             tileReasons.clear();
+            tileBoxes.clear();
             if (session.running() && !cfg.session.baseUrl.empty()) {
                 activityFeed = std::make_unique<gig::FrigateEvents>(
                     cfg.session.baseUrl, cfg.session.tls, sessionCache, cookieJar);
-                activityFeed->start(session.cameraNames());
+                activityFeed->start(session.cameraNames(), session.cameraDetectSizes());
             }
         };
 
@@ -687,6 +695,7 @@ int main(int argc, char** argv)
             int viewMode = cfg.viewMode;
             bool motionActivity = cfg.motionActivity;
             bool activeOnly = cfg.activeOnly;
+            bool showBoxes = cfg.showBoxes;
             bool keepHiddenStreams = cfg.keepHiddenStreams;
             bool forget = false;
             // Live idle-dim preview: while the slider moves, apply the previewed
@@ -699,10 +708,11 @@ int main(int argc, char** argv)
             };
             if (gig::showSettingsDialog(mainHwnd, edited, labelMode, dimLevel, dimDelay,
                                         orbitStep, viewMode, motionActivity, activeOnly,
-                                        keepHiddenStreams, forget, lastConnectError, onDimPreview)) {
+                                        showBoxes, keepHiddenStreams, forget, lastConnectError,
+                                        onDimPreview)) {
                 saveConfig(*settings, edited, static_cast<LabelMode>(labelMode),
                            dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
-                           keepHiddenStreams);
+                           showBoxes, keepHiddenStreams);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 applyAndReport(cfg.session);
@@ -924,6 +934,35 @@ int main(int argc, char** argv)
                 }
             }
 
+            // Detection boxes: rebuilt each tick (positions move with the /ws
+            // updates and the blue linger fade is time-driven), pushed only on
+            // change. A push marks the frame dirty so a box edge repaints even
+            // a static scene; between pushes the renderer's own easing/pulse
+            // keeps it animating via isAnimating().
+            bool boxesChanged = false;
+            {
+                std::vector<gig::TileBoxList> boxes(visibleTiles.size());
+                if (cfg.showBoxes && feedUp) {
+                    const double boxNow = gig::FrigateEvents::nowSeconds();
+                    for (std::size_t i = 0; i < visibleTiles.size(); ++i) {
+                        const int cam = visibleTiles[i];
+                        if (cam < 0 || cam >= static_cast<int>(feedStates.size())) {
+                            continue;
+                        }
+                        for (const gig::ActivityBox& box : gig::activityBoxes(
+                                 feedStates[static_cast<std::size_t>(cam)], cfg.activeOnly, boxNow)) {
+                            boxes[i].push_back({ box.id, box.x1, box.y1, box.x2, box.y2,
+                                                 box.gone, box.fade });
+                        }
+                    }
+                }
+                if (boxes != tileBoxes) {
+                    tileBoxes = std::move(boxes);
+                    renderer->setTileBoxes(tileBoxes);
+                    boxesChanged = true;
+                }
+            }
+
             // On-demand stream policy: what's RENDERED must stream; everything
             // else winds down after the stop delay (unless the keep setting is
             // on). setCameraStreamEnabled is a no-op when unchanged, so pushing
@@ -1048,7 +1087,8 @@ int main(int argc, char** argv)
             const bool recentInput = (frameStart - lastInteraction) < inputRenderTail;
             const bool dirty = !minimized
                 && (newFrame || statsRefreshed || recentInput || dimming || visibleChanged
-                    || reasonsChanged || renderer->isAnimating() || renderer->logViewVisible()
+                    || reasonsChanged || boxesChanged || renderer->isAnimating()
+                    || renderer->logViewVisible()
                     || renderer->wantsRepaint()); // burn-in orbit step
 
             if (dirty) {

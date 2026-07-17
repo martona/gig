@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d11_decode_context.h"
+#include "render/tile_box.h"
 #include "video_frame.h"
 
 #include <cstdint>
@@ -95,6 +96,12 @@ public:
     // ("driveway - person") and forces the label visible under ErrorOnly
     // (Hide still hides everything). Empty entries = no activity.
     virtual void setTileReasons(const std::vector<std::string>& reasons) { (void)reasons; }
+
+    // Per-tile detection boxes (subset-aligned, like the reasons), pushed
+    // each tick. Drawn as pulsing outlines over the letterboxed video --
+    // red live, blue lingering -- with per-id position easing. Renderers
+    // without an implementation just don't draw boxes.
+    virtual void setTileBoxes(const std::vector<gig::TileBoxList>& boxes) { (void)boxes; }
 
     // When to draw the per-tile labels. Changes rarely (settings only), so it's a
     // setter rather than per-frame state.

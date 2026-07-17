@@ -182,6 +182,10 @@ public:
 
     void setCameraLabels(const std::vector<std::string>& labels) override { cameraLabels_ = labels; }
     void setTileReasons(const std::vector<std::string>& reasons) override { tileReasons_ = reasons; }
+    void setTileBoxes(const std::vector<gig::TileBoxList>& boxes) override
+    {
+        scene_->setTileBoxes(boxes);
+    }
     void setDiagnostics(const OverlayStats& stats) override { overlayStats_ = stats; }
     void setLabelMode(LabelMode mode) override { labelMode_ = mode; }
     void setHoveredTile(int index) override { scene_->setHoveredTile(index); }

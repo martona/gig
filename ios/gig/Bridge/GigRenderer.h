@@ -78,6 +78,10 @@ NS_SWIFT_NAME(VideoHost)
 // policy tears hidden cameras down and reconnects them when they appear.
 - (void)setKeepHiddenStreams:(BOOL)keep NS_SWIFT_NAME(setKeepHiddenStreams(_:));
 
+// Draw detection bounding boxes over the video (default YES): pulsing red for
+// a live tracked object, blue while it lingers "(gone)".
+- (void)setShowBoxes:(BOOL)show NS_SWIFT_NAME(setShowBoxes(_:));
+
 @property (nonatomic, assign, readonly) BOOL zoomed;
 
 // True once `delaySeconds` of no interaction have elapsed: the SwiftUI layer

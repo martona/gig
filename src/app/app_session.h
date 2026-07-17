@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d11_decode_context.h"
+#include "net/frigate_events.hpp"
 #include "net/tls_options.h"
 #include "video_frame.h"
 
@@ -94,6 +95,14 @@ public:
     // which prefer the go2rtc stream name.
     const std::vector<std::string>& cameraNames() const { return cameraNames_; }
 
+    // Per-camera detect-stream dimensions (same order) -- the coordinate
+    // space of the /ws "events" bounding boxes; handed to FrigateEvents so it
+    // can normalize them. Zeros where Frigate didn't report dimensions.
+    const std::vector<FrigateEvents::DetectSize>& cameraDetectSizes() const
+    {
+        return cameraDetectSizes_;
+    }
+
     // Per-frame snapshot + live stats, passed through to the current supervisor
     // (safe zero/empty values when stopped).
     std::vector<std::shared_ptr<VideoFrame>> snapshotFrames() const;
@@ -123,6 +132,7 @@ private:
     std::unique_ptr<CameraSupervisor> supervisor_;
     std::vector<std::string> cameraLabels_;
     std::vector<std::string> cameraNames_;
+    std::vector<FrigateEvents::DetectSize> cameraDetectSizes_;
 };
 
 } // namespace gig

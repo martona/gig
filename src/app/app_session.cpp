@@ -40,6 +40,7 @@ void AppSession::stop()
     }
     cameraLabels_.clear();
     cameraNames_.clear();
+    cameraDetectSizes_.clear();
 }
 
 ApplyResult AppSession::applyConfig(const AppConfig& cfg)
@@ -103,9 +104,12 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
         cameraLabels_.reserve(cameras.size());
         cameraNames_.clear();
         cameraNames_.reserve(cameras.size());
+        cameraDetectSizes_.clear();
+        cameraDetectSizes_.reserve(cameras.size());
         for (const CameraStream& camera : cameras) {
             cameraLabels_.push_back(camera.streamName.empty() ? camera.cameraName : camera.streamName);
             cameraNames_.push_back(camera.cameraName);
+            cameraDetectSizes_.push_back({ camera.detectWidth, camera.detectHeight });
         }
 
         // 4. Supervisor (owns the decoders + the health poll).

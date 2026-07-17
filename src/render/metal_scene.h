@@ -16,11 +16,14 @@
 // ARC-managed ObjC objects in C++ members).
 
 #include "render/grid_layout.h"
+#include "render/tile_box.h"
 #include "video_frame.h"
 
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #import <CoreVideo/CoreVideo.h>
@@ -72,6 +75,10 @@ public:
     int focusedTile() const { return focusedTile_; }
     void setHoveredTile(int index) { hoveredTile_ = index; }
     void setTileActivity(const std::vector<std::uint64_t>& byteCounts) { tileBytes_ = byteCounts; }
+    // Per-tile detection boxes (subset-aligned), drawn as pulsing outlines
+    // over the letterboxed video: red live, blue lingering departure, with
+    // per-object-id position easing (see render/tile_box.h).
+    void setTileBoxes(const std::vector<TileBoxList>& boxes) { tileBoxes_ = boxes; }
 
     // True while the tile draws the signal scope instead of video (the ErrorOnly
     // label rule: show the camera label only during the signal phase).
@@ -133,6 +140,8 @@ private:
     void drawSignal(id<MTLRenderCommandEncoder> encoder, const TileRect& cellPts, std::size_t index,
                     float energy, float alpha);
     void drawHover(id<MTLRenderCommandEncoder> encoder, const TileRect& cellPts);
+    void drawTileBoxes(id<MTLRenderCommandEncoder> encoder, std::size_t index,
+                       const MTLViewport& videoVp);
     void drawTileContentAt(id<MTLRenderCommandEncoder> encoder, std::size_t index, const TileRect& rectPts);
     void renderGridTiles(id<MTLRenderCommandEncoder> encoder,
                          const std::vector<std::shared_ptr<VideoFrame>>& frames, const GridLayout& layout);
@@ -169,6 +178,21 @@ private:
     double orbitStepSeconds_ = 40.0; // set each render() from Params
 
     std::vector<std::uint64_t> tileBytes_;
+
+    // Detection boxes (subset-aligned) + per-object-id position easing (the
+    // ~350ms /ws updates glide instead of teleporting). lastUsedFrame lets a
+    // per-render sweep drop stale easing state; bornAt drives the appear fade.
+    std::vector<TileBoxList> tileBoxes_;
+    struct EasedBox {
+        float x1 = 0.0f;
+        float y1 = 0.0f;
+        float x2 = 0.0f;
+        float y2 = 0.0f;
+        float bornAt = 0.0f;
+        std::uint64_t lastUsedFrame = 0;
+    };
+    std::map<std::string, EasedBox> easedBoxes_;
+    std::uint64_t boxFrame_ = 0; // render counter; pre-incremented, so >= 1 in draws
 
     int focusedTile_ = -1;
     int animTile_ = -1;

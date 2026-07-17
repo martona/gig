@@ -89,7 +89,8 @@ double FrigateEvents::nowSeconds()
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-void FrigateEvents::start(std::vector<std::string> cameraNames)
+void FrigateEvents::start(std::vector<std::string> cameraNames,
+                          std::vector<DetectSize> detectSizes)
 {
     if (thread_.joinable()) {
         return;
@@ -103,6 +104,8 @@ void FrigateEvents::start(std::vector<std::string> cameraNames)
         }
         states_.assign(cameraNames_.size(), CameraState {});
         seedStatus_.assign(cameraNames_.size(), SeedStatus::Unknown);
+        detectSizes_ = std::move(detectSizes);
+        detectSizes_.resize(cameraNames_.size()); // short tail = no boxes there
     }
     stopRequested_ = false;
     thread_ = std::thread([this] { runLoop(); });
@@ -457,11 +460,13 @@ std::string FrigateEvents::runOnce(double& liveSeconds)
 
 void FrigateEvents::handleMessage(const std::string& text)
 {
-    // Consumed topics (everything else -- events/reviews firehose, stats,
+    // Consumed topics (everything else -- the reviews firehose, stats,
     // set/state control echoes -- is ignored, though it still counts as
     // traffic for the idle watchdog just by arriving):
     //   "camera_activity"      per-camera state snapshot; answers our
     //                          "onConnect" publish (and any other client's)
+    //   "events"               tracked-object new/update/end with bounding
+    //                          box (detection-box overlay)
     //   "<cam>/all"            bare int, tracked objects (the activity trigger)
     //   "<cam>/all/active"     bare int, EXCLUDES stationary objects (parked
     //                          cars, delivered packages) -- the active-only mode
@@ -483,6 +488,10 @@ void FrigateEvents::handleMessage(const std::string& text)
     const std::string_view topic = topicValue->get_string();
     if (topic == "camera_activity") {
         handleActivitySnapshot(*payload);
+        return;
+    }
+    if (topic == "events") {
+        handleTrackedObjectEvent(*payload);
         return;
     }
     const std::size_t slash = topic.find('/');
@@ -590,6 +599,140 @@ void FrigateEvents::handleMessage(const std::string& text)
         applyLabelCount(state.activeObjects, state.goneActiveObjects,
                         std::string(kind.substr(0, kindSlash)), std::max(0, numeric));
         state.lastEdgeAt = nowSeconds();
+    }
+}
+
+void FrigateEvents::handleTrackedObjectEvent(const boost::json::value& payload)
+{
+    // {"type": "new"|"update"|"end", "before": {...}, "after": {...}} --
+    // JSON-encoded as a string like camera_activity (double-parse; accept a
+    // bare object in case a future version stops re-encoding). Everything is
+    // read from `after`: the current truth, including the final box on "end".
+    boost::json::value decoded;
+    if (payload.is_string()) {
+        boost::system::error_code parseEc;
+        decoded = boost::json::parse(payload.get_string(), parseEc);
+        if (parseEc) {
+            return;
+        }
+    } else {
+        decoded = payload;
+    }
+    if (!decoded.is_object()) {
+        return;
+    }
+    const boost::json::value* afterValue = decoded.get_object().if_contains("after");
+    if (!afterValue || !afterValue->is_object()) {
+        return;
+    }
+    const boost::json::object& after = afterValue->get_object();
+
+    const auto stringField = [&after](std::string_view name) -> std::string_view {
+        const boost::json::value* value = after.if_contains(name);
+        return value && value->is_string() ? std::string_view(value->get_string())
+                                           : std::string_view();
+    };
+    const auto boolField = [&after](std::string_view name) {
+        const boost::json::value* value = after.if_contains(name);
+        return value && value->is_bool() && value->get_bool();
+    };
+
+    const std::string_view id = stringField("id");
+    const std::string camera(stringField("camera"));
+    if (id.empty() || camera.empty()) {
+        return;
+    }
+    const boost::json::value* endValueEarly = after.if_contains("end_time");
+    const bool endedEvent = endValueEarly && !endValueEarly->is_null();
+    // Tentative objects (still scored as false positives) don't publish LIVE
+    // events in practice ("new" fires on confirmation) -- but a short-lived
+    // phantom CAN end while still flagged, and that departure is exactly what
+    // the lingering blue marker exists for: the phantom blipped the activity
+    // gate, and an unexplained tile is the thing this overlay prevents. So:
+    // drop tentative live events, keep ended ones.
+    if (boolField("false_positive") && !endedEvent) {
+        return;
+    }
+    const boost::json::value* boxValue = after.if_contains("box");
+    if (!boxValue || !boxValue->is_array() || boxValue->get_array().size() != 4) {
+        return;
+    }
+    double corners[4] = {};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const boost::json::value& c = boxValue->get_array()[i];
+        if (c.is_int64()) {
+            corners[i] = static_cast<double>(c.get_int64());
+        } else if (c.is_uint64()) {
+            corners[i] = static_cast<double>(c.get_uint64());
+        } else if (c.is_double()) {
+            corners[i] = c.get_double();
+        } else {
+            return;
+        }
+    }
+    const bool active = boolField("active");
+    const bool ended = endedEvent;
+    std::string label = normalizedLabel(stringField("label"));
+
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    const auto found = cameraIndex_.find(camera);
+    if (found == cameraIndex_.end()) {
+        return;
+    }
+    const std::size_t index = static_cast<std::size_t>(found->second);
+    const DetectSize& detect = detectSizes_[index];
+    if (detect.width <= 0 || detect.height <= 0) {
+        return; // no detect dims -> can't place the box; skip this camera
+    }
+    CameraState& state = states_[index];
+
+    // Box coords arrive in detect-frame pixels; store normalized 0..1.
+    const auto norm = [](double v, int span) {
+        return static_cast<float>(std::clamp(v / span, 0.0, 1.0));
+    };
+    CameraState::TrackedObject& object = state.tracked[std::string(id)];
+    const bool fresh = object.label.empty();
+    const bool prevActiveLive = !fresh && !object.ended && object.active;
+    object.label = std::move(label);
+    object.x1 = norm(corners[0], detect.width);
+    object.y1 = norm(corners[1], detect.height);
+    object.x2 = norm(corners[2], detect.width);
+    object.y2 = norm(corners[3], detect.height);
+    object.active = active;
+
+    // Departure stamps mirror the caption-ledger rules: stamp on the live ->
+    // departed transition of each sense, never restamp while already
+    // departed, clear on return. An "end" for an id we never saw live (it
+    // came and went entirely before this event) still stamps: the blue
+    // "something was here" marker is the point of the linger.
+    const double now = nowSeconds();
+    if (!ended) {
+        object.ended = false;
+        object.goneAt = 0.0;
+        if (active) {
+            object.goneActiveAt = 0.0;
+        } else if (prevActiveLive && object.goneActiveAt == 0.0) {
+            object.goneActiveAt = now; // went stationary while we watched
+        }
+    } else if (!object.ended) {
+        object.ended = true;
+        if (object.goneAt == 0.0) {
+            object.goneAt = now;
+        }
+        if ((prevActiveLive || (fresh && active)) && object.goneActiveAt == 0.0) {
+            object.goneActiveAt = now; // left while (or arrived-and-left) active
+        }
+    }
+
+    // Prune ended objects once every sense's linger (and its fade) is long
+    // over; the map stays bounded by live objects + a 60s tail.
+    for (auto it = state.tracked.begin(); it != state.tracked.end();) {
+        const CameraState::TrackedObject& t = it->second;
+        if (t.ended && t.goneAt > 0.0 && now - t.goneAt > CameraState::kGoneLingerSeconds * 2.0) {
+            it = state.tracked.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

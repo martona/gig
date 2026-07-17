@@ -11,6 +11,11 @@ struct CameraStream {
     std::string cameraName; // Frigate camera key, e.g. "cam_frontgate"
     std::string streamName; // go2rtc stream name, e.g. "frontgate"
     std::string streamUrl;  // full stream.ts URL handed to FFmpeg
+    // Detect-stream resolution (cameras.<name>.detect.width/height) -- the
+    // coordinate space of /ws "events" bounding boxes. 0 = not reported;
+    // that camera gets no detection-box overlay.
+    int detectWidth = 0;
+    int detectHeight = 0;
 };
 
 // Fetch /api/config through `client` and map every camera to its primary

@@ -32,6 +32,7 @@ struct SettingsView: View {
     @State private var activityView = false
     @State private var motionActivity = false
     @State private var activeOnly = true
+    @State private var showBoxes = true
     @State private var keepHiddenStreams = true
     @State private var confirmForget = false
 
@@ -79,6 +80,8 @@ struct SettingsView: View {
                               note: "Noisy on windy days — moving shadows and foliage count too.")
                     toggleRow("Ignore stationary objects", isOn: $activeOnly,
                               note: "Parked cars and settled packages stop counting ~10 seconds after they stop moving.")
+                    toggleRow("Draw detection boxes", isOn: $showBoxes,
+                              note: "Red pulses around a live detection; blue lingers where one just ended.")
                     toggleRow("Keep hidden cameras streaming", isOn: $keepHiddenStreams,
                               note: "Off saves power; a hidden camera reconnects in a second or two when it appears.")
                 } header: {
@@ -183,6 +186,7 @@ struct SettingsView: View {
         activityView = s.activityView
         motionActivity = s.motionActivity
         activeOnly = s.activeOnly
+        showBoxes = s.showBoxes
         keepHiddenStreams = s.keepHiddenStreams
     }
 
@@ -199,6 +203,7 @@ struct SettingsView: View {
         s.activityView = activityView
         s.motionActivity = motionActivity
         s.activeOnly = activeOnly
+        s.showBoxes = showBoxes
         s.keepHiddenStreams = keepHiddenStreams
         SettingsBridge.save(s)
     }

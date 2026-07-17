@@ -143,6 +143,29 @@ public:
         // include it) so in activity view the last "(gone)" tag rides exactly
         // as long as the tile itself lingers after its final drop edge.
         static constexpr double kGoneLingerSeconds = 30.0;
+
+        // One tracked object from the "events" firehose, keyed by Frigate's
+        // object id -- feeds the detection-box overlay. Box coordinates are
+        // normalized to the detect frame (0..1) at parse time using the
+        // per-camera detect dimensions passed to start(); cameras without
+        // known dimensions never populate this map. Departure stamps mirror
+        // the caption ledgers, one per sense: `goneAt` = the object ended
+        // (left the frame); `goneActiveAt` = it left the ACTIVE sense (went
+        // stationary, or ended while active). The box overlay shows live
+        // objects in the caption's current sense, plus departed ones for the
+        // same kGoneLingerSeconds linger.
+        struct TrackedObject {
+            std::string label;
+            float x1 = 0.0f;
+            float y1 = 0.0f;
+            float x2 = 0.0f;
+            float y2 = 0.0f;
+            bool active = false; // Frigate's active flag (false = stationary)
+            bool ended = false;  // terminal; the entry is pruned after the linger
+            double goneAt = 0.0;
+            double goneActiveAt = 0.0;
+        };
+        std::map<std::string, TrackedObject> tracked;
         // "<cam>/status/detect" heartbeat (every ~10s per camera): last
         // payload + arrival stamp. A camera counts as DOWN only after we've
         // heard from it at least once -- never-heard is unknown, not down
@@ -181,10 +204,21 @@ public:
     FrigateEvents(const FrigateEvents&) = delete;
     FrigateEvents& operator=(const FrigateEvents&) = delete;
 
+    // Per-camera detect-stream dimensions (from /api/config), used to
+    // normalize "events" bounding boxes. width/height 0 = unknown: that
+    // camera gets no boxes (everything else still works).
+    struct DetectSize {
+        int width = 0;
+        int height = 0;
+    };
+
     // Begin the feed for these FRIGATE camera names (the /api/config keys --
     // NOT the display labels, which may be go2rtc stream names). Order is
-    // stable and index-aligned with snapshot(). No-op if already started.
-    void start(std::vector<std::string> cameraNames);
+    // stable and index-aligned with snapshot(). detectSizes is index-aligned
+    // with the names (short/empty = no boxes for the missing tail). No-op if
+    // already started.
+    void start(std::vector<std::string> cameraNames,
+               std::vector<DetectSize> detectSizes = {});
 
     // Stop the thread and drop all state. Safe to call repeatedly.
     void stop();
@@ -208,6 +242,9 @@ private:
     // "camera_activity": apply a snapshot under the seeding protocol (class
     // comment) -- acceptance window, per-camera ambiguity, settle detection.
     void handleActivitySnapshot(const boost::json::value& payload);
+    // "events": one tracked object's new/update/end -- maintains
+    // CameraState.tracked for the detection-box overlay.
+    void handleTrackedObjectEvent(const boost::json::value& payload);
     void clearStates();
 
     // --- seeding protocol (all take stateMutex_; called from the io thread) ---
@@ -247,6 +284,7 @@ private:
     std::vector<std::string> cameraNames_;
     std::unordered_map<std::string, int> cameraIndex_;
     std::vector<CameraState> states_;
+    std::vector<DetectSize> detectSizes_; // index-aligned with cameraNames_
     // Seeding-protocol state (guarded by stateMutex_, reset by clearStates):
     std::vector<SeedStatus> seedStatus_; // index-aligned with states_
     double seedRequestedAt_ = 0.0;       // nowSeconds() of the last onConnect send
@@ -316,10 +354,76 @@ inline std::string activityReason(const FrigateEvents::CameraState& state, bool 
             ++goneIt;
         }
     }
+    if (reason.empty()) {
+        // Count-based fallback: the per-camera count topics ("<cam>/all") can
+        // know about activity the per-label state doesn't NAME -- a seeded
+        // object with an empty label, or per-label/events edges that fired
+        // before we connected (no replay). The activity gate shows the tile
+        // because of those counts, so ErrorOnly must caption it anyway or the
+        // tile reads as "why is this camera showing?" -- the exact hole the
+        // "(gone)" linger exists to close. Same linger window, generic word.
+        const int count = activeOnly ? state.activeObjectCount : state.objectCount;
+        const double lastAt = activeOnly ? state.lastActiveObjectAt : state.lastObjectAt;
+        if (count > 0) {
+            reason = "object";
+        } else if (lastAt > 0.0 && now - lastAt < FrigateEvents::CameraState::kGoneLingerSeconds) {
+            reason = "object (gone)"; // lastObjectAt stamps the drop edge
+        }
+    }
     if (reason.empty() && motionCounts && state.motion) {
         reason = "motion";
     }
     return reason;
+}
+
+// One detection box for the tile overlay, in detect-frame-normalized
+// coordinates (0..1; the renderer maps them into the letterboxed video rect).
+struct ActivityBox {
+    std::string id; // Frigate's object id; keys the renderer's position easing
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float x2 = 0.0f;
+    float y2 = 0.0f;
+    bool gone = false; // blue lingering departure vs red live detection
+    float fade = 1.0f; // opacity: 1 live; gone boxes ease out ending the linger
+};
+
+// The boxes a tile should draw, mirroring the caption policy sense-for-sense:
+// a box is red while its object would sit in the caption's live list
+// (activeOnly treats STATIONARY as departed, exactly like the active ledger),
+// blue for the same kGoneLingerSeconds after it departs, absent after that.
+// Blue fades out over the linger's last quarter so the expiry isn't a pop.
+// `now` is FrigateEvents::nowSeconds() -- the clock the stamps use.
+inline std::vector<ActivityBox> activityBoxes(const FrigateEvents::CameraState& state,
+                                              bool activeOnly, double now)
+{
+    std::vector<ActivityBox> boxes;
+    constexpr double kLinger = FrigateEvents::CameraState::kGoneLingerSeconds;
+    constexpr double kFadeTail = kLinger * 0.25;
+    for (const auto& [id, object] : state.tracked) {
+        const bool live = activeOnly ? (!object.ended && object.active) : !object.ended;
+        ActivityBox box;
+        box.id = id;
+        box.x1 = object.x1;
+        box.y1 = object.y1;
+        box.x2 = object.x2;
+        box.y2 = object.y2;
+        if (live) {
+            boxes.push_back(std::move(box));
+            continue;
+        }
+        const double departedAt = activeOnly ? object.goneActiveAt : object.goneAt;
+        const double age = now - departedAt;
+        if (departedAt <= 0.0 || age >= kLinger) {
+            continue;
+        }
+        box.gone = true;
+        box.fade = age <= kLinger - kFadeTail
+            ? 1.0f
+            : static_cast<float>((kLinger - age) / kFadeTail);
+        boxes.push_back(std::move(box));
+    }
+    return boxes;
 }
 
 } // namespace gig

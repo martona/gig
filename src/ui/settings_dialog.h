@@ -31,7 +31,7 @@ namespace gig {
 bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
-                        bool& keepHiddenStreams,
+                        bool& showBoxes, bool& keepHiddenStreams,
                         bool& forgetRequested, const std::string& statusMessage = {},
                         const std::function<void(int dimPercent)>& onDimPreview = {});
 

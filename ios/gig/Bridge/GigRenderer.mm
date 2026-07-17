@@ -93,6 +93,7 @@
     BOOL _motionActivity;
     BOOL _activeOnly;
     BOOL _keepHiddenStreams;
+    BOOL _showBoxes;
     std::vector<int> _visibleTiles;
     CFTimeInterval _lastActivityWake;
     NSString *_quietText;
@@ -121,6 +122,7 @@
         _dimPreview = -1.0;
         _activeOnly = YES; // matches the persisted default; settings push overrides
         _keepHiddenStreams = YES;
+        _showBoxes = YES;
         _lastInteraction = CACurrentMediaTime();
         _lastActivityWake = _lastInteraction;
         _quietText = @"";
@@ -158,6 +160,12 @@
     _viewModeActivity = activity;
     _motionActivity = motionCounts;
     _activeOnly = activeOnly;
+    _needsRender = YES;
+}
+
+- (void)setShowBoxes:(BOOL)show
+{
+    _showBoxes = show;
     _needsRender = YES;
 }
 
@@ -441,6 +449,23 @@
             hasReason.push_back(!reason.empty());
         }
 
+        // Detection boxes, subset-aligned like the labels (empty lists when
+        // disabled). Same policy layer as the desktop run loop.
+        std::vector<gig::TileBoxList> tileBoxes(_visibleTiles.size());
+        if (_showBoxes && snap.feedConnected) {
+            for (std::size_t i = 0; i < _visibleTiles.size(); ++i) {
+                const auto slot = static_cast<std::size_t>(_visibleTiles[i]);
+                if (slot >= snap.activity.size()) {
+                    continue;
+                }
+                for (const gig::ActivityBox& box : gig::activityBoxes(
+                         snap.activity[slot], _activeOnly == YES, reasonNow)) {
+                    tileBoxes[i].push_back({ box.id, box.x1, box.y1, box.x2, box.y2,
+                                             box.gone, box.fade });
+                }
+            }
+        }
+
         // Dirty gate: skip the whole encode when nothing can have changed on
         // screen. A frameless tile's signal scope keeps the scene animating, so
         // idle here means genuinely static video (or disconnected + cleared).
@@ -456,6 +481,25 @@
             }
             stamp = stamp * 131ull + 0x7full; // separator: {"ab",""} != {"a","b"}
         }
+        // Boxes too: a box appearing/moving/fading on a static scene must
+        // repaint (coords quantized so easing-scale jitter doesn't spin the
+        // stamp forever; the scene keeps animating on its own while drawing).
+        for (const gig::TileBoxList& list : tileBoxes) {
+            for (const gig::TileBox& b : list) {
+                for (const char c : b.id) {
+                    stamp = stamp * 131ull + static_cast<unsigned char>(c);
+                }
+                stamp = stamp * 131ull + (b.gone ? 2ull : 1ull);
+                const int quantized[5] = {
+                    static_cast<int>(b.x1 * 4096.0f), static_cast<int>(b.y1 * 4096.0f),
+                    static_cast<int>(b.x2 * 4096.0f), static_cast<int>(b.y2 * 4096.0f),
+                    static_cast<int>(b.fade * 256.0f),
+                };
+                for (const int q : quantized) {
+                    stamp = stamp * 131ull + static_cast<std::uint64_t>(q);
+                }
+            }
+        }
         if (!_needsRender && !_lastAnimating && !dimming
             && !_scene->wantsOrbitRepaint() && stamp == _lastFrameStamp) {
             return;
@@ -468,6 +512,7 @@
         }
 
         _scene->setTileActivity(bytes);
+        _scene->setTileBoxes(tileBoxes);
 
         _layer.drawableSize = CGSizeMake(pixelW, pixelH);
         id<CAMetalDrawable> drawable = [_layer nextDrawable];
