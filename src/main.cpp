@@ -905,12 +905,15 @@ int main(int argc, char** argv)
             {
                 std::vector<std::string> reasons(visibleTiles.size());
                 if (feedUp) {
+                    // The stamp clock of the "(gone)" ledger; rebuilt every
+                    // tick, so a tag expiring is picked up within a frame.
+                    const double reasonNow = gig::FrigateEvents::nowSeconds();
                     for (std::size_t i = 0; i < visibleTiles.size(); ++i) {
                         const int cam = visibleTiles[i];
                         if (cam >= 0 && cam < static_cast<int>(feedStates.size())) {
                             reasons[i] = gig::activityReason(
                                 feedStates[static_cast<std::size_t>(cam)],
-                                cfg.motionActivity, cfg.activeOnly);
+                                cfg.motionActivity, cfg.activeOnly, reasonNow);
                         }
                     }
                 }

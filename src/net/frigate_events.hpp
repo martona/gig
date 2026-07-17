@@ -127,6 +127,22 @@ public:
         // iteration (and the joined reason string) is deterministic.
         std::map<std::string, int> objects;
         std::map<std::string, int> activeObjects;
+        // Labels whose count just dropped to 0, stamped at the drop edge --
+        // activityReason renders them as "person (gone)" for
+        // kGoneLingerSeconds instead of vanishing the instant Frigate sends
+        // the off edge (detections misfire / end sooner than a human can look
+        // up at the wall, and a tile whose caption just evaporated reads as
+        // "why is this cam showing?"). One ledger per count map, because each
+        // is its own signal: in activeOnly mode a car going STATIONARY is the
+        // departure that matters. A label's >0 edge erases its ledger entry;
+        // entries older than the linger are ignored at render time and
+        // overwritten whenever the label next departs.
+        std::map<std::string, double> goneObjects;
+        std::map<std::string, double> goneActiveObjects;
+        // Mirrors ActivityGate::kLingerSeconds (app layer -- net/ can't
+        // include it) so in activity view the last "(gone)" tag rides exactly
+        // as long as the tile itself lingers after its final drop edge.
+        static constexpr double kGoneLingerSeconds = 30.0;
         // "<cam>/status/detect" heartbeat (every ~10s per camera): last
         // payload + arrival stamp. A camera counts as DOWN only after we've
         // heard from it at least once -- never-heard is unknown, not down
@@ -239,22 +255,65 @@ private:
 };
 
 // Why a camera counts as active, for the label suffix ("driveway - person"):
-// the object labels joined (alphabetical -- std::map order), else "motion"
-// while raw motion is ON, else empty (nothing happening). activeOnly picks
-// the stationary-excluding counts so a parked car doesn't caption its tile.
-// motionCounts mirrors the gate's policy (ActivityGate::evaluate): when the
-// user has motion counting OFF, motion isn't activity -- so it can't be a
-// caption either (a reason force-shows the label even in ErrorOnly mode).
+// the object labels joined (alphabetical -- std::map order), each tagged
+// " (gone)" for kGoneLingerSeconds after its off edge ("pool - minivan
+// (gone), person"), else "motion" while raw motion is ON, else empty.
+// `now` is FrigateEvents::nowSeconds() -- the clock the gone stamps use.
+// activeOnly picks the stationary-excluding counts so a parked car doesn't
+// caption its tile. motionCounts mirrors the gate's policy
+// (ActivityGate::evaluate): when the user has motion counting OFF, motion
+// isn't activity -- so it can't be a caption either (a reason force-shows
+// the label even in ErrorOnly mode).
 inline std::string activityReason(const FrigateEvents::CameraState& state, bool motionCounts,
-                                  bool activeOnly)
+                                  bool activeOnly, double now)
 {
+    const std::map<std::string, int>& counts = activeOnly ? state.activeObjects : state.objects;
+    const std::map<std::string, double>& gone = activeOnly ? state.goneActiveObjects : state.goneObjects;
     std::string reason;
-    for (const auto& [label, count] : (activeOnly ? state.activeObjects : state.objects)) {
-        if (count > 0) {
-            if (!reason.empty()) {
-                reason += ", ";
+    const auto append = [&reason](const std::string& label, bool departed) {
+        if (!reason.empty()) {
+            reason += ", ";
+        }
+        reason += label;
+        if (departed) {
+            reason += " (gone)";
+        }
+    };
+    const auto lingering = [now](double goneAt) {
+        return goneAt > 0.0 && now - goneAt < FrigateEvents::CameraState::kGoneLingerSeconds;
+    };
+    // Alphabetical merge of the two sorted maps. A departed label normally
+    // sits in BOTH (its count entry at 0, its ledger entry stamped): the
+    // present count wins, else the ledger entry captions the departure.
+    auto countIt = counts.begin();
+    auto goneIt = gone.begin();
+    while (countIt != counts.end() || goneIt != gone.end()) {
+        int order = 0;
+        if (countIt == counts.end()) {
+            order = 1;
+        } else if (goneIt == gone.end()) {
+            order = -1;
+        } else {
+            order = countIt->first.compare(goneIt->first);
+        }
+        if (order < 0) {
+            if (countIt->second > 0) {
+                append(countIt->first, false);
             }
-            reason += label;
+            ++countIt;
+        } else if (order > 0) {
+            if (lingering(goneIt->second)) {
+                append(goneIt->first, true);
+            }
+            ++goneIt;
+        } else {
+            if (countIt->second > 0) {
+                append(countIt->first, false);
+            } else if (lingering(goneIt->second)) {
+                append(goneIt->first, true);
+            }
+            ++countIt;
+            ++goneIt;
         }
     }
     if (reason.empty() && motionCounts && state.motion) {

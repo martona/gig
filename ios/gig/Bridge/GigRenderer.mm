@@ -422,6 +422,9 @@
         bytes.reserve(_visibleTiles.size());
         labels.reserve(_visibleTiles.size());
         hasReason.reserve(_visibleTiles.size());
+        // The stamp clock of the "(gone)" caption ledger (NOT CACurrentMediaTime:
+        // the stamps come from FrigateEvents::nowSeconds()).
+        const double reasonNow = gig::FrigateEvents::nowSeconds();
         for (const int cam : _visibleTiles) {
             const auto slot = static_cast<std::size_t>(cam);
             frames.push_back(slot < snap.frames.size() ? snap.frames[slot] : nullptr);
@@ -429,7 +432,7 @@
             std::string label = slot < snap.labels.size() ? snap.labels[slot] : std::string();
             std::string reason = snap.feedConnected && slot < snap.activity.size()
                 ? gig::activityReason(snap.activity[slot], _motionActivity == YES,
-                                      _activeOnly == YES)
+                                      _activeOnly == YES, reasonNow)
                 : std::string();
             if (!reason.empty() && !label.empty()) {
                 label += " - " + reason;
@@ -444,6 +447,14 @@
         std::uint64_t stamp = static_cast<std::uint64_t>(frames.size()) * 1000003ull;
         for (const std::shared_ptr<VideoFrame> &frame : frames) {
             stamp = stamp * 31ull + (frame ? frame->index + 1ull : 0ull);
+        }
+        // Label text folds in too: reason flips ("dog" -> "dog (gone)" -> tag
+        // expiry) must repaint even when every visible tile's video is static.
+        for (const std::string& label : labels) {
+            for (const char c : label) {
+                stamp = stamp * 131ull + static_cast<unsigned char>(c);
+            }
+            stamp = stamp * 131ull + 0x7full; // separator: {"ab",""} != {"a","b"}
         }
         if (!_needsRender && !_lastAnimating && !dimming
             && !_scene->wantsOrbitRepaint() && stamp == _lastFrameStamp) {

@@ -564,13 +564,31 @@ void FrigateEvents::handleMessage(const std::string& text)
     if (!isNumeric) {
         return;
     }
+    // Shared by both per-label maps: apply the new count and keep the gone
+    // ledger consistent -- stamp the drop edge (>0 -> 0) that starts the
+    // "(gone)" caption linger, clear the stamp on any >0 edge (it's back).
+    // A repeated 0 (duplicate publishes) must NOT restamp: that would keep
+    // extending the linger of a departure that happened once.
+    const auto applyLabelCount = [](std::map<std::string, int>& counts,
+                                    std::map<std::string, double>& goneAt,
+                                    std::string label, int next) {
+        int& slot = counts[label];
+        if (next > 0) {
+            goneAt.erase(label);
+        } else if (slot > 0) {
+            goneAt[std::move(label)] = nowSeconds();
+        }
+        slot = next;
+    };
     const std::size_t kindSlash = kind.find('/');
     if (kindSlash == std::string_view::npos) {
-        state.objects[std::string(kind)] = std::max(0, numeric);
+        applyLabelCount(state.objects, state.goneObjects,
+                        std::string(kind), std::max(0, numeric));
         state.lastEdgeAt = nowSeconds();
     } else if (kind.substr(kindSlash + 1) == "active"
                && kind.substr(0, kindSlash).find('/') == std::string_view::npos) {
-        state.activeObjects[std::string(kind.substr(0, kindSlash))] = std::max(0, numeric);
+        applyLabelCount(state.activeObjects, state.goneActiveObjects,
+                        std::string(kind.substr(0, kindSlash)), std::max(0, numeric));
         state.lastEdgeAt = nowSeconds();
     }
 }
@@ -677,6 +695,21 @@ void FrigateEvents::handleActivitySnapshot(const boost::json::value& payload)
             state.activeObjectCount = active;
             state.objects = std::move(objects);
             state.activeObjects = std::move(activeObjects);
+            // The seed is a correction of present state, not an observed
+            // departure: it never STAMPS the gone ledger (a pre-join object
+            // we simply hadn't heard about must not caption "(gone)"), but a
+            // label it reports present clears any stale stamp -- present and
+            // departed are contradictory, and present is the fresher word.
+            for (const auto& [label, count] : state.objects) {
+                if (count > 0) {
+                    state.goneObjects.erase(label);
+                }
+            }
+            for (const auto& [label, count] : state.activeObjects) {
+                if (count > 0) {
+                    state.goneActiveObjects.erase(label);
+                }
+            }
         }
 
         // The snapshot's "motion" field is DELIBERATELY NOT seeded. Server-
