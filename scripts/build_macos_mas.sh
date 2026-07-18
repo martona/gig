@@ -241,6 +241,19 @@ if [[ "$MAS_BUNDLE_VERSION" != "$FULL_BUNDLE_VERSION" ]]; then
 fi
 echo "[*] CFBundleVersion in bundle is now: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")"
 
+# ASC rejects an empty/missing LSMinimumSystemVersion three ways at once
+# (90263 invalid value, 90262 invalid product-definition min, 90869 "arm64-only
+# needs >=12.0"). It went empty once for real: Info.plist.in's
+# ${MACOSX_DEPLOYMENT_TARGET} is an Xcode build setting, and the NINJA path
+# substitutes it as a CMake variable -- undefined -> "" until CMakeLists
+# defined it. Cheaper to die here than after the upload round-trip.
+MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$INFO_PLIST" 2>/dev/null || true)"
+if [[ -z "$MIN_OS" ]]; then
+    echo "[!] Fatal: LSMinimumSystemVersion is empty/missing in the built Info.plist." >&2
+    exit 1
+fi
+echo "[*] LSMinimumSystemVersion: $MIN_OS"
+
 if [[ "$sign_for_distribution" == "1" ]]; then
     echo "[*] Embedding provisioning profile from $PROVISION_PROFILE..."
     cp "$PROVISION_PROFILE" "$APP_PATH/Contents/embedded.provisionprofile"
