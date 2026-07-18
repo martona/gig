@@ -469,7 +469,14 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
             }
+            // The status screens draw on the app's always-black video canvas,
+            // so they must use the DARK palette regardless of the system
+            // scheme: in light mode the adaptive .primary/.secondary colors go
+            // near-black and vanish into the canvas (the welcome title was
+            // literally invisible on a light-mode phone). System chrome
+            // (toolbar, settings sheet) stays scheme-adaptive on purpose.
             statusScreen
+                .environment(\.colorScheme, .dark)
         }
         .ignoresSafeArea(edges: .bottom)
     }
