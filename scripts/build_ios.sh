@@ -68,7 +68,7 @@ fi
 
 if [[ "$SETUP_VCPKG" == "1" ]]; then
     echo "[*] Setting up iOS simulator vcpkg dependencies..."
-    "$SCRIPT_DIR/setup_ios_vcpkg.sh" --simulator-only
+    bash "$SCRIPT_DIR/setup_ios_vcpkg.sh" --simulator-only
 fi
 
 mkdir -p "$BUILD_DIR"

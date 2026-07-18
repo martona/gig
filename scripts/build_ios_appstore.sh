@@ -146,7 +146,9 @@ if [[ "$SETUP_VCPKG" == "1" ]]; then
     # Device (arm64-ios) static libs. MUST run from a terminal, never as an
     # Xcode build phase (Xcode's env poisons vcpkg) -- which this is.
     echo "[*] Setting up iOS device vcpkg dependencies..."
-    "$SCRIPT_DIR/setup_ios_vcpkg.sh" --device-only
+    # Via bash, not direct exec: survives a checkout that lost the executable
+    # bit (the repo is developed on Windows; CI checkouts honor index modes).
+    bash "$SCRIPT_DIR/setup_ios_vcpkg.sh" --device-only
 fi
 
 mkdir -p "$BUILD_DIR"
