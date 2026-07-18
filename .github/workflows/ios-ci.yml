@@ -77,13 +77,19 @@ jobs:
 
       # The expensive part is FFmpeg (+ deps) cross-compiled for arm64-ios-simulator;
       # persist the binary cache so only a manifest / overlay / triplet change re-pays it.
+      # Image version in the key: an image update rolls the vcpkg ABI hashes
+      # and would otherwise leave a stale, unre-savable cache (see macos-ci.yml).
+      - name: Read runner image version
+        id: image
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Cache vcpkg binaries
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-simulator-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-simulator-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-simulator-
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-simulator-${{ steps.image.outputs.version }}-
 
       # The feasibility gate: prove Boost/OpenSSL/FFmpeg cross-compile for iOS.
       - name: Install iOS vcpkg dependencies (feasibility gate)
@@ -121,3 +127,14 @@ jobs:
             ls -l "$app"
             exit 1
           fi
+
+      - name: Upload vcpkg failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-failure-logs-ios-ci
+          path: |
+            v/buildtrees/**/*.log
+            build/**/vcpkg-manifest-install.log
+          if-no-files-found: ignore
+          retention-days: 7

@@ -48,15 +48,23 @@ jobs:
       # build script keeps vcpkg's binary cache + downloads under build/; persist
       # them so only a vcpkg.json / vcpkg-configuration.json / overlay change pays
       # the cold-build cost again. (vcpkg itself is re-cloned per run -- cheap.)
+      # Image version in the key: an image update (new MSVC) rolls the vcpkg
+      # ABI hashes and would otherwise leave a stale, unre-savable cache
+      # (see macos-ci.yml for the full story).
+      - name: Read runner image version
+        id: image
+        run: |
+          "version=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Cache vcpkg binaries
         uses: actions/cache@v5
         with:
           path: |
             build/vcpkg-binary-cache
             build/vcpkg-downloads
-          key: ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-vcpkg-
+            ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ steps.image.outputs.version }}-
 
       - name: Build Release
         run: .\scripts\build_windows.ps1 -BuildType Release -Triplet ${{ matrix.triplet }} -VcVarsArch ${{ matrix.vcvars_arch }} -DisableCodeSigning

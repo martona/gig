@@ -56,15 +56,22 @@ jobs:
         with:
           persist-credentials: false
 
+      # Image version in the key: an image update (new MSVC) rolls the vcpkg
+      # ABI hashes and would otherwise leave a stale, unre-savable cache.
+      - name: Read runner image version
+        id: image
+        run: |
+          "version=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Cache vcpkg binaries
         uses: actions/cache@v5
         with:
           path: |
             build/vcpkg-binary-cache
             build/vcpkg-downloads
-          key: ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-vcpkg-
+            ${{ runner.os }}-${{ matrix.arch }}-vcpkg-${{ steps.image.outputs.version }}-
 
       # Build UNSIGNED (the steps below sign with the Trusted Signing action, so
       # build and signing stay separable); stamp the release version into the exe.
@@ -215,13 +222,19 @@ jobs:
       - name: Prepare vcpkg binary cache
         run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
 
+      # Image version in the key: an image update (new Xcode) rolls the vcpkg
+      # ABI hashes and would otherwise leave a stale, unre-savable cache.
+      - name: Read runner image version
+        id: image
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Cache vcpkg binaries
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-vcpkg-
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ steps.image.outputs.version }}-
 
       # Imports the Developer ID Application cert into a temporary keychain scoped to
       # this job; the action's post-step removes it on job exit.
@@ -303,6 +316,19 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # The vcpkg port logs live only on the runner; without this a dependency
+      # build failure is undiagnosable after the fact.
+      - name: Upload vcpkg failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-failure-logs-release-macos
+          path: |
+            v/buildtrees/**/*.log
+            build/**/vcpkg-manifest-install.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   # ---- App Store uploads --------------------------------------------------
   #
   # Mac App Store (.pkg -> App Store Connect) + iOS (TestFlight), riding the
@@ -380,15 +406,20 @@ jobs:
 
       # Same key as build-macos on purpose: build_macos_mas.sh uses the same
       # deps + triplet (only post-build signing differs), so the Developer ID
-      # job's cache serves this one too.
+      # job's cache serves this one too. Image version in the key: see there.
+      - name: Read runner image version
+        if: steps.guard.outputs.ok == 'true'
+        id: image
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Cache vcpkg binaries
         if: steps.guard.outputs.ok == 'true'
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-vcpkg-
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ steps.image.outputs.version }}-
 
       - name: Import App Store signing certificates
         if: steps.guard.outputs.ok == 'true'
@@ -425,6 +456,17 @@ jobs:
           APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
         run: bash ./scripts/build_macos_mas.sh --version "${{ inputs.version }}" --upload
+
+      - name: Upload vcpkg failure logs
+        if: failure() && steps.guard.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-failure-logs-appstore-macos
+          path: |
+            v/buildtrees/**/*.log
+            build/**/vcpkg-manifest-install.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   appstore-ios:
     name: iOS App Store upload
@@ -479,14 +521,20 @@ jobs:
           mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
 
       # DEVICE triplet (arm64-ios), distinct from ios-ci.yml's simulator cache.
+      # Image version in the key: see build-macos.
+      - name: Read runner image version
+        if: steps.guard.outputs.ok == 'true'
+        id: image
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Cache vcpkg binaries
         if: steps.guard.outputs.ok == 'true'
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-device-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-device-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-device-
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-ios-device-${{ steps.image.outputs.version }}-
 
       - name: Import App Store signing certificates
         if: steps.guard.outputs.ok == 'true'
@@ -521,6 +569,17 @@ jobs:
           APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
         run: bash ./scripts/build_ios_appstore.sh --version "${{ inputs.version }}" --upload
+
+      - name: Upload vcpkg failure logs
+        if: failure() && steps.guard.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-failure-logs-appstore-ios
+          path: |
+            v/buildtrees/**/*.log
+            build/**/vcpkg-manifest-install.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   publish:
     name: Create release

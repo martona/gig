@@ -69,13 +69,22 @@ jobs:
 
       # The expensive part is FFmpeg (+ deps) built from the overlay port; persist the
       # binary cache so only a vcpkg.json / overlay / triplet change pays it again.
+      #
+      # The image version is part of the key: a runner image update (new Xcode)
+      # rolls every vcpkg ABI hash, turning the old cache into dead weight that
+      # also blocks re-saving (its key still matches, so the fresh build is
+      # never stored). Per-image keys start clean; stale ones age out.
+      - name: Read runner image version
+        id: image
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Cache vcpkg binaries
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-ports/**', 'vcpkg-triplets/**') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-vcpkg-
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ steps.image.outputs.version }}-
 
       # Invoked via `bash` (not ./) so it runs regardless of the script's executable
       # bit, which git on Windows doesn't track.
@@ -116,3 +125,17 @@ jobs:
             echo "Expected CFBundleIconFile to be gig.icns, got '$icon_file'." >&2
             exit 1
           fi
+
+      # The vcpkg port logs live only on the runner; without this, a dependency
+      # build failure (e.g. the 2026-07-18 ffmpeg flake) is undiagnosable
+      # after the fact.
+      - name: Upload vcpkg failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-failure-logs-macos-ci
+          path: |
+            v/buildtrees/**/*.log
+            build/**/vcpkg-manifest-install.log
+          if-no-files-found: ignore
+          retention-days: 7
