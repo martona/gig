@@ -1,5 +1,6 @@
 #include "app/activity_gate.h"
 #include "app/app_session.h"
+#include "app/connections.h"
 #include "log.hpp"
 #include "net/cert_pin.hpp"
 #include "net/cookie_jar.hpp"
@@ -206,18 +207,26 @@ float labelScaleFor(int labelSize)
 // Read all settings from the platform store, applying the same derivation +
 // validation the ini loader did. Missing values fall back to defaults; the store
 // is the sole configuration source. The password is the one DPAPI-encrypted value.
-StartupConfig loadConfig(const gig::SettingsStore& store)
+// Non-const: resolving the active connection may repair a dangling pointer.
+StartupConfig loadConfig(gig::SettingsStore& store)
 {
     StartupConfig cfg;
     gig::AppConfig& s = cfg.session;
-    s.baseUrl = store.getString("base").value_or(std::string());
-    s.url = store.getString("url").value_or(std::string());
-    s.user = store.getString("user").value_or(std::string());
-    s.password = store.getString("password", /*encrypted=*/true).value_or(std::string());
-    s.loginRefreshSeconds = static_cast<int>(store.getInt("login-refresh").value_or(600));
-    s.tls.caFile = store.getString("ca").value_or(std::string());
-    s.tls.certFile = store.getString("cert").value_or(std::string());
-    s.tls.keyFile = store.getString("key").value_or(std::string());
+    // Connection fields come from the ACTIVE entry under connections/ (the
+    // multi-server registry); everything below stays a root/global value.
+    // No usable connection = everything empty (the welcome screen).
+    const std::string activeConn = gig::connections::activeOrFallback(store);
+    if (const auto conn = gig::connections::load(store, activeConn)) {
+        s.baseUrl = conn->baseUrl;
+        s.url = conn->url;
+        s.user = conn->user;
+        s.password = conn->password;
+        s.loginRefreshSeconds = conn->loginRefreshSeconds;
+        s.tls.caFile = conn->caFile;
+        s.tls.certFile = conn->certFile;
+        s.tls.keyFile = conn->keyFile;
+        s.tls.verifyServer = !conn->insecure;
+    }
     s.softwareDecode = store.getBool("software").value_or(false);
     const int labelMode = static_cast<int>(store.getInt("cam-labels").value_or(1)); // default: show on error only
     cfg.labelMode = static_cast<LabelMode>((labelMode >= 0 && labelMode <= 2) ? labelMode : 1);
@@ -231,7 +240,6 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.keepHiddenStreams = store.getBool("stream-hidden").value_or(true);
     cfg.hideOffline = store.getBool("hide-offline").value_or(false);
     cfg.showBoxes = store.getBool("boxes").value_or(true);
-    s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
 
@@ -280,21 +288,35 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode la
     store.setBool("boxes", showBoxes);
     store.setBool("stream-hidden", keepHiddenStreams);
     store.setBool("hide-offline", hideOffline);
-    store.setString("base", s.baseUrl);
-    store.setString("url", s.url);
-    store.setString("user", s.user);
-    if (s.password.empty()) {
-        store.remove("password");
-    } else {
-        store.setString("password", s.password, /*encrypt=*/true);
+    // Connection fields go to the ACTIVE entry under connections/. A URL edit
+    // changes the leaf's identity hash, so the superseded leaf is dropped and
+    // the active pointer retargeted; clearing the URL entirely deletes the
+    // entry (the pre-multi-connection "empty config" semantics).
+    {
+        const std::string oldId = gig::connections::activeId(store);
+        gig::ConnectionInfo info;
+        info.baseUrl = s.baseUrl;
+        info.url = s.url;
+        info.user = s.user;
+        info.password = s.password;
+        info.insecure = !s.tls.verifyServer;
+        info.caFile = s.tls.caFile;
+        info.certFile = s.tls.certFile;
+        info.keyFile = s.tls.keyFile;
+        info.loginRefreshSeconds = s.loginRefreshSeconds;
+        if (info.identityUrl().empty()) {
+            gig::connections::remove(store, oldId);
+            gig::connections::setActiveId(store, std::string());
+        } else {
+            const std::string newId = gig::connections::save(store, info);
+            if (!oldId.empty() && oldId != newId) {
+                gig::connections::remove(store, oldId);
+            }
+            gig::connections::setActiveId(store, newId);
+        }
     }
-    store.setInt("login-refresh", s.loginRefreshSeconds);
-    store.setString("ca", s.tls.caFile);
-    store.setString("cert", s.tls.certFile);
-    store.setString("key", s.tls.keyFile);
     store.setBool("software", s.softwareDecode);
     store.setInt("cam-labels", static_cast<int>(labelMode));
-    store.setBool("insecure", !s.tls.verifyServer);
     store.setInt("poll-interval", s.pollIntervalSeconds);
     store.setInt("rw-timeout-us", s.tls.rwTimeoutUs);
 }
@@ -408,8 +430,11 @@ int main(int argc, char** argv)
 #endif
         auto settings = gig::openSettingsStore();
         if (!settings->getInt("schema-version")) {
-            settings->setInt("schema-version", 1); // first run: stamp for future migrations
+            settings->setInt("schema-version", 2); // first run: stamp for future migrations
         }
+        // TEMPORARY: carry a pre-multi-connection store's root credentials
+        // into the connections/ subtree (idempotent no-op afterwards).
+        gig::connections::migrateFromRoot(*settings);
         StartupConfig cfg = loadConfig(*settings);
 
         // Cert pinning is process-wide: the TLS verify callback (deep in OpenSSL)
@@ -765,7 +790,7 @@ int main(int argc, char** argv)
                 visibleTiles.clear();
                 session.stop();
                 settings->clear();
-                settings->setInt("schema-version", 1);
+                settings->setInt("schema-version", 2);
                 cookieJar->clear();
                 sessionCache->clear();
                 pinStore.reset();

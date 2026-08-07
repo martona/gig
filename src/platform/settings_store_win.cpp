@@ -219,6 +219,46 @@ public:
         return names;
     }
 
+    std::vector<std::string> listSubkeys(std::string_view subkey) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<std::string> names;
+        std::wstring sub = utf8ToWide(subkey);
+        for (wchar_t& ch : sub) {
+            if (ch == L'/') {
+                ch = L'\\';
+            }
+        }
+
+        HKEY hSub = nullptr;
+        if (RegOpenKeyExW(root_, sub.c_str(), 0, KEY_READ, &hSub) != ERROR_SUCCESS) {
+            return names;
+        }
+        for (DWORD index = 0;; ++index) {
+            wchar_t name[256];
+            DWORD nameLen = static_cast<DWORD>(std::size(name));
+            const LSTATUS status = RegEnumKeyExW(hSub, index, name, &nameLen, nullptr, nullptr, nullptr, nullptr);
+            if (status != ERROR_SUCCESS) {
+                break;
+            }
+            names.push_back(wideToUtf8(name, nameLen));
+        }
+        RegCloseKey(hSub);
+        return names;
+    }
+
+    void removeSubtree(std::string_view subkey) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::wstring sub = utf8ToWide(subkey);
+        for (wchar_t& ch : sub) {
+            if (ch == L'/') {
+                ch = L'\\';
+            }
+        }
+        RegDeleteTreeW(root_, sub.c_str());
+    }
+
 private:
     // Two-pass read of any value at key into `out`. `flags` restricts the
     // accepted registry type. Returns false if missing / wrong type.

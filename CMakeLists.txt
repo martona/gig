@@ -101,6 +101,8 @@ add_executable(gig WIN32 MACOSX_BUNDLE
     src/app/app_session.h
     src/app/camera_supervisor.cpp
     src/app/camera_supervisor.h
+    src/app/connections.cpp
+    src/app/connections.h
     src/d3d11_decode_context.h
     src/video_frame.h
     src/decode/ffmpeg_decoder.cpp

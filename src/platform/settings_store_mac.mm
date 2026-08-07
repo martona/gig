@@ -136,6 +136,81 @@ public:
         return out;
     }
 
+    std::vector<std::string> listSubkeys(std::string_view subkey) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Flat-key emulation: a "subkey" is the unique first path segment of
+        // every defaults key under the prefix that still has a '/' after it
+        // (plain values directly under the prefix, e.g. connections/mtime,
+        // are values -- not subkeys). Secrets-only leaves don't exist: every
+        // connection writes plain values too, so defaults discovery suffices.
+        std::string prefix(subkey);
+        prefix += '/';
+        std::vector<std::string> out;
+        NSDictionary<NSString*, id>* all = [defaults() dictionaryRepresentation];
+        for (NSString* k in all) {
+            const std::string key(k.UTF8String);
+            if (key.rfind(prefix, 0) != 0) {
+                continue;
+            }
+            const std::string rest = key.substr(prefix.size());
+            const std::size_t slash = rest.find('/');
+            if (slash == std::string::npos) {
+                continue; // a value directly under the prefix, not a subkey
+            }
+            const std::string name = rest.substr(0, slash);
+            bool seen = false;
+            for (const std::string& existing : out) {
+                if (existing == name) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                out.push_back(name);
+            }
+        }
+        return out;
+    }
+
+    void removeSubtree(std::string_view subkey) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string prefix(subkey);
+        prefix += '/';
+        // Plain values live in defaults...
+        NSDictionary<NSString*, id>* all = [defaults() dictionaryRepresentation];
+        for (NSString* k in all) {
+            const std::string key(k.UTF8String);
+            if (key.rfind(prefix, 0) == 0) {
+                [defaults() removeObjectForKey:k];
+            }
+        }
+        // ...but secrets live ONLY in the Keychain (they never appear in the
+        // defaults dictionary), so sweep gig's service for accounts under the
+        // prefix as well -- else a deleted connection would orphan its
+        // password item.
+        NSMutableDictionary* query = [NSMutableDictionary dictionary];
+        query[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+        query[(__bridge id)kSecAttrService] = keychainService();
+        query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+        query[(__bridge id)kSecReturnAttributes] = @YES;
+        CFTypeRef found = nullptr;
+        if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &found) == errSecSuccess && found) {
+            NSArray* items = CFBridgingRelease(found);
+            for (NSDictionary* item in items) {
+                NSString* account = item[(__bridge id)kSecAttrAccount];
+                if (!account) {
+                    continue;
+                }
+                const std::string key(account.UTF8String);
+                if (key.rfind(prefix, 0) == 0) {
+                    keychainDelete(key);
+                }
+            }
+        }
+    }
+
 private:
     static NSUserDefaults* defaults() { return [NSUserDefaults standardUserDefaults]; }
 

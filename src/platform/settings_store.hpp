@@ -48,6 +48,15 @@ public:
     // Value names directly under `subkey` (e.g. "pins"), oldest-first is not
     // guaranteed. Empty if the subkey doesn't exist.
     virtual std::vector<std::string> listKeys(std::string_view subkey) const = 0;
+
+    // Names of the SUBKEYS directly under `subkey` (e.g. "connections" ->
+    // the per-connection leaf names). Values under `subkey` are not included.
+    // Empty if the subkey doesn't exist. Order is not guaranteed.
+    virtual std::vector<std::string> listSubkeys(std::string_view subkey) const = 0;
+
+    // Remove `subkey` and everything beneath it -- values, nested subkeys,
+    // and any secrets written under it. Missing is not an error.
+    virtual void removeSubtree(std::string_view subkey) = 0;
 };
 
 // Open the process-wide settings store for this platform (registry on Windows).
