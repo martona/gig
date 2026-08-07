@@ -73,6 +73,14 @@ std::string save(SettingsStore& store, const ConnectionInfo& info);
 // pointer if it referenced this id. Missing/empty id is a no-op.
 void remove(SettingsStore& store, const std::string& id);
 
+// Commit a STAGED edit of the whole list (a settings dialog's working copy):
+// saves new/changed entries, removes leaves absent from `items`, and points
+// the active pointer at items[activeIndex] (out-of-range, an empty list, or
+// an unstorable entry clears it). Unchanged entries are not rewritten, so
+// the subtree mtime moves only on real edits. Entries with an empty identity
+// URL are skipped (the dialogs block them). Returns the active id ("" = none).
+std::string applyStaged(SettingsStore& store, const std::vector<ConnectionInfo>& items, int activeIndex);
+
 // The active leaf id, "" = none. activeOrFallback additionally repairs a
 // missing/dangling pointer to the first stored connection (persisting the
 // repair) so a deleted-elsewhere active entry can't wedge startup.

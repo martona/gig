@@ -57,7 +57,8 @@ std::string getDlgTextUtf8(HWND dlg, int id)
 }
 
 struct DialogState {
-    AppConfig* config;
+    std::vector<ConnectionInfo>* connections; // staged working copy of the registry
+    int* activeIndex; // list selection = the entry the app connects to on OK
     int* labelMode; // 0 hide / 1 show-on-error-only / 2 always
     int* labelSize; // 0 normal / 1 large (1.5x) / 2 larger (2x)
     int* dimLevel;  // idle-dim luminance percent (10..100)
@@ -72,6 +73,126 @@ struct DialogState {
     std::string status;
     std::function<void(int)> onDimPreview; // live dim preview while the slider moves
 };
+
+// --- Connection list + per-connection edit sub-dialog -------------------------
+
+// Rebuild the listbox from the staged list ("host:port  (user)") and restore a
+// selection; Edit/Delete follow list emptiness.
+void refreshConnectionList(HWND dlg, const DialogState& state, int select)
+{
+    HWND list = GetDlgItem(dlg, IDC_CONN_LIST);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (const ConnectionInfo& conn : *state.connections) {
+        std::string label = conn.displayName();
+        if (!conn.user.empty()) {
+            label += "  (" + conn.user + ")";
+        }
+        const std::wstring wide = utf8ToWide(label);
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide.c_str()));
+    }
+    if (!state.connections->empty()) {
+        select = std::clamp(select, 0, static_cast<int>(state.connections->size()) - 1);
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(select), 0);
+    }
+    EnableWindow(GetDlgItem(dlg, IDC_CONN_EDIT), !state.connections->empty());
+    EnableWindow(GetDlgItem(dlg, IDC_CONN_DELETE), !state.connections->empty());
+}
+
+int selectedConnection(HWND dlg, const DialogState& state)
+{
+    const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_CONN_LIST), LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR || sel >= static_cast<LRESULT>(state.connections->size())) {
+        return -1;
+    }
+    return static_cast<int>(sel);
+}
+
+// Index of another staged entry with the same identity (URL) hash, or -1.
+// `exceptIndex` skips the entry being edited so it can keep its own URL.
+int duplicateIndex(const std::vector<ConnectionInfo>& items, const ConnectionInfo& item, int exceptIndex)
+{
+    const std::string id = item.id();
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (i != exceptIndex && items[static_cast<std::size_t>(i)].id() == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+INT_PTR CALLBACK connectionDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_INITDIALOG: {
+        auto* info = reinterpret_cast<ConnectionInfo*>(lParam);
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(info));
+        umbra::setDarkWndNotifySafe(dlg);
+        // The URL field maps to baseUrl only; the bare-stream `url` escape
+        // hatch has no UI (as before) and rides through untouched.
+        setDlgTextUtf8(dlg, IDC_BASE, info->baseUrl);
+        setDlgTextUtf8(dlg, IDC_USER, info->user);
+        setDlgTextUtf8(dlg, IDC_PASSWORD, info->password);
+        CheckDlgButton(dlg, IDC_INSECURE, info->insecure ? BST_CHECKED : BST_UNCHECKED);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDOK: {
+            auto* info = reinterpret_cast<ConnectionInfo*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (!info) {
+                EndDialog(dlg, IDCANCEL);
+                return TRUE;
+            }
+            ConnectionInfo edited = *info; // keeps the no-UI ride-alongs
+            edited.baseUrl = getDlgTextUtf8(dlg, IDC_BASE);
+            edited.user = getDlgTextUtf8(dlg, IDC_USER);
+            edited.password = getDlgTextUtf8(dlg, IDC_PASSWORD);
+            edited.insecure = IsDlgButtonChecked(dlg, IDC_INSECURE) == BST_CHECKED;
+            if (edited.identityUrl().empty()) {
+                umbra::DarkMessageBox(dlg, L"Enter the Frigate URL.", L"gig",
+                                      MB_OK | MB_ICONWARNING);
+                return TRUE; // stay open
+            }
+            *info = edited;
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        default:
+            break;
+        }
+        return FALSE;
+    default:
+        return FALSE;
+    }
+}
+
+bool runConnectionDialog(HWND parent, ConnectionInfo& info)
+{
+    return DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_CONNECTION),
+               parent, connectionDlgProc, reinterpret_cast<LPARAM>(&info)) == IDOK;
+}
+
+void editSelectedConnection(HWND dlg, const DialogState& state)
+{
+    const int sel = selectedConnection(dlg, state);
+    if (sel < 0) {
+        return;
+    }
+    ConnectionInfo working = (*state.connections)[static_cast<std::size_t>(sel)];
+    if (!runConnectionDialog(dlg, working)) {
+        return;
+    }
+    if (duplicateIndex(*state.connections, working, sel) >= 0) {
+        umbra::DarkMessageBox(dlg, L"A connection with this URL already exists.", L"gig",
+                              MB_OK | MB_ICONWARNING);
+        return;
+    }
+    (*state.connections)[static_cast<std::size_t>(sel)] = std::move(working);
+    refreshConnectionList(dlg, state, sel);
+}
 
 // Update the "NN%" label next to the dim slider.
 void setDimValueLabel(HWND dlg, int percent)
@@ -109,14 +230,11 @@ int dimDelayIndex(int seconds)
 // onboarding). TODO(onboarding-project): temporary; remove with IDC_FORGET.
 constexpr INT_PTR kDialogResultForget = 100;
 
-// Primary dialog: the base URL + credentials, plus the View group (what the
+// Primary dialog: the connection registry, plus the View group (what the
 // wall shows day-to-day belongs where the user can reach it).
 void populatePrimary(HWND dlg, const DialogState& state)
 {
-    const AppConfig& c = *state.config;
-    setDlgTextUtf8(dlg, IDC_BASE, c.baseUrl);
-    setDlgTextUtf8(dlg, IDC_USER, c.user);
-    setDlgTextUtf8(dlg, IDC_PASSWORD, c.password);
+    refreshConnectionList(dlg, state, state.activeIndex ? *state.activeIndex : 0);
 
     HWND viewCombo = GetDlgItem(dlg, IDC_VIEW_MODE);
     SendMessageW(viewCombo, CB_RESETCONTENT, 0, 0);
@@ -138,10 +256,10 @@ void populatePrimary(HWND dlg, const DialogState& state)
 
 void readBackPrimary(HWND dlg, const DialogState& state)
 {
-    AppConfig& c = *state.config;
-    c.baseUrl = getDlgTextUtf8(dlg, IDC_BASE);
-    c.user = getDlgTextUtf8(dlg, IDC_USER);
-    c.password = getDlgTextUtf8(dlg, IDC_PASSWORD);
+    if (state.activeIndex) {
+        // The list selection is the entry the app connects to after OK.
+        *state.activeIndex = selectedConnection(dlg, state);
+    }
 
     if (state.viewMode) {
         const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_VIEW_MODE), CB_GETCURSEL, 0, 0);
@@ -166,15 +284,13 @@ void readBackPrimary(HWND dlg, const DialogState& state)
     }
 }
 
-// Advanced dialog: the security escape hatch, label mode, and burn-in tuning.
-// (PEM CA/cert/key, login-refresh, poll-interval, software-decode and the
-// stream template lost their UI -- the settings-store keys are still honored,
-// they're just registry/defaults-level escape hatches now.)
+// Advanced dialog: label mode/size and burn-in tuning. (Insecure moved into
+// the per-connection sub-dialog -- cert verification is a property of the
+// server. PEM CA/cert/key, login-refresh, poll-interval, software-decode and
+// the stream template have no UI -- the settings-store keys are still
+// honored, they're just registry/defaults-level escape hatches.)
 void populateAdvanced(HWND dlg, const DialogState& state)
 {
-    const AppConfig& c = *state.config;
-    CheckDlgButton(dlg, IDC_INSECURE, c.tls.verifyServer ? BST_UNCHECKED : BST_CHECKED);
-
     HWND labelCombo = GetDlgItem(dlg, IDC_LABELMODE);
     SendMessageW(labelCombo, CB_RESETCONTENT, 0, 0);
     SendMessageW(labelCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Hide"));
@@ -214,8 +330,6 @@ void populateAdvanced(HWND dlg, const DialogState& state)
 
 void readBackAdvanced(HWND dlg, const DialogState& state)
 {
-    AppConfig& c = *state.config;
-    c.tls.verifyServer = IsDlgButtonChecked(dlg, IDC_INSECURE) != BST_CHECKED;
     if (state.labelMode) {
         const LRESULT sel = SendMessageW(GetDlgItem(dlg, IDC_LABELMODE), CB_GETCURSEL, 0, 0);
         if (sel != CB_ERR) {
@@ -302,10 +416,70 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
         if (!state->status.empty()) {
             setDlgTextUtf8(dlg, IDC_STATUS, state->status);
         }
+        if (state->connections->empty()) {
+            // First run (or everything deleted): drop straight into the Add
+            // form instead of presenting an empty list. Posted, not sent, so
+            // the primary window finishes appearing first.
+            PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDC_CONN_ADD, BN_CLICKED), 0);
+        }
         return TRUE;
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_CONN_LIST:
+            if (HIWORD(wParam) == LBN_DBLCLK) {
+                auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+                if (state) {
+                    editSelectedConnection(dlg, *state);
+                }
+            }
+            return TRUE;
+        case IDC_CONN_ADD: {
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (!state) {
+                return TRUE;
+            }
+            ConnectionInfo fresh;
+            if (runConnectionDialog(dlg, fresh)) {
+                if (duplicateIndex(*state->connections, fresh, -1) >= 0) {
+                    umbra::DarkMessageBox(dlg, L"A connection with this URL already exists.",
+                                          L"gig", MB_OK | MB_ICONWARNING);
+                } else {
+                    state->connections->push_back(std::move(fresh));
+                    refreshConnectionList(dlg, *state,
+                                          static_cast<int>(state->connections->size()) - 1);
+                }
+            }
+            return TRUE;
+        }
+        case IDC_CONN_EDIT: {
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (state) {
+                editSelectedConnection(dlg, *state);
+            }
+            return TRUE;
+        }
+        case IDC_CONN_DELETE: {
+            auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
+            if (!state) {
+                return TRUE;
+            }
+            const int sel = selectedConnection(dlg, *state);
+            if (sel < 0) {
+                return TRUE;
+            }
+            // Confirm even though the edit is staged (Cancel would undo it):
+            // one habitual OK after a stray Delete would drop saved credentials.
+            const std::wstring prompt = L"Delete \""
+                + utf8ToWide((*state->connections)[static_cast<std::size_t>(sel)].displayName())
+                + L"\"?\n\nIts saved credentials will be removed.";
+            if (umbra::DarkMessageBox(dlg, prompt.c_str(), L"gig",
+                                      MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+                state->connections->erase(state->connections->begin() + sel);
+                refreshConnectionList(dlg, *state, sel);
+            }
+            return TRUE;
+        }
         case IDC_ADVANCED: {
             auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA));
             if (state) {
@@ -351,7 +525,8 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 
 } // namespace
 
-bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
+bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, int& activeIndex,
+                        int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
                         bool& showBoxes, bool& keepHiddenStreams, bool& hideOffline,
@@ -363,10 +538,12 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
     const INITCOMMONCONTROLSEX icc { sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
-    // Edit a working copy so a Cancel in either the primary or the nested advanced
-    // dialog leaves the caller's config untouched; commit only on primary OK.
+    // Edit working copies so a Cancel in either the primary or the nested advanced
+    // dialog leaves the caller's values untouched (connection adds/edits/deletes
+    // included); commit only on primary OK.
     forgetRequested = false;
-    AppConfig working = config;
+    std::vector<ConnectionInfo> workingConnections = connections;
+    int workingActive = activeIndex;
     int workingLabelMode = labelMode;
     int workingLabelSize = labelSize;
     int workingDimLevel = dimLevelPercent;
@@ -378,7 +555,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
     bool workingShowBoxes = showBoxes;
     bool workingKeepHidden = keepHiddenStreams;
     bool workingHideOffline = hideOffline;
-    DialogState state { &working, &workingLabelMode, &workingLabelSize,
+    DialogState state { &workingConnections, &workingActive,
+                        &workingLabelMode, &workingLabelSize,
                         &workingDimLevel, &workingDimDelay, &workingOrbitStep,
                         &workingViewMode, &workingMotionActivity, &workingActiveOnly,
                         &workingShowBoxes, &workingKeepHidden, &workingHideOffline,
@@ -393,7 +571,8 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
     if (result != IDOK) {
         return false;
     }
-    config = working;
+    connections = std::move(workingConnections);
+    activeIndex = workingActive;
     labelMode = workingLabelMode;
     labelSize = workingLabelSize;
     dimLevelPercent = workingDimLevel;

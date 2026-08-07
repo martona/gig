@@ -1,19 +1,27 @@
 #pragma once
 
-#include "app/app_session.h" // AppConfig
+#include "app/connections.h" // ConnectionInfo
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace gig {
 
 // Modal native settings dialog (Win32 dark dialog on Windows; AppKit window on
-// macOS). Pre-fills from `config` and `labelMode` (0 hide / 1
-// show-on-error-only / 2 always); on OK writes the edited values back into them and
-// returns true. Cancel returns false and leaves them untouched. `parent` is the
-// owner window (HWND on Windows; ignored on macOS). `statusMessage` (e.g. a prior
-// login/connection error) is shown to the user; pass empty for none. The caller
-// persists to the settings store and applies the result.
+// macOS). `parent` is the owner window (HWND on Windows; ignored on macOS).
+// `statusMessage` (e.g. a prior login/connection error) is shown to the user;
+// pass empty for none.
+//
+// The Connection group edits a STAGED copy of the whole multi-server registry:
+// `connections` + `activeIndex` (which entry the app should connect to; the
+// list selection on OK). Add/Edit/Delete only mutate the staged list; OK
+// returns true with the edited list/index written back -- the caller commits
+// via connections::applyStaged, persists the globals, and reconnects. Cancel
+// returns false and leaves everything untouched, adds/edits/deletes included.
+// Per-connection fields (URL, user, password, insecure) are edited in a
+// sub-dialog; an entry without a URL, or a duplicate of another entry's URL,
+// is rejected there.
 //
 // `forgetRequested` (TODO(onboarding-project): temporary) is set when the user
 // confirmed the "Forget..." button: the dialog closes returning false (no values
@@ -30,7 +38,8 @@ namespace gig {
 // down + reconnect on demand, saving power at the cost of a 1-2s wake);
 // `hideOffline` drops cameras with no incoming video from the wall entirely
 // (a wandering status line appears when every camera is down).
-bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
+bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, int& activeIndex,
+                        int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
                         bool& showBoxes, bool& keepHiddenStreams, bool& hideOffline,

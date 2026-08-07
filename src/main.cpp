@@ -288,33 +288,8 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode la
     store.setBool("boxes", showBoxes);
     store.setBool("stream-hidden", keepHiddenStreams);
     store.setBool("hide-offline", hideOffline);
-    // Connection fields go to the ACTIVE entry under connections/. A URL edit
-    // changes the leaf's identity hash, so the superseded leaf is dropped and
-    // the active pointer retargeted; clearing the URL entirely deletes the
-    // entry (the pre-multi-connection "empty config" semantics).
-    {
-        const std::string oldId = gig::connections::activeId(store);
-        gig::ConnectionInfo info;
-        info.baseUrl = s.baseUrl;
-        info.url = s.url;
-        info.user = s.user;
-        info.password = s.password;
-        info.insecure = !s.tls.verifyServer;
-        info.caFile = s.tls.caFile;
-        info.certFile = s.tls.certFile;
-        info.keyFile = s.tls.keyFile;
-        info.loginRefreshSeconds = s.loginRefreshSeconds;
-        if (info.identityUrl().empty()) {
-            gig::connections::remove(store, oldId);
-            gig::connections::setActiveId(store, std::string());
-        } else {
-            const std::string newId = gig::connections::save(store, info);
-            if (!oldId.empty() && oldId != newId) {
-                gig::connections::remove(store, oldId);
-            }
-            gig::connections::setActiveId(store, newId);
-        }
-    }
+    // Connection fields are NOT written here: the registry under connections/
+    // is committed by the settings flow via gig::connections::applyStaged.
     store.setBool("software", s.softwareDecode);
     store.setInt("cam-labels", static_cast<int>(labelMode));
     store.setInt("poll-interval", s.pollIntervalSeconds);
@@ -744,7 +719,24 @@ int main(int argc, char** argv)
         // Open the settings dialog, persist, and reconnect with the new config.
         // Shared by F2, the toolbar's Settings button, and the status panel's CTAs.
         auto openSettings = [&]() {
-            gig::AppConfig edited = cfg.session;
+            // Staged working copy of the connection registry; committed
+            // wholesale on OK (Cancel discards adds/edits/deletes alike).
+            std::vector<gig::ConnectionInfo> conns;
+            int activeIndex = -1;
+            {
+                const std::string active = gig::connections::activeId(*settings);
+                for (const std::string& id : gig::connections::ids(*settings)) {
+                    if (auto conn = gig::connections::load(*settings, id)) {
+                        if (id == active) {
+                            activeIndex = static_cast<int>(conns.size());
+                        }
+                        conns.push_back(std::move(*conn));
+                    }
+                }
+                if (activeIndex < 0 && !conns.empty()) {
+                    activeIndex = 0;
+                }
+            }
             int labelMode = static_cast<int>(cfg.labelMode);
             int labelSize = cfg.labelSize;
             int dimLevel = cfg.dimLevelPercent;
@@ -765,11 +757,12 @@ int main(int argc, char** argv)
                 renderer->setDimFactor(currentDim);
                 renderer->render(session.snapshotFrames());
             };
-            if (gig::showSettingsDialog(mainHwnd, edited, labelMode, labelSize, dimLevel, dimDelay,
-                                        orbitStep, viewMode, motionActivity, activeOnly,
-                                        showBoxes, keepHiddenStreams, hideOffline, forget,
-                                        lastConnectError, onDimPreview)) {
-                saveConfig(*settings, edited, static_cast<LabelMode>(labelMode), labelSize,
+            if (gig::showSettingsDialog(mainHwnd, conns, activeIndex, labelMode, labelSize,
+                                        dimLevel, dimDelay, orbitStep, viewMode, motionActivity,
+                                        activeOnly, showBoxes, keepHiddenStreams, hideOffline,
+                                        forget, lastConnectError, onDimPreview)) {
+                gig::connections::applyStaged(*settings, conns, activeIndex);
+                saveConfig(*settings, cfg.session, static_cast<LabelMode>(labelMode), labelSize,
                            dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
                            showBoxes, keepHiddenStreams, hideOffline);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate

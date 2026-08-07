@@ -121,6 +121,54 @@ std::string save(SettingsStore& store, const ConnectionInfo& info)
     return id;
 }
 
+namespace {
+
+// Field-wise equality of the STORED representation (everything save() writes),
+// so applyStaged can skip rewriting -- and mtime-dirtying -- unchanged leaves.
+bool sameStored(const ConnectionInfo& a, const ConnectionInfo& b)
+{
+    return a.baseUrl == b.baseUrl && a.url == b.url && a.user == b.user
+        && a.password == b.password && a.insecure == b.insecure
+        && a.caFile == b.caFile && a.certFile == b.certFile && a.keyFile == b.keyFile
+        && a.loginRefreshSeconds == b.loginRefreshSeconds;
+}
+
+} // namespace
+
+std::string applyStaged(SettingsStore& store, const std::vector<ConnectionInfo>& items, int activeIndex)
+{
+    std::vector<std::string> stagedIds;
+    stagedIds.reserve(items.size());
+    for (const ConnectionInfo& item : items) {
+        if (!item.identityUrl().empty()) {
+            stagedIds.push_back(item.id());
+        }
+    }
+    // Deletions first: leaves that vanished from the staged list.
+    for (const std::string& id : ids(store)) {
+        if (std::find(stagedIds.begin(), stagedIds.end(), id) == stagedIds.end()) {
+            remove(store, id);
+        }
+    }
+    // Then additions/edits; unchanged entries are left alone.
+    for (const ConnectionInfo& item : items) {
+        if (item.identityUrl().empty()) {
+            continue;
+        }
+        const std::optional<ConnectionInfo> existing = load(store, item.id());
+        if (!existing || !sameStored(*existing, item)) {
+            save(store, item);
+        }
+    }
+    std::string active;
+    if (activeIndex >= 0 && activeIndex < static_cast<int>(items.size())
+        && !items[static_cast<std::size_t>(activeIndex)].identityUrl().empty()) {
+        active = items[static_cast<std::size_t>(activeIndex)].id();
+    }
+    setActiveId(store, active);
+    return active;
+}
+
 void remove(SettingsStore& store, const std::string& id)
 {
     if (id.empty()) {

@@ -29,3 +29,10 @@
 #define IDC_SHOW_BOXES      2030
 #define IDC_LABELSIZE       2031
 #define IDC_HIDE_OFFLINE    2032
+// Multi-connection registry: the primary dialog's list + the per-connection
+// edit sub-dialog (which reuses IDC_BASE/IDC_USER/IDC_PASSWORD/IDC_INSECURE).
+#define IDD_CONNECTION      2033
+#define IDC_CONN_LIST       2034
+#define IDC_CONN_ADD        2035
+#define IDC_CONN_EDIT       2036
+#define IDC_CONN_DELETE     2037

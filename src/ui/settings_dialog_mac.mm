@@ -1,7 +1,5 @@
 #include "ui/settings_dialog.h"
 
-#include "app/app_session.h"
-
 #include <algorithm>
 #include <functional>
 #include <string>
@@ -194,10 +192,12 @@ NSTextField* addField(NSView* card, CGFloat rowCenterY, CGFloat width, const std
 // --- Advanced window ----------------------------------------------------------
 // Security / Display / Screen protection. Edits the working values in place on
 // its own OK only (its Cancel leaves them untouched, like the Windows dialog).
-// PEM CA/cert/key, login-refresh, poll-interval and software-decode have no UI
-// anymore -- the settings-store keys are still honored (registry/defaults-level
-// escape hatches); they ride through the working config unchanged.
-void showAdvancedDialog(AppConfig& config, int& labelMode, int& labelSize,
+// `insecure` is the ACTIVE connection's flag (per-connection now; on Windows it
+// moved into the connection sub-dialog -- here it stays until the chunk-4 card
+// rework). PEM CA/cert/key, login-refresh, poll-interval and software-decode
+// have no UI anymore -- the settings-store keys are still honored
+// (registry/defaults-level escape hatches); they ride through unchanged.
+void showAdvancedDialog(bool& insecure, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -219,7 +219,7 @@ void showAdvancedDialog(AppConfig& config, int& labelMode, int& labelSize,
         NSView* security = addCard(content, top, 56);
         addRowText(security, 28, @"Skip server certificate verification",
                    @"Insecure — disables pinning. For testing only.", kSwitchW + 8);
-        NSSwitch* insecureSwitch = addSwitch(security, 28, !config.tls.verifyServer);
+        NSSwitch* insecureSwitch = addSwitch(security, 28, insecure);
 
         addCardHeader(content, top, @"Display");
         NSView* display = addCard(content, top, 96);
@@ -283,7 +283,7 @@ void showAdvancedDialog(AppConfig& config, int& labelMode, int& labelSize,
             return;
         }
 
-        config.tls.verifyServer = (insecureSwitch.state != NSControlStateValueOn);
+        insecure = (insecureSwitch.state == NSControlStateValueOn);
         labelMode = static_cast<int>(labelPopup.indexOfSelectedItem);
         labelSize = std::clamp(static_cast<int>(sizePopup.indexOfSelectedItem), 0, 2);
         dimLevelPercent = std::clamp(static_cast<int>(std::lround(dimSlider.doubleValue)), 10, 100);
@@ -299,7 +299,8 @@ void showAdvancedDialog(AppConfig& config, int& labelMode, int& labelSize,
 
 } // namespace
 
-bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
+bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, int& activeIndex,
+                        int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
                         bool& showBoxes, bool& keepHiddenStreams, bool& hideOffline,
@@ -312,7 +313,17 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
     @autoreleasepool {
         // Edit working copies so Cancel (in either window) leaves the caller's
         // values untouched; commit only on the primary OK.
-        AppConfig working = config;
+        //
+        // TRANSITIONAL until the chunk-4 card rework: this window still edits
+        // ONE connection -- the active entry (or a brand-new first entry) --
+        // with the same fields as before. Add/Delete/switching arrive with
+        // the list UI; the staged-list contract is already honored (the
+        // vector is only written back on OK).
+        ConnectionInfo active;
+        if (activeIndex >= 0 && activeIndex < static_cast<int>(connections.size())) {
+            active = connections[static_cast<std::size_t>(activeIndex)];
+        }
+        bool workingInsecure = active.insecure;
         int workingLabelMode = labelMode;
         int workingLabelSize = labelSize;
         int workingDimLevel = dimLevelPercent;
@@ -331,16 +342,16 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
 
         CGFloat top = height - kMargin;
 
-        // Connection card: label-left / field-right rows.
+        // Connection card: label-left / field-right rows (the active entry).
         NSView* connection = addCard(content, top, 128);
         addRowText(connection, 106, @"Frigate URL", nil, 380);
-        NSTextField* baseField = addField(connection, 106, 370, working.baseUrl, NO);
+        NSTextField* baseField = addField(connection, 106, 370, active.baseUrl, NO);
         addSeparator(connection, 84);
         addRowText(connection, 63, @"User", nil, 380);
-        NSTextField* userField = addField(connection, 63, 370, working.user, NO);
+        NSTextField* userField = addField(connection, 63, 370, active.user, NO);
         addSeparator(connection, 42);
         addRowText(connection, 21, @"Password", nil, 380);
-        NSTextField* passField = addField(connection, 21, 370, working.password, YES);
+        NSTextField* passField = addField(connection, 21, 370, active.password, YES);
 
         // The View card lives HERE, not in Advanced: what the wall shows
         // day-to-day belongs where the user can reach it.
@@ -396,14 +407,14 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
         cancelButton.keyEquivalent = @"\033";
         [content addSubview:cancelButton];
 
-        AppConfig* workingPtr = &working;
+        bool* insecurePtr = &workingInsecure;
         int* labelPtr = &workingLabelMode;
         int* labelSizePtr = &workingLabelSize;
         int* dimLevelPtr = &workingDimLevel;
         int* dimDelayPtr = &workingDimDelay;
         int* orbitStepPtr = &workingOrbitStep;
         controller.onAdvanced = ^{
-            showAdvancedDialog(*workingPtr, *labelPtr, *labelSizePtr, *dimLevelPtr, *dimDelayPtr,
+            showAdvancedDialog(*insecurePtr, *labelPtr, *labelSizePtr, *dimLevelPtr, *dimDelayPtr,
                                *orbitStepPtr, onDimPreview);
         };
 
@@ -420,10 +431,22 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
             return false;
         }
 
-        working.baseUrl = fromField(baseField);
-        working.user = fromField(userField);
-        working.password = fromField(passField);
-        config = working;
+        active.baseUrl = fromField(baseField);
+        active.user = fromField(userField);
+        active.password = fromField(passField);
+        active.insecure = workingInsecure;
+        if (!active.identityUrl().empty()) {
+            if (activeIndex >= 0 && activeIndex < static_cast<int>(connections.size())) {
+                connections[static_cast<std::size_t>(activeIndex)] = active;
+            } else {
+                connections.push_back(active);
+                activeIndex = static_cast<int>(connections.size()) - 1;
+            }
+        } else if (activeIndex >= 0 && activeIndex < static_cast<int>(connections.size())) {
+            // URL cleared: the old "empty config" semantics -- drop the entry.
+            connections.erase(connections.begin() + activeIndex);
+            activeIndex = connections.empty() ? -1 : 0;
+        }
         labelMode = workingLabelMode;
         labelSize = workingLabelSize;
         dimLevelPercent = workingDimLevel;
