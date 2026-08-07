@@ -297,7 +297,11 @@ fileprivate struct ConnectionDraft: Identifiable, Equatable {
     var insecure = false
     var storedID = ""
 
-    init() {}
+    init() {
+        // Pre-fill the scheme for a fresh entry: appendable, unlike the
+        // ghost placeholder (the editor treats a bare scheme as "no URL").
+        baseURL = "https://"
+    }
 
     init(from conn: Connection) {
         baseURL = conn.baseURL
@@ -363,7 +367,8 @@ fileprivate struct ConnectionEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        if draft.baseURL.trimmingCharacters(in: .whitespaces).isEmpty {
+                        let trimmed = draft.baseURL.trimmingCharacters(in: .whitespaces)
+                        if trimmed.isEmpty || trimmed == "https://" || trimmed == "http://" {
                             problem = "Enter the Frigate URL."
                         } else if isDuplicate(draft) {
                             problem = "A connection with this URL already exists."

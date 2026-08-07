@@ -342,13 +342,19 @@ struct ContentView: View {
         }
         .onAppear(perform: autoStart)
         .onReceive(ticker) { _ in
-            engine.refresh()
-            refreshServerChoices() // label-only store reads; keeps the chooser in sync
-            // A sheet open (Log/Settings) is active use even without a video tap:
-            // keep the idle-dim + chromeless timers from firing under it.
+            // A sheet open (Log/Settings) is active use even without a video
+            // tap: keep the idle-dim + chromeless timers from firing under
+            // it -- and do NOTHING else. @Published fires on every set (equal
+            // values included), so a refresh here re-renders the presenting
+            // view, the sheet content rebuilds with it, and UIKit dismisses
+            // the text fields' edit-menu callout -- the "paste dies the
+            // moment I reach for it" bug. Status catches up on dismiss.
             if showSettings || showLog {
                 VideoHost.shared().noteInteraction()
+                return
             }
+            engine.refresh()
+            refreshServerChoices() // label-only store reads; keeps the chooser in sync
         }
         .onChange(of: engine.connected) { _ in updateIdleTimer() }
         .onChange(of: engine.connecting) { connecting in
@@ -589,8 +595,15 @@ struct ContentView: View {
     // secret reads), and the switch itself -- set the active pointer, then
     // rebuild the session exactly like a settings save.
     private func refreshServerChoices() {
-        serverLabels = SettingsBridge.connectionLabels()
-        serverActive = Int(SettingsBridge.activeConnectionIndex())
+        // Assign only on change: gratuitous @State writes are re-render churn.
+        let labels = SettingsBridge.connectionLabels()
+        if labels != serverLabels {
+            serverLabels = labels
+        }
+        let active = Int(SettingsBridge.activeConnectionIndex())
+        if active != serverActive {
+            serverActive = active
+        }
     }
 
     private func switchServer(to index: Int) {
