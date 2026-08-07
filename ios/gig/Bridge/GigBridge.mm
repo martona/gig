@@ -19,6 +19,7 @@
 #import "GigBridgeInternal.h"
 
 #include "app/app_session.h"
+#include "app/connections.h"
 #include "log.hpp"
 #include "net/cert_pin.hpp"
 #include "net/cookie_jar.hpp"
@@ -55,21 +56,41 @@ std::string toStd(NSString *_Nullable text)
     return utf8 != nullptr ? std::string(utf8) : std::string();
 }
 
-// Build an AppConfig from the store. Mirrors main.cpp's loadConfig derivation for
-// the keys the iOS scaffold exposes; keep in sync (or factor loadConfig into a
-// shared helper) when the UI grows. The single-stream `url` / template / decode
-// knobs keep their defaults here.
-gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
+NSString *toNs(const std::string &value)
+{
+    return toNs(std::make_optional(value));
+}
+
+// Every store open goes through here. TEMPORARY migration shim: a
+// pre-multi-connection store's root credentials move into the connections/
+// subtree on first touch (idempotent no-op afterwards; same shared code as
+// desktop startup).
+std::shared_ptr<gig::SettingsStore> openStoreMigrated()
+{
+    auto store = gig::openSettingsStore();
+    gig::connections::migrateFromRoot(*store);
+    return store;
+}
+
+// Build an AppConfig from the store. Mirrors main.cpp's loadConfig derivation:
+// connection fields come from the ACTIVE entry under connections/ (nothing
+// usable = everything empty), the rest are root/global values. Non-const:
+// resolving the active connection may repair a dangling pointer.
+gig::AppConfig loadAppConfig(gig::SettingsStore &store)
 {
     gig::AppConfig s;
-    s.baseUrl = store.getString("base").value_or(std::string());
-    s.user = store.getString("user").value_or(std::string());
-    s.password = store.getString("password", /*encrypted=*/true).value_or(std::string());
-    s.loginRefreshSeconds = static_cast<int>(store.getInt("login-refresh").value_or(600));
-    s.tls.caFile = store.getString("ca").value_or(std::string());
-    s.tls.certFile = store.getString("cert").value_or(std::string());
-    s.tls.keyFile = store.getString("key").value_or(std::string());
-    s.tls.verifyServer = !store.getBool("insecure").value_or(false);
+    const std::string active = gig::connections::activeOrFallback(store);
+    if (const auto conn = gig::connections::load(store, active)) {
+        s.baseUrl = conn->baseUrl;
+        s.url = conn->url;
+        s.user = conn->user;
+        s.password = conn->password;
+        s.loginRefreshSeconds = conn->loginRefreshSeconds;
+        s.tls.caFile = conn->caFile;
+        s.tls.certFile = conn->certFile;
+        s.tls.keyFile = conn->keyFile;
+        s.tls.verifyServer = !conn->insecure;
+    }
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
     s.tls.rwTimeoutUs = store.getInt("rw-timeout-us").value_or(10'000'000);
     s.tls.useSystemStore = s.tls.caFile.empty() && s.tls.certFile.empty() && s.tls.keyFile.empty();
@@ -86,6 +107,36 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 #pragma mark - Settings
 
+@implementation GIGConnection
+
+- (instancetype)init
+{
+    if ((self = [super init])) {
+        _baseURL = @"";
+        _user = @"";
+        _password = @"";
+        _storedID = @"";
+    }
+    return self;
+}
+
+- (NSString *)listLabel
+{
+    gig::ConnectionInfo info;
+    info.baseUrl = toStd(self.baseURL);
+    info.user = toStd(self.user);
+    return toNs(info.listLabel());
+}
+
+- (NSString *)identityKey
+{
+    gig::ConnectionInfo info;
+    info.baseUrl = toStd(self.baseURL);
+    return toNs(info.id());
+}
+
+@end
+
 @implementation GIGSettings
 @end
 
@@ -93,13 +144,8 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 + (GIGSettings *)loadSettings
 {
-    auto store = gig::openSettingsStore();
+    auto store = openStoreMigrated();
     GIGSettings *settings = [GIGSettings new];
-    settings.baseURL = toNs(store->getString("base", false));
-    settings.user = toNs(store->getString("user", false));
-    settings.password = toNs(store->getString("password", true));
-    settings.caPath = toNs(store->getString("ca", false));
-    settings.insecure = store->getBool("insecure").value_or(false);
     settings.dimLevelPercent = static_cast<NSInteger>(store->getInt("dim-level").value_or(60));
     settings.dimDelaySeconds = static_cast<NSInteger>(store->getInt("dim-delay").value_or(600));
     settings.orbitStepSeconds = static_cast<NSInteger>(store->getInt("orbit-step").value_or(40));
@@ -116,24 +162,9 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
 
 + (void)save:(GIGSettings *)settings
 {
-    auto store = gig::openSettingsStore();
-    store->setString("base", toStd(settings.baseURL), false);
-    store->setString("user", toStd(settings.user), false);
-
-    const std::string password = toStd(settings.password);
-    if (password.empty()) {
-        store->remove("password");
-    } else {
-        store->setString("password", password, /*encrypt=*/true);
-    }
-
-    const std::string caPath = toStd(settings.caPath);
-    if (caPath.empty()) {
-        store->remove("ca");
-    } else {
-        store->setString("ca", caPath, false);
-    }
-    store->setBool("insecure", settings.insecure);
+    auto store = openStoreMigrated();
+    // Connection fields are NOT written here: the connections/ registry is
+    // committed by saveConnections:activeIndex:.
     store->setInt("dim-level", std::clamp<NSInteger>(settings.dimLevelPercent, 10, 100));
     store->setInt("dim-delay", std::max<NSInteger>(settings.dimDelaySeconds, 0));
     store->setInt("orbit-step", std::clamp<NSInteger>(settings.orbitStepSeconds, 1, 600));
@@ -144,6 +175,91 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setInt("label-size", std::clamp<NSInteger>(settings.labelSize, 0, 2));
     store->setBool("stream-hidden", settings.keepHiddenStreams);
     store->setBool("hide-offline", settings.hideOfflineCameras);
+}
+
+#pragma mark Multi-connection registry
+
++ (BOOL)isConfigured
+{
+    auto store = openStoreMigrated();
+    return gig::connections::loadableIds(*store).empty() ? NO : YES;
+}
+
++ (NSArray<GIGConnection *> *)connections
+{
+    auto store = openStoreMigrated();
+    NSMutableArray<GIGConnection *> *out = [NSMutableArray array];
+    for (const std::string &id : gig::connections::loadableIds(*store)) {
+        const auto info = gig::connections::load(*store, id);
+        if (!info) {
+            continue;
+        }
+        GIGConnection *conn = [GIGConnection new];
+        conn.baseURL = toNs(info->baseUrl);
+        conn.user = toNs(info->user);
+        conn.password = toNs(info->password);
+        conn.insecure = info->insecure ? YES : NO;
+        conn.storedID = toNs(id);
+        [out addObject:conn];
+    }
+    return out;
+}
+
++ (NSArray<NSString *> *)connectionLabels
+{
+    auto store = openStoreMigrated();
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (const std::string &label : gig::connections::listLabels(*store)) {
+        [out addObject:toNs(label)];
+    }
+    return out;
+}
+
++ (NSInteger)activeConnectionIndex
+{
+    auto store = openStoreMigrated();
+    const std::string active = gig::connections::activeOrFallback(*store);
+    const std::vector<std::string> ids = gig::connections::loadableIds(*store);
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] == active) {
+            return static_cast<NSInteger>(i);
+        }
+    }
+    return -1;
+}
+
++ (void)setActiveConnectionIndex:(NSInteger)index
+{
+    auto store = openStoreMigrated();
+    const std::vector<std::string> ids = gig::connections::loadableIds(*store);
+    if (index >= 0 && index < static_cast<NSInteger>(ids.size())) {
+        gig::connections::setActiveId(*store, ids[static_cast<std::size_t>(index)]);
+    }
+}
+
++ (void)saveConnections:(NSArray<GIGConnection *> *)items activeIndex:(NSInteger)activeIndex
+{
+    auto store = openStoreMigrated();
+    std::vector<gig::ConnectionInfo> staged;
+    staged.reserve(items.count);
+    for (GIGConnection *conn in items) {
+        gig::ConnectionInfo info;
+        // Start from the leaf the entry came from so the no-UI ride-alongs
+        // (bare-stream url, PEM paths, login-refresh) survive edits -- incl.
+        // a URL edit, which reparents onto a new identity leaf.
+        const std::string storedId = toStd(conn.storedID);
+        if (!storedId.empty()) {
+            if (const auto existing = gig::connections::load(*store, storedId)) {
+                info = *existing;
+            }
+        }
+        info.baseUrl = toStd(conn.baseURL);
+        info.user = toStd(conn.user);
+        info.password = toStd(conn.password);
+        info.insecure = conn.insecure ? true : false;
+        staged.push_back(std::move(info));
+    }
+    gig::connections::applyStaged(*store, staged, static_cast<int>(activeIndex));
 }
 
 // TODO(onboarding-project): temporary; remove with the Forget Settings UI.
@@ -240,7 +356,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     }
 
     if (!_store) {
-        _store = gig::openSettingsStore();
+        _store = openStoreMigrated();
     }
 
     // App-lifetime singletons, created once (desktop parity): the pin store keeps

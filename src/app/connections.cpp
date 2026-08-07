@@ -36,6 +36,17 @@ void bumpMtime(SettingsStore& store)
     store.setInt("connections/mtime", static_cast<std::int64_t>(std::time(nullptr)));
 }
 
+// The secret-free subset of a leaf: enough for identity + labels without a
+// Keychain/DPAPI round-trip per entry.
+ConnectionInfo liteInfo(const SettingsStore& store, const std::string& id)
+{
+    ConnectionInfo info;
+    info.baseUrl = store.getString(leafPath(id, "base")).value_or(std::string());
+    info.url = store.getString(leafPath(id, "url")).value_or(std::string());
+    info.user = store.getString(leafPath(id, "user")).value_or(std::string());
+    return info;
+}
+
 } // namespace
 
 std::string ConnectionInfo::identityUrl() const
@@ -85,6 +96,29 @@ std::vector<std::string> ids(const SettingsStore& store)
 {
     std::vector<std::string> out = store.listSubkeys("connections");
     std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> loadableIds(const SettingsStore& store)
+{
+    std::vector<std::string> out;
+    for (const std::string& id : ids(store)) {
+        if (!liteInfo(store, id).identityUrl().empty()) {
+            out.push_back(id);
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> listLabels(const SettingsStore& store)
+{
+    std::vector<std::string> out;
+    for (const std::string& id : ids(store)) {
+        const ConnectionInfo info = liteInfo(store, id);
+        if (!info.identityUrl().empty()) {
+            out.push_back(info.listLabel());
+        }
+    }
     return out;
 }
 

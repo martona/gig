@@ -281,6 +281,11 @@ struct ContentView: View {
     @State private var showLog = false
     @State private var didAutoStart = false
 
+    // Toolbar server chooser: labels + active index from the connections
+    // registry (label-only reads, no Keychain). Hidden below 2 entries.
+    @State private var serverLabels: [String] = []
+    @State private var serverActive = -1
+
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     // Chromeless (burn-in): the video host reports when the idle timer elapsed;
@@ -304,7 +309,8 @@ struct ContentView: View {
             SettingsView(dimPreview: { factor in VideoHost.shared().setDimPreview(factor) },
                          onSave: {
                 applyDimSettings()
-                if !SettingsBridge.current().baseURL.isEmpty {
+                refreshServerChoices()
+                if SettingsBridge.isConfigured() {
                     engine.applySettingsAndReconnect()
                 }
             }, onForget: {
@@ -337,6 +343,7 @@ struct ContentView: View {
         .onAppear(perform: autoStart)
         .onReceive(ticker) { _ in
             engine.refresh()
+            refreshServerChoices() // label-only store reads; keeps the chooser in sync
             // A sheet open (Log/Settings) is active use even without a video tap:
             // keep the idle-dim + chromeless timers from firing under it.
             if showSettings || showLog {
@@ -385,6 +392,25 @@ struct ContentView: View {
             statusText
                 .font(.footnote.monospacedDigit())
             Spacer()
+            if serverLabels.count >= 2 {
+                Menu {
+                    ForEach(Array(serverLabels.enumerated()), id: \.offset) { index, label in
+                        Button {
+                            switchServer(to: index)
+                        } label: {
+                            if index == serverActive {
+                                Label(label, systemImage: "checkmark")
+                            } else {
+                                Text(label)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "server.rack")
+                }
+                .disabled(engine.connecting)
+                .accessibilityLabel("Switch server")
+            }
             Button {
                 showSettings = true
             } label: {
@@ -502,8 +528,9 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
             } else if !engine.connected {
-                if SettingsBridge.current().baseURL.isEmpty {
-                    // Config was emptied (e.g. saved blank): back to welcome, statelessly.
+                if !SettingsBridge.isConfigured() {
+                    // Registry emptied (all connections deleted): back to
+                    // welcome, statelessly.
                     WelcomeView { showSettings = true }
                 } else {
                     ErrorStateView(
@@ -549,12 +576,28 @@ struct ContentView: View {
         guard !didAutoStart else { return }
         didAutoStart = true
         applyDimSettings()
-        if SettingsBridge.current().baseURL.isEmpty {
+        refreshServerChoices()
+        if !SettingsBridge.isConfigured() {
             phase = .welcome // first run: welcome -> permission -> settings
         } else {
             phase = .ready
             engine.connect()
         }
+    }
+
+    // Toolbar server chooser support: labels + active index (cheap, no
+    // secret reads), and the switch itself -- set the active pointer, then
+    // rebuild the session exactly like a settings save.
+    private func refreshServerChoices() {
+        serverLabels = SettingsBridge.connectionLabels()
+        serverActive = Int(SettingsBridge.activeConnectionIndex())
+    }
+
+    private func switchServer(to index: Int) {
+        guard index != serverActive else { return }
+        SettingsBridge.setActiveConnectionIndex(index)
+        refreshServerChoices()
+        engine.applySettingsAndReconnect()
     }
 
     // Push the persisted burn-in + view-mode config into the video host.

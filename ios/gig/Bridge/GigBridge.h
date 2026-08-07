@@ -19,16 +19,29 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Settings
 
-NS_SWIFT_NAME(Settings)
-@interface GIGSettings : NSObject
+// One saved Frigate server (the connections/ registry in the settings store).
+// The editable fields are what the UI exposes; `storedID` is the leaf the
+// entry was loaded from ("" for a brand-new one) -- carry it through edits so
+// saveConnections can preserve the no-UI ride-alongs (bare-stream url, PEM
+// paths, login-refresh) and reparent a URL edit onto its new identity leaf.
+NS_SWIFT_NAME(Connection)
+@interface GIGConnection : NSObject
 @property (nonatomic, copy) NSString *baseURL;
 @property (nonatomic, copy) NSString *user;
 @property (nonatomic, copy) NSString *password;
-// TLS: leave caPath empty + insecure=NO to use the OS trust store — but note iOS
-// can't enumerate system roots, so for a self-signed Frigate set a PEM `ca`, or
-// turn on `insecure` for testing. (Cert pinning also applies once wired to the UI.)
-@property (nonatomic, copy) NSString *caPath;
+// Skip server-cert verification for THIS server (testing; disables pinning).
 @property (nonatomic, assign) BOOL insecure;
+@property (nonatomic, copy) NSString *storedID;
+// "host:port  (user)" -- the row/chooser label (identical on every platform).
+@property (nonatomic, copy, readonly) NSString *listLabel;
+// URL-derived identity hash; equal keys = the same server (duplicate checks).
+@property (nonatomic, copy, readonly) NSString *identityKey;
+@end
+
+// Global (per-device) settings. Connection fields moved into GIGConnection /
+// the connections registry below.
+NS_SWIFT_NAME(Settings)
+@interface GIGSettings : NSObject
 // Burn-in idle dim: ramp video to this luminance (10..100 %) after `dimDelaySeconds`
 // of no interaction (0 = never dim).
 @property (nonatomic, assign) NSInteger dimLevelPercent;
@@ -68,6 +81,27 @@ NS_SWIFT_NAME(SettingsBridge)
 // NSObject's inherited class func load(). Hence loadSettings / current().
 + (GIGSettings *)loadSettings NS_SWIFT_NAME(current());
 + (void)save:(GIGSettings *)settings NS_SWIFT_NAME(save(_:));
+
+// --- Multi-connection registry (connections/ in the settings store) ---
+// All index-taking/returning methods use ONE canonical order: the loadable
+// entries sorted by leaf id (what `connections`/`connectionLabels` return).
+
+// Any usable connection saved? (Gates welcome/onboarding, replaces the old
+// "baseURL is empty" check.)
++ (BOOL)isConfigured;
+// Full entries, secrets included -- call when OPENING the settings UI, not
+// per-frame (each entry is a Keychain read).
++ (NSArray<GIGConnection *> *)connections;
+// Labels only, no secret reads -- cheap enough for periodic UI refreshes.
++ (NSArray<NSString *> *)connectionLabels;
+// The active entry's index (-1 = none); the getter repairs a dangling pointer.
++ (NSInteger)activeConnectionIndex;
++ (void)setActiveConnectionIndex:(NSInteger)index;
+// Commit a STAGED edit of the whole list (the settings sheet's working copy):
+// saves new/changed entries, deletes vanished ones, points the active pointer
+// at items[activeIndex]. Mirrors the desktop dialogs' commit-on-Save.
++ (void)saveConnections:(NSArray<GIGConnection *> *)items
+            activeIndex:(NSInteger)activeIndex NS_SWIFT_NAME(saveConnections(_:activeIndex:));
 
 // TODO(onboarding-project): temporary Forget Settings affordance; remove when
 // done. Wipes EVERYTHING (config, cert pins, secrets) so onboarding restarts.

@@ -65,6 +65,16 @@ namespace connections {
 // Stored leaf ids, sorted (arbitrary but stable order for lists/choosers).
 std::vector<std::string> ids(const SettingsStore& store);
 
+// Ids of LOADABLE entries (identity URL present), sorted -- the canonical
+// order every list/chooser surface indexes into; skips ghost leaves without
+// touching secrets.
+std::vector<std::string> loadableIds(const SettingsStore& store);
+
+// listLabel() of every loadable entry, aligned with loadableIds() -- built
+// without reading secrets, so per-tick/per-frame UI refreshes cost no
+// Keychain (or DPAPI) round-trips.
+std::vector<std::string> listLabels(const SettingsStore& store);
+
 // Load one leaf; nullopt for a missing/ghost entry (no base AND no url).
 std::optional<ConnectionInfo> load(const SettingsStore& store, const std::string& id);
 

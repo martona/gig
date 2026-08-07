@@ -21,11 +21,13 @@ struct SettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    @State private var baseURL = ""
-    @State private var user = ""
-    @State private var password = ""
-    @State private var caPath = ""
-    @State private var insecure = false
+    // Staged working copy of the connection registry; committed wholesale on
+    // Save (Cancel discards adds/edits/deletes alike, like the desktop
+    // dialogs). `activeID` tracks the checked row by draft identity so it
+    // survives deletes/reorders; mapped to an index at save time.
+    @State private var connections: [ConnectionDraft] = []
+    @State private var activeID: UUID?
+    @State private var editorDraft: ConnectionDraft?
     @State private var dimLevel: Double = 60
     @State private var dimDelay = 600
     @State private var orbitStep: Double = 40
@@ -48,23 +50,42 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Frigate") {
-                    TextField("https://frigate.lan:8971/", text: $baseURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    TextField("user", text: $user)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("password", text: $password)
-                }
-
                 Section {
-                    Toggle("Insecure (skip verification)", isOn: $insecure)
+                    ForEach(connections) { item in
+                        Button {
+                            activeID = item.id
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: item.id == activeID ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(item.id == activeID ? Color.accentColor : Color.secondary)
+                                Text(item.label)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Button {
+                                    editorDraft = item
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                deleteConnection(item)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                    Button {
+                        editorDraft = ConnectionDraft()
+                    } label: {
+                        Label("Add Connection…", systemImage: "plus")
+                    }
                 } header: {
-                    Text("TLS")
+                    Text("Connections")
                 } footer: {
-                    Text("Certificates trusted by iOS work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
+                    Text("gig connects to the checked server. Tap a row to switch, the pencil to edit; swipe to delete. Changes apply on Save.")
                 }
 
                 Section {
@@ -173,6 +194,32 @@ struct SettingsView: View {
             }
             .onAppear(perform: load)
             .onDisappear { dimPreview(-1) } // resume idle-driven dimming
+            .sheet(item: $editorDraft) { draft in
+                ConnectionEditorView(
+                    draft: draft,
+                    isDuplicate: { edited in
+                        connections.contains {
+                            $0.id != edited.id && $0.identityKey == edited.identityKey
+                        }
+                    },
+                    onCommit: { edited in
+                        if let index = connections.firstIndex(where: { $0.id == edited.id }) {
+                            connections[index] = edited
+                        } else {
+                            connections.append(edited)
+                        }
+                        if activeID == nil {
+                            activeID = edited.id
+                        }
+                    })
+            }
+        }
+    }
+
+    private func deleteConnection(_ item: ConnectionDraft) {
+        connections.removeAll { $0.id == item.id }
+        if activeID == item.id {
+            activeID = connections.first?.id
         }
     }
 
@@ -189,12 +236,18 @@ struct SettingsView: View {
     }
 
     private func load() {
+        connections = SettingsBridge.connections().map { ConnectionDraft(from: $0) }
+        let active = Int(SettingsBridge.activeConnectionIndex())
+        activeID = (active >= 0 && active < connections.count)
+            ? connections[active].id
+            : connections.first?.id
+        if connections.isEmpty {
+            // First run (or everything deleted): drop straight into the Add
+            // editor instead of presenting an empty list.
+            editorDraft = ConnectionDraft()
+        }
+
         let s = SettingsBridge.current()
-        baseURL = s.baseURL
-        user = s.user
-        password = s.password
-        caPath = s.caPath
-        insecure = s.insecure
         dimLevel = Double(s.dimLevelPercent)
         dimDelay = s.dimDelaySeconds
         orbitStep = Double(s.orbitStepSeconds)
@@ -208,12 +261,17 @@ struct SettingsView: View {
     }
 
     private func save() {
+        var items: [Connection] = []
+        var activeIndex = -1
+        for draft in connections {
+            if draft.id == activeID {
+                activeIndex = items.count
+            }
+            items.append(draft.asConnection())
+        }
+        SettingsBridge.saveConnections(items, activeIndex: activeIndex)
+
         let s = Settings()
-        s.baseURL = baseURL
-        s.user = user
-        s.password = password
-        s.caPath = caPath
-        s.insecure = insecure
         s.dimLevelPercent = Int(dimLevel)
         s.dimDelaySeconds = dimDelay
         s.orbitStepSeconds = Int(orbitStep)
@@ -225,6 +283,106 @@ struct SettingsView: View {
         s.keepHiddenStreams = keepHiddenStreams
         s.hideOfflineCameras = hideOfflineCameras
         SettingsBridge.save(s)
+    }
+}
+
+// The settings sheet's staged working copy of one saved server. `storedID`
+// rides through from the bridge so a commit can preserve the entry's no-UI
+// ride-alongs (and reparent a URL edit); "" for a freshly added draft.
+fileprivate struct ConnectionDraft: Identifiable, Equatable {
+    let id = UUID()
+    var baseURL = ""
+    var user = ""
+    var password = ""
+    var insecure = false
+    var storedID = ""
+
+    init() {}
+
+    init(from conn: Connection) {
+        baseURL = conn.baseURL
+        user = conn.user
+        password = conn.password
+        insecure = conn.insecure
+        storedID = conn.storedID
+    }
+
+    func asConnection() -> Connection {
+        let conn = Connection()
+        conn.baseURL = baseURL
+        conn.user = user
+        conn.password = password
+        conn.insecure = insecure
+        conn.storedID = storedID
+        return conn
+    }
+
+    // Label/identity come from the shared C++ (host:port formatting and the
+    // URL hash), via a scratch bridge object -- no duplicated URL parsing.
+    var label: String { asConnection().listLabel }
+    var identityKey: String { asConnection().identityKey }
+}
+
+// Per-connection editor sheet: URL, credentials + the per-server insecure
+// toggle. Validates a non-empty URL and rejects a duplicate of another
+// entry's URL (identity is URL-only); commits into the PARENT's staged list
+// only -- nothing persists until the settings sheet's Save.
+fileprivate struct ConnectionEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var draft: ConnectionDraft
+    let isDuplicate: (ConnectionDraft) -> Bool
+    let onCommit: (ConnectionDraft) -> Void
+    @State private var problem: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Frigate") {
+                    TextField("https://frigate.lan:8971/", text: $draft.baseURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    TextField("user", text: $draft.user)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("password", text: $draft.password)
+                }
+                Section {
+                    Toggle("Insecure (skip verification)", isOn: $draft.insecure)
+                } header: {
+                    Text("TLS")
+                } footer: {
+                    Text("Certificates trusted by iOS work automatically. For a self-signed Frigate, just connect — gig offers to pin the certificate.")
+                }
+            }
+            .navigationTitle("Connection")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        if draft.baseURL.trimmingCharacters(in: .whitespaces).isEmpty {
+                            problem = "Enter the Frigate URL."
+                        } else if isDuplicate(draft) {
+                            problem = "A connection with this URL already exists."
+                        } else {
+                            onCommit(draft)
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .alert("Can’t save", isPresented: Binding(
+                get: { problem != nil },
+                set: { if !$0 { problem = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(problem ?? "")
+            }
+        }
     }
 }
 

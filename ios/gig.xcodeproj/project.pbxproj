@@ -26,6 +26,7 @@
 		BBBB0000000000000000BB11 /* metal_scene.mm in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF11 /* metal_scene.mm */; };
 		BBBB0000000000000000BB12 /* frigate_events.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF12 /* frigate_events.cpp */; };
 		BBBB0000000000000000BB13 /* activity_gate.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF13 /* activity_gate.cpp */; };
+		BBBB0000000000000000BB14 /* connections.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FFFF0000000000000000FF14 /* connections.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +50,7 @@
 		FFFF0000000000000000FF11 /* metal_scene.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = metal_scene.mm; path = ../src/render/metal_scene.mm; sourceTree = SOURCE_ROOT; };
 		FFFF0000000000000000FF12 /* frigate_events.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = frigate_events.cpp; path = ../src/net/frigate_events.cpp; sourceTree = SOURCE_ROOT; };
 		FFFF0000000000000000FF13 /* activity_gate.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = activity_gate.cpp; path = ../src/app/activity_gate.cpp; sourceTree = SOURCE_ROOT; };
+		FFFF0000000000000000FF14 /* connections.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = connections.cpp; path = ../src/app/connections.cpp; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -109,6 +111,7 @@
 				FFFF0000000000000000FF11 /* metal_scene.mm */,
 				FFFF0000000000000000FF12 /* frigate_events.cpp */,
 				FFFF0000000000000000FF13 /* activity_gate.cpp */,
+				FFFF0000000000000000FF14 /* connections.cpp */,
 			);
 			name = core;
 			sourceTree = "<group>";
@@ -206,6 +209,7 @@
 				BBBB0000000000000000BB11 /* metal_scene.mm in Sources */,
 				BBBB0000000000000000BB12 /* frigate_events.cpp in Sources */,
 				BBBB0000000000000000BB13 /* activity_gate.cpp in Sources */,
+				BBBB0000000000000000BB14 /* connections.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
