@@ -52,6 +52,8 @@ public:
     void stop();
 
     // Latest frame per camera in stable camera order (null = no current frame).
+    // A frame whose stream has since died is dropped after kStaleFrameSeconds
+    // (see reconcile()), so a dead camera never keeps showing a frozen frame.
     std::vector<std::shared_ptr<VideoFrame>> snapshotFrames() const;
 
     std::size_t cameraCount() const { return slots_.size(); }
@@ -93,6 +95,11 @@ private:
     enum class Liveness { Unknown, Online, Offline };
     static const char* livenessName(Liveness liveness);
 
+    // How long a slot may go without delivering a frame before its last frame
+    // is considered stale and dropped (several decoder retry cycles, so a
+    // transient reconnect never blanks a tile).
+    static constexpr std::chrono::seconds kStaleFrameSeconds { 10 };
+
     struct CameraSlot {
         CameraStream info;
         std::unique_ptr<FfmpegDecoder> decoder;
@@ -123,6 +130,9 @@ private:
 
     mutable std::mutex frameMutex_;
     std::vector<std::shared_ptr<VideoFrame>> latestFrames_; // guarded by frameMutex_
+    // When each slot last delivered a frame (guarded by frameMutex_), for the
+    // stale-frame sweep in reconcile().
+    std::vector<std::chrono::steady_clock::time_point> lastFrameAt_;
 
     std::unique_ptr<HttpClient> healthClient_;
 

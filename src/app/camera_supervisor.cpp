@@ -29,6 +29,7 @@ CameraSupervisor::CameraSupervisor(
     , sessionCache_(std::move(sessionCache))
     , cookieJar_(std::move(cookieJar))
     , latestFrames_(cameras.size())
+    , lastFrameAt_(cameras.size())
 {
     // One TLS holder for every video connection: a single client-cert load and
     // cross-connection session resumption, sharing the control plane's session
@@ -175,6 +176,23 @@ void CameraSupervisor::reconcile()
         }
     }
 
+    // Drop frozen frames from dead streams. A stream that dies while its
+    // decoder keeps retrying (e.g. Frigate itself was stopped -- the health
+    // poll fails too, so the liveness logic below never reclassifies the slot)
+    // would otherwise show its last frame forever, reading as a healthy camera
+    // next to torn-down slots that honestly show their reconnect state. Live
+    // video delivers frames continuously, so "no frame for kStaleFrameSeconds"
+    // only ever means the stream is genuinely gone.
+    {
+        const auto nowTime = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(frameMutex_);
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            if (latestFrames_[i] && nowTime - lastFrameAt_[i] > kStaleFrameSeconds) {
+                latestFrames_[i].reset();
+            }
+        }
+    }
+
     bool anyDisabled = false;
     for (std::size_t i = 0; i < slots_.size(); ++i) {
         anyDisabled = anyDisabled || !slotEnabled_[i].load(std::memory_order_relaxed);
@@ -314,6 +332,7 @@ void CameraSupervisor::startDecoder(std::size_t index)
             auto shared = std::make_shared<VideoFrame>(std::move(frame));
             std::lock_guard<std::mutex> lock(frameMutex_);
             latestFrames_[index] = std::move(shared);
+            lastFrameAt_[index] = std::chrono::steady_clock::now();
         },
         config_.softwareDecode,
         config_.startupStagger * static_cast<int>(index),
