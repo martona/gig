@@ -54,6 +54,10 @@ struct ConnectionInfo {
     // Chooser/list label: "host" or "host:port" (default ports elided),
     // falling back to the raw URL when it doesn't parse.
     std::string displayName() const;
+
+    // displayName plus the user ("host:port  (viewer)") -- the row text every
+    // list/chooser surface shows, so they all disambiguate the same way.
+    std::string listLabel() const;
 };
 
 namespace connections {

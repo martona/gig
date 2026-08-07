@@ -550,6 +550,29 @@ int main(int argc, char** argv)
             }
         };
 
+        // Toolbar server chooser: labels pushed to the renderer plus the id
+        // list its pick indices refer to (kept in lock-step). Refreshed
+        // whenever the registry or the active pointer changes.
+        std::vector<std::string> connectionIds;
+        auto refreshConnectionChoices = [&]() {
+            const std::string active = gig::connections::activeId(*settings);
+            std::vector<std::string> validIds;
+            std::vector<std::string> labels;
+            int activeIdx = -1;
+            for (const std::string& id : gig::connections::ids(*settings)) {
+                if (const auto conn = gig::connections::load(*settings, id)) {
+                    if (id == active) {
+                        activeIdx = static_cast<int>(validIds.size());
+                    }
+                    validIds.push_back(id);
+                    labels.push_back(conn->listLabel());
+                }
+            }
+            connectionIds = std::move(validIds);
+            renderer->setConnectionChoices(labels, activeIdx);
+        };
+        refreshConnectionChoices();
+
         gig::ApplyResult applied;
         if (!configEmpty()) {
             applied = session.applyConfig(cfg.session);
@@ -766,6 +789,7 @@ int main(int argc, char** argv)
                            dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
                            showBoxes, keepHiddenStreams, hideOffline);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
+                refreshConnectionChoices();
                 renderer->setLabelMode(cfg.labelMode);
                 renderer->setLabelScale(labelScaleFor(cfg.labelSize));
                 applyAndReport(cfg.session);
@@ -788,6 +812,7 @@ int main(int argc, char** argv)
                 sessionCache->clear();
                 pinStore.reset();
                 cfg = loadConfig(*settings);
+                refreshConnectionChoices(); // registry wiped: chooser disappears
                 renderer->setFocusedTile(-1);
                 renderer->setHoveredTile(-1);
                 renderer->setCameraLabels(session.cameraLabels());
@@ -1240,6 +1265,22 @@ int main(int argc, char** argv)
 #endif
                 default:
                     break;
+                }
+
+                // Toolbar server chooser: switch the active connection and
+                // rebuild the session against it.
+                const int pick = renderer->takeConnectionPick();
+                if (pick >= 0 && pick < static_cast<int>(connectionIds.size())
+                    && connectionIds[static_cast<std::size_t>(pick)]
+                        != gig::connections::activeId(*settings)) {
+                    gig::connections::setActiveId(
+                        *settings, connectionIds[static_cast<std::size_t>(pick)]);
+                    cfg = loadConfig(*settings);
+                    gig::logInfo() << "switch connection (toolbar): "
+                                   << (cfg.session.baseUrl.empty() ? cfg.session.url
+                                                                   : cfg.session.baseUrl);
+                    applyAndReport(cfg.session);
+                    refreshConnectionChoices();
                 }
             }
 

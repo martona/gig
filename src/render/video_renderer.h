@@ -133,6 +133,18 @@ public:
     // Returns + clears the toolbar button pressed since the last call.
     virtual ToolbarAction takeToolbarAction() { return ToolbarAction::None; }
 
+    // Multi-connection chooser in the toolbar: the saved servers' labels and
+    // which one is active. The renderer shows the chooser only with 2+
+    // choices; a picked entry is reported (and cleared) by takeConnectionPick
+    // as an index into the pushed labels, -1 = none. The caller switches the
+    // active connection and pushes a fresh list.
+    virtual void setConnectionChoices(const std::vector<std::string>& labels, int activeIndex)
+    {
+        (void)labels;
+        (void)activeIndex;
+    }
+    virtual int takeConnectionPick() { return -1; }
+
     // Vertical space (logical points) the toolbar reserves above the grid, so the
     // run loop's click hit-testing matches the rendered layout. 0 in focus view.
     virtual float reservedTopLogical() const { return 0.0f; }

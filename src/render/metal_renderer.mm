@@ -82,6 +82,7 @@ public:
         iconReconnect_ = makeSymbolTexture(@"arrow.clockwise");
         iconLog_ = makeSymbolTexture(@"list.bullet");
         iconFullscreen_ = makeSymbolTexture(@"arrow.up.left.and.arrow.down.right");
+        iconServer_ = makeSymbolTexture(@"server.rack");
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -219,6 +220,19 @@ public:
 
     void setLogViewVisible(bool visible) override { logViewVisible_ = visible; }
     bool logViewVisible() const override { return logViewVisible_; }
+
+    void setConnectionChoices(const std::vector<std::string>& labels, int activeIndex) override
+    {
+        connectionNames_ = labels;
+        connectionActive_ = activeIndex;
+    }
+
+    int takeConnectionPick() override
+    {
+        const int pick = pendingConnectionPick_;
+        pendingConnectionPick_ = -1;
+        return pick;
+    }
 
     ToolbarAction takeToolbarAction() override
     {
@@ -491,12 +505,44 @@ private:
 
             // Right-aligned buttons: SF Symbol glyphs when available, else text.
             const ImGuiStyle& style = ImGui::GetStyle();
-            const bool icons = iconSettings_ && iconReconnect_ && iconLog_ && iconFullscreen_;
+            const bool showChooser = connectionNames_.size() >= 2;
+            // The chooser only joins the icon row if its own glyph rasterized;
+            // otherwise the whole row falls back to text (keeps the row uniform).
+            const bool icons = iconSettings_ && iconReconnect_ && iconLog_ && iconFullscreen_
+                && (!showChooser || iconServer_);
+            // Server chooser popup body, shared by both branches: the saved
+            // connections with the active one checked; a pick is handed to the
+            // run loop, which switches + reconnects.
+            const auto chooserPopup = [&] {
+                if (ImGui::BeginPopup("##connchooser")) {
+                    for (int i = 0; i < static_cast<int>(connectionNames_.size()); ++i) {
+                        const bool current = i == connectionActive_;
+                        // ##i: two servers can share a label (same host:port,
+                        // e.g. http vs https) -- IDs must stay unique.
+                        const std::string item =
+                            connectionNames_[static_cast<std::size_t>(i)] + "##conn" + std::to_string(i);
+                        if (ImGui::MenuItem(item.c_str(), nullptr, current) && !current) {
+                            pendingConnectionPick_ = i;
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+            };
             if (icons) {
                 const float ext = ImGui::GetFontSize();
                 const ImVec2 isz(ext, ext);
                 const float btnW = ext + style.FramePadding.x * 2.0f;
-                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - (btnW * 4.0f + style.ItemSpacing.x * 3.0f));
+                const float count = showChooser ? 5.0f : 4.0f;
+                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x
+                                - (btnW * count + style.ItemSpacing.x * (count - 1.0f)));
+                if (showChooser) {
+                    if (ImGui::ImageButton("##server", (ImTextureID)(uintptr_t)(__bridge void*)iconServer_, isz)) {
+                        ImGui::OpenPopup("##connchooser");
+                    }
+                    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Switch server"); }
+                    chooserPopup();
+                    ImGui::SameLine();
+                }
                 if (ImGui::ImageButton("##settings", (ImTextureID)(uintptr_t)(__bridge void*)iconSettings_, isz)) {
                     pendingToolbarAction_ = ToolbarAction::Settings;
                 }
@@ -519,8 +565,15 @@ private:
             } else {
                 const auto buttonWidth = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
                 const float buttonsWidth = buttonWidth("Settings") + buttonWidth("Reconnect") + buttonWidth("Log")
-                    + buttonWidth("Fullscreen") + style.ItemSpacing.x * 3.0f;
+                    + buttonWidth("Fullscreen") + style.ItemSpacing.x * 3.0f
+                    + (showChooser ? buttonWidth("Server") + style.ItemSpacing.x : 0.0f);
                 ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
+                if (showChooser) {
+                    if (ImGui::Button("Server")) { ImGui::OpenPopup("##connchooser"); }
+                    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Switch server"); }
+                    chooserPopup();
+                    ImGui::SameLine();
+                }
                 if (ImGui::Button("Settings")) { pendingToolbarAction_ = ToolbarAction::Settings; }
                 if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Settings (F2)"); }
                 ImGui::SameLine();
@@ -666,9 +719,12 @@ private:
         gig::logInfo() << "display scale changed: " << scale_;
 
         // SF Symbol toolbar glyphs are rasterized at device px; re-rasterize them.
+        // (Fullscreen was missing here before -- it kept its old-DPI raster.)
         iconSettings_ = makeSymbolTexture(@"gearshape");
         iconReconnect_ = makeSymbolTexture(@"arrow.clockwise");
         iconLog_ = makeSymbolTexture(@"list.bullet");
+        iconFullscreen_ = makeSymbolTexture(@"arrow.up.left.and.arrow.down.right");
+        iconServer_ = makeSymbolTexture(@"server.rack");
 
         if (imguiReady_) {
             // imgui (1.92+) owns font-texture lifecycle: rebuilding the atlas
@@ -688,6 +744,7 @@ private:
     id<MTLTexture> iconReconnect_ = nil;
     id<MTLTexture> iconLog_ = nil;
     id<MTLTexture> iconFullscreen_ = nil;
+    id<MTLTexture> iconServer_ = nil;
     float dimFactor_ = 1.0f;
     float orbitStepSeconds_ = 40.0f;
 
@@ -707,6 +764,12 @@ private:
     bool logViewVisible_ = false;
     std::vector<std::string> logScratch_;
     ToolbarAction pendingToolbarAction_ = ToolbarAction::None;
+    // Toolbar server chooser: labels + active index pushed by the run loop
+    // (2+ shows the button); a picked index is handed back through
+    // takeConnectionPick.
+    std::vector<std::string> connectionNames_;
+    int connectionActive_ = -1;
+    int pendingConnectionPick_ = -1;
     float toolbarIdle_ = 0.0f;
 };
 

@@ -730,6 +730,19 @@ public:
     void setLogViewVisible(bool visible) override { logViewVisible_ = visible; }
     bool logViewVisible() const override { return logViewVisible_; }
 
+    void setConnectionChoices(const std::vector<std::string>& labels, int activeIndex) override
+    {
+        connectionNames_ = labels;
+        connectionActive_ = activeIndex;
+    }
+
+    int takeConnectionPick() override
+    {
+        const int pick = pendingConnectionPick_;
+        pendingConnectionPick_ = -1;
+        return pick;
+    }
+
     ToolbarAction takeToolbarAction() override
     {
         const ToolbarAction action = pendingToolbarAction_;
@@ -1836,11 +1849,12 @@ private:
         }
 
         // Segoe MDL2 Assets glyphs (UTF-8): gear U+E713, refresh U+E72C, list U+EA37,
-        // fullscreen U+E740.
+        // fullscreen U+E740, network U+E968 (the server chooser).
         const char* const settingsLabel = iconFontLoaded_ ? "\xEE\x9C\x93" : "Settings";
         const char* const reconnectLabel = iconFontLoaded_ ? "\xEE\x9C\xAC" : "Reconnect";
         const char* const logLabel = iconFontLoaded_ ? "\xEE\xA8\xB7" : "Log";
         const char* const fullscreenLabel = iconFontLoaded_ ? "\xEE\x9D\x80" : "Fullscreen";
+        const char* const serverLabel = iconFontLoaded_ ? "\xEE\xA5\xA8" : "Server";
 
         const float height = toolbarHeightPx();
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1899,9 +1913,36 @@ private:
             const auto buttonWidth = [&](const char* label) {
                 return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f;
             };
+            const bool showChooser = connectionNames_.size() >= 2;
             const float buttonsWidth = buttonWidth(settingsLabel) + buttonWidth(reconnectLabel)
-                + buttonWidth(logLabel) + buttonWidth(fullscreenLabel) + style.ItemSpacing.x * 3.0f;
+                + buttonWidth(logLabel) + buttonWidth(fullscreenLabel) + style.ItemSpacing.x * 3.0f
+                + (showChooser ? buttonWidth(serverLabel) + style.ItemSpacing.x : 0.0f);
             ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
+            if (showChooser) {
+                // Server chooser: a dropdown of the saved connections with the
+                // active one checked; a pick is handed to the run loop, which
+                // switches + reconnects. Hidden with fewer than 2 entries.
+                if (ImGui::Button(serverLabel)) {
+                    ImGui::OpenPopup("##connchooser");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Switch server");
+                }
+                if (ImGui::BeginPopup("##connchooser")) {
+                    for (int i = 0; i < static_cast<int>(connectionNames_.size()); ++i) {
+                        const bool current = i == connectionActive_;
+                        // ##i: two servers can share a label (same host:port,
+                        // e.g. http vs https) -- IDs must stay unique.
+                        const std::string item =
+                            connectionNames_[static_cast<std::size_t>(i)] + "##conn" + std::to_string(i);
+                        if (ImGui::MenuItem(item.c_str(), nullptr, current) && !current) {
+                            pendingConnectionPick_ = i;
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::SameLine();
+            }
             if (ImGui::Button(settingsLabel)) {
                 pendingToolbarAction_ = ToolbarAction::Settings;
             }
@@ -2117,6 +2158,12 @@ private:
     bool dpiDirty_ = false;
     bool iconFontLoaded_ = false;
     ToolbarAction pendingToolbarAction_ = ToolbarAction::None;
+    // Toolbar server chooser: labels + active index pushed by the run loop
+    // (2+ shows the button); a picked index is handed back through
+    // takeConnectionPick.
+    std::vector<std::string> connectionNames_;
+    int connectionActive_ = -1;
+    int pendingConnectionPick_ = -1;
     float toolbarIdle_ = 0.0f;
 
     // On-demand rendering: animating_ reports (to the run loop, via isAnimating())

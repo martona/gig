@@ -70,6 +70,15 @@ std::string ConnectionInfo::displayName() const
     }
 }
 
+std::string ConnectionInfo::listLabel() const
+{
+    std::string label = displayName();
+    if (!user.empty()) {
+        label += "  (" + user + ")";
+    }
+    return label;
+}
+
 namespace connections {
 
 std::vector<std::string> ids(const SettingsStore& store)

@@ -83,11 +83,7 @@ void refreshConnectionList(HWND dlg, const DialogState& state, int select)
     HWND list = GetDlgItem(dlg, IDC_CONN_LIST);
     SendMessageW(list, LB_RESETCONTENT, 0, 0);
     for (const ConnectionInfo& conn : *state.connections) {
-        std::string label = conn.displayName();
-        if (!conn.user.empty()) {
-            label += "  (" + conn.user + ")";
-        }
-        const std::wstring wide = utf8ToWide(label);
+        const std::wstring wide = utf8ToWide(conn.listLabel());
         SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide.c_str()));
     }
     if (!state.connections->empty()) {
