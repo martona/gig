@@ -98,6 +98,10 @@
     // "Hide offline cameras" stays disarmed for a grace period after every
     // session (re)build so first connects don't read as an offline wall.
     CFTimeInterval _sessionStartedAt;
+    // When the all-cameras-offline condition became true (0 = not currently
+    // true); the offline line shows only after it has held for
+    // kOfflineClaimSeconds (the peek's reconnect burst must not flash it).
+    CFTimeInterval _allOfflineSince;
     std::vector<int> _visibleTiles;
     CFTimeInterval _lastActivityWake;
     NSString *_quietText;
@@ -413,9 +417,27 @@
                             || !snap.frames[static_cast<std::size_t>(cam)];
                     }),
                 renderVisible.end());
-            allCamerasOffline = std::none_of(snap.frames.begin(), snap.frames.end(),
-                [](const std::shared_ptr<VideoFrame> &f) { return f != nullptr; });
+            // "N/N offline" is claimed only when the gate wanted EVERY camera
+            // shown (show-all mode, the peek, or the feed-down fallback --
+            // which is how a dead Frigate still surfaces it in activity
+            // mode). A quiet activity wall tears its streams down on purpose;
+            // those frameless cameras aren't offline, and the quiet clock
+            // line must keep the screen.
+            allCamerasOffline = activity.visible.size() == snap.frames.size()
+                && std::none_of(snap.frames.begin(), snap.frames.end(),
+                    [](const std::shared_ptr<VideoFrame> &f) { return f != nullptr; });
         }
+        // Debounce the claim: the activity peek re-enables torn-down streams
+        // with the whole wall momentarily frameless -- a reconnect burst
+        // clears the condition in a couple of seconds, so the line only
+        // shows once it has held for the full window.
+        if (!allCamerasOffline) {
+            _allOfflineSince = 0;
+        } else if (_allOfflineSince == 0) {
+            _allOfflineSince = CACurrentMediaTime();
+        }
+        const bool claimAllOffline = allCamerasOffline
+            && CACurrentMediaTime() - _allOfflineSince >= gig::kOfflineClaimSeconds;
 
         if (renderVisible != _visibleTiles) {
             // Keep focus on the same CAMERA across the reshuffle; drop it if
@@ -464,7 +486,7 @@
         NSString *quietText = @"";
         CGPoint quietPos = CGPointZero;
         std::string line;
-        if (allCamerasOffline) {
+        if (claimAllOffline) {
             // Every camera hidden by "hide offline cameras": the wall is
             // deliberately empty -- say why. Outranks the quiet line ("all
             // quiet" would be misleading when nothing is decoding).

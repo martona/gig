@@ -74,6 +74,13 @@ inline std::string quietStatusLine(const std::tm& local, int camerasDown = 0)
 // ~10s, so post-grace "no frame" is a truthful offline signal.)
 constexpr double kHideOfflineGraceSeconds = 20.0;
 
+// How long the all-cameras-offline condition must hold CONTINUOUSLY before
+// the offline line is shown. The activity peek re-enables torn-down streams
+// with the whole wall momentarily frameless -- a reconnect burst clears the
+// condition within a couple of seconds, while a genuinely dead server keeps
+// it true forever, so the debounce separates the two.
+constexpr double kOfflineClaimSeconds = 10.0;
+
 // The empty-wall line when EVERY camera is offline (the only all-hidden case
 // that gets a caption; a partially-hidden wall just shows the live tiles).
 // Placed with quietStatusPlacement, exactly like the all-quiet line.

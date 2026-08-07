@@ -531,6 +531,10 @@ int main(int argc, char** argv)
         // "Hide offline cameras" stays disarmed for a grace period after every
         // session (re)build so first connects don't read as an offline wall.
         auto sessionStartedAt = std::chrono::steady_clock::now();
+        // When the all-cameras-offline condition became true (zero = not
+        // currently true); the offline line shows only after it has held for
+        // kOfflineClaimSeconds (the peek's reconnect burst must not flash it).
+        auto allOfflineSince = std::chrono::steady_clock::time_point {};
         auto restartActivityFeed = [&]() {
             activityFeed.reset();
             activityGate.reset();
@@ -926,10 +930,29 @@ int main(int argc, char** argv)
                                 || !gateFrames[static_cast<std::size_t>(cam)];
                         }),
                     renderVisible.end());
+                // "N/N offline" is claimed only when the gate wanted EVERY
+                // camera shown (show-all mode, the peek, or the feed-down
+                // fallback -- which is how a dead Frigate still surfaces it in
+                // activity mode). A quiet activity wall tears its streams down
+                // on purpose; those frameless cameras aren't offline, and the
+                // quiet clock line must keep the screen.
                 allCamerasOffline = !gateFrames.empty()
+                    && activity.visible.size() == gateFrames.size()
                     && std::none_of(gateFrames.begin(), gateFrames.end(),
                                     [](const std::shared_ptr<VideoFrame>& f) { return f != nullptr; });
             }
+            // Debounce the claim: the activity peek re-enables torn-down
+            // streams with the whole wall momentarily frameless -- a
+            // reconnect burst clears the condition in a couple of seconds,
+            // so the line only shows once it has held for the full window.
+            if (!allCamerasOffline) {
+                allOfflineSince = {};
+            } else if (allOfflineSince.time_since_epoch().count() == 0) {
+                allOfflineSince = frameStart;
+            }
+            const bool claimAllOffline = allCamerasOffline
+                && std::chrono::duration<double>(frameStart - allOfflineSince).count()
+                    >= gig::kOfflineClaimSeconds;
 
             const bool visibleChanged = renderVisible != visibleTiles;
             if (visibleChanged) {
@@ -1082,7 +1105,7 @@ int main(int argc, char** argv)
                 stats.healthDegraded = cp.schemaError;
                 stats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
                 applyScreenState(stats);
-                if (allCamerasOffline) {
+                if (claimAllOffline) {
                     // Every camera hidden by "hide offline cameras": the wall
                     // is deliberately empty -- say why (wandering, like the
                     // quiet line, so it can't burn in). Outranks the quiet
