@@ -73,6 +73,23 @@ public:
     // subset changes), where animating would zoom the wrong camera.
     void setFocusedTileImmediate(int index);
     int focusedTile() const { return focusedTile_; }
+
+    // Focus-view pinch zoom (driven by the iOS host's pinch/pan gestures; the
+    // macOS host never calls these). Scales the focused tile's video around
+    // `anchor` / pans it, both in view points and both incremental (the
+    // recognizers reset their scale/translation per event). While a gesture is
+    // active (bracketed by focusGestureBegan/Ended) both may overshoot their
+    // limits with rubber-band resistance; on release a spring glides them back
+    // into range -- zoom to 1..kMaxFocusZoom, pan so a video edge never rests
+    // inside the window (an axis that still fits stays centered) -- and the
+    // release velocity flings the pan with UIScrollView-style deceleration.
+    // No-ops outside focus view; any focus change resets the zoom.
+    void focusZoomBy(float factor, float anchorX, float anchorY);
+    void focusPanBy(float dx, float dy);
+    void focusGestureBegan();
+    void focusGestureEnded(float velocityX, float velocityY); // points/s; zero = no fling
+    void resetFocusZoom();
+    bool focusZoomedIn() const { return focusZoom_ > 1.001f; }
     void setHoveredTile(int index) { hoveredTile_ = index; }
     void setTileActivity(const std::vector<std::uint64_t>& byteCounts) { tileBytes_ = byteCounts; }
     // Per-tile detection boxes (subset-aligned), drawn as pulsing outlines
@@ -198,6 +215,23 @@ private:
     int animTile_ = -1;
     float animProgress_ = 0.0f;
     int hoveredTile_ = -1;
+
+    // Focus-view pinch zoom: scale (1 = none) + pan offset (points) of the
+    // scaled content from its centered position. lastFullPts_ is the full-
+    // window rect of the last render() -- the space the gesture anchors, the
+    // pan bounds and the rubber-band/spring physics are computed in.
+    TileRect focusZoomedRect(const TileRect& full) const;
+    void focusPanBounds(float zoom, float& maxX, float& maxY) const;
+    void clampFocusPan();
+    void updateFocusSettle(float dt); // spring-back + fling, per focused frame
+    float focusZoom_ = 1.0f;
+    float focusPanX_ = 0.0f;
+    float focusPanY_ = 0.0f;
+    bool focusGestureActive_ = false; // fingers down: rubber, don't clamp/spring
+    bool focusSettling_ = false;      // released out of bounds or flung
+    float focusVelX_ = 0.0f;          // fling velocity (points/s)
+    float focusVelY_ = 0.0f;
+    TileRect lastFullPts_ {};
 
     float scale_ = 1.0f;
     float animTime_ = 0.0f;

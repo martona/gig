@@ -263,13 +263,57 @@
     [self noteInteraction]; // resets the idle-dim + chromeless timers
     _needsRender = YES; // focus change animates from the next tick
     if (_scene->focusedTile() >= 0) {
-        _scene->setFocusedTile(-1); // any tap returns to the grid
+        if (_scene->focusZoomedIn()) {
+            // First tap out of a pinch-zoomed hero just un-zooms; the next
+            // tap returns to the grid (an accidental tap while inspecting a
+            // detail must not dump the user all the way out).
+            _scene->resetFocusZoom();
+        } else {
+            _scene->setFocusedTile(-1); // any tap returns to the grid
+        }
         return;
     }
     const int index = _scene->tileAt(static_cast<float>(point.x), static_cast<float>(point.y));
     if (index >= 0) {
         _scene->setFocusedTile(index);
     }
+}
+
+- (void)handlePinchScale:(CGFloat)factor atPoint:(CGPoint)point
+{
+    if (!_scene) {
+        return;
+    }
+    [self noteInteraction]; // pinching is interaction; also forces the repaint
+    _scene->focusZoomBy(static_cast<float>(factor),
+                        static_cast<float>(point.x), static_cast<float>(point.y));
+}
+
+- (void)handlePanByDelta:(CGPoint)delta
+{
+    if (!_scene) {
+        return;
+    }
+    [self noteInteraction];
+    _scene->focusPanBy(static_cast<float>(delta.x), static_cast<float>(delta.y));
+}
+
+- (void)handleFocusGestureBegan
+{
+    if (!_scene) {
+        return;
+    }
+    [self noteInteraction];
+    _scene->focusGestureBegan();
+}
+
+- (void)handleFocusGestureEndedWithVelocity:(CGPoint)velocity
+{
+    if (!_scene) {
+        return;
+    }
+    [self noteInteraction]; // also forces the tick that starts the settle loop
+    _scene->focusGestureEnded(static_cast<float>(velocity.x), static_cast<float>(velocity.y));
 }
 
 - (BOOL)zoomed

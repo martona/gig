@@ -45,9 +45,28 @@ NS_SWIFT_NAME(VideoHost)
 - (void)start;
 - (void)stop;
 
-// A tap in view points: focused -> back to grid; grid -> zoom the tapped tile.
-// Also counts as interaction (resets the idle-dim + chromeless timers).
+// A tap in view points: focused -> back to grid (but a pinch-zoomed focus
+// view first resets its zoom, so an accidental tap can't dump the user all
+// the way out); grid -> zoom the tapped tile. Also counts as interaction
+// (resets the idle-dim + chromeless timers).
 - (void)handleTapAtPoint:(CGPoint)point NS_SWIFT_NAME(handleTap(at:));
+
+// Focus-view pinch zoom (hero mode only; all of these no-op in grid view):
+// scale the video by `factor` around `point`, pan it by `delta` -- all in view
+// points, and both INCREMENTAL (the recognizers reset their scale/translation
+// each event). The hard range is 1..6x zoom with pan held to the video edges,
+// but while a gesture is in flight both may overshoot with rubber-band
+// resistance. The began/ended pair brackets the CONTIGUOUS gesture sequence
+// (fire ended only when the last recognizer releases): began freezes any
+// spring/fling in progress under the fingers, ended starts the spring-back
+// plus a pan fling from `velocity` (view points/s; zero = none). The zoom
+// resets on any focus change (tap out, tile remap).
+- (void)handlePinchScale:(CGFloat)factor atPoint:(CGPoint)point
+    NS_SWIFT_NAME(handlePinch(scale:at:));
+- (void)handlePanByDelta:(CGPoint)delta NS_SWIFT_NAME(handlePan(by:));
+- (void)handleFocusGestureBegan;
+- (void)handleFocusGestureEndedWithVelocity:(CGPoint)velocity
+    NS_SWIFT_NAME(handleFocusGestureEnded(velocity:));
 
 // Register interaction that isn't a tap (e.g. chrome shown by the SwiftUI layer)
 // so the idle timers reset.

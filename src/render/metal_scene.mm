@@ -157,6 +157,21 @@ float smoothstep01(float x)
 constexpr float kZoomDuration = 0.30f;
 constexpr float kFadeDur = 0.22f;
 
+// Focus-view pinch zoom. The hard range is 1..kMaxFocusZoom (the ceiling also
+// bounds the zoomed viewport size the rasterizer sees -- view pixels * zoom --
+// keeping it far below viewport-precision trouble even on an iPad Pro).
+// Gestures may overshoot the range with rubber-band resistance and spring back
+// on release, the standard iOS feel.
+constexpr float kMaxFocusZoom = 6.0f;
+constexpr float kMinZoomOvershoot = 0.5f;                     // pinch-out rubber floor
+constexpr float kMaxZoomOvershoot = kMaxFocusZoom * 1.5f;     // pinch-in rubber ceiling
+constexpr float kZoomRubber = 0.35f;      // log-space damping of factors past the range
+constexpr float kPanRubberC = 0.55f;      // UIScrollView's rubber-band coefficient
+constexpr float kSpringTau = 0.10f;       // spring-back glide time constant (s)
+constexpr float kFlingTau = 0.50f;        // fling velocity decay in bounds (s)
+constexpr float kFlingEdgeTau = 0.08f;    // ...and past a bound, so the spring wins
+constexpr float kMaxFlingVelocity = 4000.0f; // points/s
+
 // Burn-in pixel orbit (the OLED-TV "pixel shift"): the whole scene drifts on a
 // small circle in integer steps -- 1 step every kOrbitStepSeconds, one position
 // per ~pixel of circumference, so a revolution takes about an hour and each
@@ -229,6 +244,7 @@ void MetalScene::setFocusedTile(int index)
     }
     animTile_ = (index >= 0) ? index : focusedTile_;
     focusedTile_ = index;
+    resetFocusZoom();
 }
 
 void MetalScene::setFocusedTileImmediate(int index)
@@ -239,6 +255,195 @@ void MetalScene::setFocusedTileImmediate(int index)
     focusedTile_ = index;
     animTile_ = -1;
     animProgress_ = (index >= 0) ? 1.0f : 0.0f;
+    resetFocusZoom();
+}
+
+void MetalScene::focusZoomBy(float factor, float anchorX, float anchorY)
+{
+    if (focusedTile_ < 0 || !(factor > 0.0f) || lastFullPts_.width <= 0.0f) {
+        return;
+    }
+    // Rubber band: past either end of the hard range an incremental factor
+    // still moves the zoom, just visibly less (damped in log space), up to a
+    // hard overshoot stop; the spring on gesture end returns to the range.
+    float f = factor;
+    if ((focusZoom_ >= kMaxFocusZoom && f > 1.0f) || (focusZoom_ <= 1.0f && f < 1.0f)) {
+        f = std::pow(f, kZoomRubber);
+    }
+    const float newZoom = std::clamp(focusZoom_ * f, kMinZoomOvershoot, kMaxZoomOvershoot);
+    // Keep the video point under the pinch centroid stationary: the content
+    // transform is view = zoom * (content - center) + center + pan, so solve
+    // for the pan that maps the same content point to the anchor at newZoom.
+    const float cx = lastFullPts_.x + lastFullPts_.width * 0.5f;
+    const float cy = lastFullPts_.y + lastFullPts_.height * 0.5f;
+    const float r = newZoom / focusZoom_;
+    focusPanX_ = anchorX - cx - r * (anchorX - cx - focusPanX_);
+    focusPanY_ = anchorY - cy - r * (anchorY - cy - focusPanY_);
+    focusZoom_ = newZoom;
+    if (!focusGestureActive_) {
+        clampFocusPan(); // no gesture bracket (defensive): keep the old rigid rules
+    }
+}
+
+void MetalScene::focusPanBy(float dx, float dy)
+{
+    if (focusedTile_ < 0 || lastFullPts_.width <= 0.0f) {
+        return;
+    }
+    if (!focusGestureActive_ && focusZoom_ <= 1.0f) {
+        return; // nothing to pan outside a gesture
+    }
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    focusPanBounds(focusZoom_, maxX, maxY);
+    // UIScrollView-style resistance past a bound: a delta pushing further out
+    // is scaled by the rubber curve's slope at the current excess (c at the
+    // edge, asymptotically 0 far out); a delta back inside stays 1:1. At 1x
+    // zoom the bounds are 0, so an in-gesture drag is pure (springy) rubber.
+    auto damped = [](float delta, float pos, float bound, float dim) {
+        if (delta == 0.0f) {
+            return delta;
+        }
+        const float excess = (delta > 0.0f) ? std::max(0.0f, pos - bound)
+                                            : std::max(0.0f, -bound - pos);
+        if (excess <= 0.0f) {
+            return delta;
+        }
+        const float d = std::max(dim, 1.0f);
+        const float t = d + kPanRubberC * excess;
+        return delta * (kPanRubberC * d * d / (t * t));
+    };
+    focusPanX_ += damped(dx, focusPanX_, maxX, lastFullPts_.width);
+    focusPanY_ += damped(dy, focusPanY_, maxY, lastFullPts_.height);
+    // Hard overshoot stop (half a window past the bound) so nothing wanders
+    // off no matter how long the drag.
+    focusPanX_ = std::clamp(focusPanX_, -maxX - lastFullPts_.width * 0.5f,
+                            maxX + lastFullPts_.width * 0.5f);
+    focusPanY_ = std::clamp(focusPanY_, -maxY - lastFullPts_.height * 0.5f,
+                            maxY + lastFullPts_.height * 0.5f);
+}
+
+void MetalScene::focusGestureBegan()
+{
+    // Fingers grabbed the content: freeze any spring/fling in flight where it
+    // stands (the gesture continues from there).
+    focusGestureActive_ = true;
+    focusSettling_ = false;
+    focusVelX_ = 0.0f;
+    focusVelY_ = 0.0f;
+}
+
+void MetalScene::focusGestureEnded(float velocityX, float velocityY)
+{
+    focusGestureActive_ = false;
+    focusSettling_ = true; // settle runs until zoom/pan rest in bounds
+    const float mag = std::hypot(velocityX, velocityY);
+    const float cap = (mag > kMaxFlingVelocity) ? kMaxFlingVelocity / mag : 1.0f;
+    focusVelX_ = velocityX * cap;
+    focusVelY_ = velocityY * cap;
+}
+
+void MetalScene::resetFocusZoom()
+{
+    // Deliberately leaves focusGestureActive_ alone -- the host's gesture
+    // bracket owns it, and a mid-gesture reset (tile remap) must not desync it.
+    focusZoom_ = 1.0f;
+    focusPanX_ = 0.0f;
+    focusPanY_ = 0.0f;
+    focusSettling_ = false;
+    focusVelX_ = 0.0f;
+    focusVelY_ = 0.0f;
+}
+
+void MetalScene::updateFocusSettle(float dt)
+{
+    if (dt <= 0.0f) {
+        return;
+    }
+    // Fling: integrate the release velocity, decaying it fast once past a
+    // bound so the spring wins there -- one soft bounce, no oscillation.
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    focusPanBounds(focusZoom_, maxX, maxY);
+    if (focusVelX_ != 0.0f || focusVelY_ != 0.0f) {
+        focusPanX_ += focusVelX_ * dt;
+        focusPanY_ += focusVelY_ * dt;
+        auto decayed = [dt](float v, bool outside) {
+            v *= std::exp(-dt / (outside ? kFlingEdgeTau : kFlingTau));
+            return (std::fabs(v) < 4.0f) ? 0.0f : v;
+        };
+        focusVelX_ = decayed(focusVelX_, focusPanX_ < -maxX || focusPanX_ > maxX);
+        focusVelY_ = decayed(focusVelY_, focusPanY_ < -maxY || focusPanY_ > maxY);
+    }
+    // Spring: exponential glide (critically damped -- iOS rubber bands return
+    // without oscillating) of zoom into its hard range, then pan into the
+    // bounds that the springing zoom implies.
+    const float k = 1.0f - std::exp(-dt / kSpringTau);
+    const float zoomTarget = std::clamp(focusZoom_, 1.0f, kMaxFocusZoom);
+    focusZoom_ += (zoomTarget - focusZoom_) * k;
+    focusPanBounds(focusZoom_, maxX, maxY);
+    const float panTargetX = std::clamp(focusPanX_, -maxX, maxX);
+    const float panTargetY = std::clamp(focusPanY_, -maxY, maxY);
+    focusPanX_ += (panTargetX - focusPanX_) * k;
+    focusPanY_ += (panTargetY - focusPanY_) * k;
+
+    if (focusVelX_ == 0.0f && focusVelY_ == 0.0f
+        && std::fabs(zoomTarget - focusZoom_) < 0.002f
+        && std::fabs(panTargetX - focusPanX_) < 0.1f
+        && std::fabs(panTargetY - focusPanY_) < 0.1f) {
+        focusZoom_ = zoomTarget;
+        focusPanX_ = panTargetX;
+        focusPanY_ = panTargetY;
+        focusSettling_ = false;
+    }
+}
+
+void MetalScene::focusPanBounds(float zoom, float& maxX, float& maxY) const
+{
+    // Pan bounds come from the zoomed, aspect-fitted video size: an axis whose
+    // video still fits inside the window stays centered, one that overflows
+    // pans until its edge meets the window edge (Photos-style). Zooming the
+    // full rect scales the fitted video by the same factor, so fitting at 1x
+    // and multiplying is exact. No frame yet (signal scope) -> the scope isn't
+    // zoomed at all, but keep the bounds sane via the full-window fallback.
+    float videoW = lastFullPts_.width;
+    float videoH = lastFullPts_.height;
+    if (focusedTile_ >= 0 && focusedTile_ < static_cast<int>(tiles_.size())
+        && lastFullPts_.width > 0.0f && lastFullPts_.height > 0.0f) {
+        const TileState& tile = tiles_[static_cast<std::size_t>(focusedTile_)];
+        if (tile.texW > 0 && tile.texH > 0) {
+            const float fit = std::min(lastFullPts_.width / static_cast<float>(tile.texW),
+                                       lastFullPts_.height / static_cast<float>(tile.texH));
+            videoW = static_cast<float>(tile.texW) * fit;
+            videoH = static_cast<float>(tile.texH) * fit;
+        }
+    }
+    maxX = std::max(0.0f, (videoW * zoom - lastFullPts_.width) * 0.5f);
+    maxY = std::max(0.0f, (videoH * zoom - lastFullPts_.height) * 0.5f);
+}
+
+void MetalScene::clampFocusPan()
+{
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    focusPanBounds(focusZoom_, maxX, maxY);
+    focusPanX_ = std::clamp(focusPanX_, -maxX, maxX);
+    focusPanY_ = std::clamp(focusPanY_, -maxY, maxY);
+}
+
+TileRect MetalScene::focusZoomedRect(const TileRect& full) const
+{
+    // != : sub-1x zoom (pinch-out rubber overshoot) shrinks the rect -- the
+    // video pulls in from the edges until the spring returns it.
+    if (focusZoom_ == 1.0f) {
+        return full;
+    }
+    TileRect r;
+    r.width = full.width * focusZoom_;
+    r.height = full.height * focusZoom_;
+    r.x = full.x + (full.width - r.width) * 0.5f + focusPanX_;
+    r.y = full.y + (full.height - r.height) * 0.5f + focusPanY_;
+    return r;
 }
 
 bool MetalScene::tileShowingSignal(std::size_t index) const
@@ -351,6 +556,19 @@ MetalScene::Frame MetalScene::render(id<MTLRenderCommandEncoder> encoder,
         static_cast<float>(pointHeight) - 2.0f * kOrbitRadiusPts };
     const bool fullyFocused = focusedTile_ >= 0 && animProgress_ >= 1.0f
         && focusedTile_ < static_cast<int>(frames.size());
+    // The space the pinch-zoom gestures anchor/clamp in. Released out of
+    // bounds (or flung): run the spring/fling physics each focused frame and
+    // keep the render loop ticking until it lands. Steady state: hard-clamp
+    // so a rotation or window resize can't leave the pan out of bounds.
+    lastFullPts_ = fullPts;
+    if (fullyFocused && !focusGestureActive_) {
+        if (focusSettling_) {
+            updateFocusSettle(dt);
+            sawAnimatedContent_ = true;
+        } else if (focusZoom_ > 1.0f) {
+            clampFocusPan();
+        }
+    }
 
     const GridLayout* layout = &kEmptyLayout;
     if (fullyFocused) {
@@ -896,7 +1114,11 @@ void MetalScene::renderSingleTile(id<MTLRenderCommandEncoder> encoder, std::size
         tile.frameFade = 0.0f;
         tile.showedSignal = false;
     }
-    const MTLViewport videoVp = videoViewport(full, tile.texW, tile.texH);
+    // Pinch zoom scales/offsets the rect the video letterboxes into; the
+    // rasterizer clips the oversized viewport to the drawable. The signal
+    // scope and its resolve fade stay at the unzoomed rect, and the boxes
+    // ride the viewport so they track the zoom for free.
+    const MTLViewport videoVp = videoViewport(focusZoomedRect(full), tile.texW, tile.texH);
     [encoder setViewport:videoVp];
     drawTile(encoder, tile);
     if (tile.frameFade >= 0.0f) {
