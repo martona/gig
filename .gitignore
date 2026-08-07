@@ -3,7 +3,7 @@
 /vcpkg_installed/
 /vcpkg-installed/
 .DS_Store
-.claude/settings.local.json
+/.claude/
 /docs/HANDOFF.md
 /docs/PLAN.md
 /docs/README-IOS.md
