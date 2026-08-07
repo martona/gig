@@ -9,20 +9,27 @@
 // Native AppKit settings, styled after the System Settings app: rounded "card"
 // sections (NSBox), rows with a title (and secondary subtitle) on the left and
 // the control on the right, switches (NSSwitch) for booleans, large-size text
-// fields. The primary window carries the connection fields + the View group;
-// "Advanced..." opens a second window (security / display / screen protection).
-// Everything edits working copies and commits ONLY on the primary OK; the
-// password is persisted through the SettingsStore by main.cpp, so a signed gig
-// owns the keychain item (no prompt -- see settings_store_mac.mm).
+// fields. The primary window carries the connection registry (popup +
+// Add/Edit/Delete; per-connection fields live in a nested editor window) + the
+// View group; "Advanced..." opens a second window (display / screen
+// protection). Everything edits working copies and commits ONLY on the primary
+// OK; the password is persisted through the SettingsStore by main.cpp, so a
+// signed gig owns the keychain item (no prompt -- see settings_store_mac.mm).
 
 @interface GigSettingsController : NSObject
 @property (nonatomic, copy) void (^onAdvanced)(void);
+@property (nonatomic, copy) void (^onAddConnection)(void);
+@property (nonatomic, copy) void (^onEditConnection)(void);
+@property (nonatomic, copy) void (^onDeleteConnection)(void);
 @end
 
 @implementation GigSettingsController
 - (void)ok:(id)sender { (void)sender; [NSApp stopModalWithCode:NSModalResponseOK]; }
 - (void)cancel:(id)sender { (void)sender; [NSApp stopModalWithCode:NSModalResponseCancel]; }
 - (void)advanced:(id)sender { (void)sender; if (self.onAdvanced) self.onAdvanced(); }
+- (void)addConnection:(id)sender { (void)sender; if (self.onAddConnection) self.onAddConnection(); }
+- (void)editConnection:(id)sender { (void)sender; if (self.onEditConnection) self.onEditConnection(); }
+- (void)deleteConnection:(id)sender { (void)sender; if (self.onDeleteConnection) self.onDeleteConnection(); }
 // TODO(onboarding-project): temporary Forget Settings affordance; remove when done.
 // NSModalResponseAbort = the confirmed "forget" outcome (distinct from OK/Cancel).
 - (void)forget:(id)sender
@@ -189,20 +196,131 @@ NSTextField* addField(NSView* card, CGFloat rowCenterY, CGFloat width, const std
     return f;
 }
 
+// --- Connection registry (popup + editor) -------------------------------------
+
+// (Re)fill the connections popup from the staged list. NSMenuItems are added
+// to the menu directly: addItemWithTitle: DEDUPS same-title items, and two
+// servers can legitimately share a label (same host:port over http vs https).
+void reloadConnectionPopup(NSPopUpButton* popup, const std::vector<ConnectionInfo>& items, int select)
+{
+    [popup removeAllItems];
+    for (const ConnectionInfo& item : items) {
+        NSMenuItem* row = [[NSMenuItem alloc] initWithTitle:toNs(item.listLabel())
+                                                     action:nil
+                                              keyEquivalent:@""];
+        [popup.menu addItem:row];
+    }
+    if (!items.empty()) {
+        [popup selectItemAtIndex:std::clamp(select, 0, static_cast<int>(items.size()) - 1)];
+    }
+    popup.enabled = items.empty() ? NO : YES;
+}
+
+// Index of another staged entry with the same identity (URL) hash, or -1;
+// `exceptIndex` skips the entry being edited so it can keep its own URL.
+int duplicateConnectionIndex(const std::vector<ConnectionInfo>& items, const ConnectionInfo& item,
+                             int exceptIndex)
+{
+    const std::string id = item.id();
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (i != exceptIndex && items[static_cast<std::size_t>(i)].id() == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Per-connection editor (a nested modal, like the Advanced window): URL, user,
+// password + the insecure switch -- certificate verification is a property of
+// the server you connect to. Validates a non-empty URL and rejects a duplicate
+// of another entry's URL (identity is URL-only); the window re-runs until
+// valid or cancelled, keeping the typed field contents. True = `info` updated.
+bool runConnectionEditor(ConnectionInfo& info, const std::vector<ConnectionInfo>& existing,
+                         int exceptIndex)
+{
+    @autoreleasepool {
+        const CGFloat height = 328;
+        NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWinW, height)
+                                                       styleMask:NSWindowStyleMaskTitled
+                                                         backing:NSBackingStoreBuffered
+                                                           defer:NO];
+        window.title = @"Connection";
+        window.releasedWhenClosed = NO;
+        NSView* content = window.contentView;
+        GigSettingsController* controller = [[GigSettingsController alloc] init];
+
+        CGFloat top = height - kMargin;
+        NSView* card = addCard(content, top, 128);
+        addRowText(card, 106, @"Frigate URL", nil, 380);
+        NSTextField* baseField = addField(card, 106, 370, info.baseUrl, NO);
+        addSeparator(card, 84);
+        addRowText(card, 63, @"User", nil, 380);
+        NSTextField* userField = addField(card, 63, 370, info.user, NO);
+        addSeparator(card, 42);
+        addRowText(card, 21, @"Password", nil, 380);
+        NSTextField* passField = addField(card, 21, 370, info.password, YES);
+
+        addCardHeader(content, top, @"Security");
+        NSView* security = addCard(content, top, 56);
+        addRowText(security, 28, @"Skip server certificate verification",
+                   @"Insecure — disables pinning. For testing only.", kSwitchW + 8);
+        NSSwitch* insecureSwitch = addSwitch(security, 28, info.insecure);
+
+        NSButton* okButton = [NSButton buttonWithTitle:@"OK" target:controller action:@selector(ok:)];
+        okButton.frame = NSMakeRect(kWinW - 110, 16, 94, 30);
+        okButton.keyEquivalent = @"\r";
+        [content addSubview:okButton];
+        NSButton* cancelButton = [NSButton buttonWithTitle:@"Cancel" target:controller action:@selector(cancel:)];
+        cancelButton.frame = NSMakeRect(kWinW - 214, 16, 94, 30);
+        cancelButton.keyEquivalent = @"\033";
+        [content addSubview:cancelButton];
+
+        [window center];
+        for (;;) {
+            [window makeKeyAndOrderFront:nil];
+            const NSModalResponse response = [NSApp runModalForWindow:window];
+            [window orderOut:nil];
+            if (response != NSModalResponseOK) {
+                return false;
+            }
+            ConnectionInfo edited = info; // keeps the no-UI ride-alongs
+            edited.baseUrl = fromField(baseField);
+            edited.user = fromField(userField);
+            edited.password = fromField(passField);
+            edited.insecure = (insecureSwitch.state == NSControlStateValueOn);
+            NSString* problem = nil;
+            if (edited.identityUrl().empty()) {
+                problem = @"Enter the Frigate URL.";
+            } else if (duplicateConnectionIndex(existing, edited, exceptIndex) >= 0) {
+                problem = @"A connection with this URL already exists.";
+            }
+            if (problem) {
+                NSAlert* alert = [[NSAlert alloc] init];
+                alert.messageText = problem;
+                alert.alertStyle = NSAlertStyleWarning;
+                [alert runModal];
+                continue; // fields keep their content; try again
+            }
+            info = edited;
+            return true;
+        }
+    }
+}
+
 // --- Advanced window ----------------------------------------------------------
-// Security / Display / Screen protection. Edits the working values in place on
-// its own OK only (its Cancel leaves them untouched, like the Windows dialog).
-// `insecure` is the ACTIVE connection's flag (per-connection now; on Windows it
-// moved into the connection sub-dialog -- here it stays until the chunk-4 card
-// rework). PEM CA/cert/key, login-refresh, poll-interval and software-decode
-// have no UI anymore -- the settings-store keys are still honored
-// (registry/defaults-level escape hatches); they ride through unchanged.
-void showAdvancedDialog(bool& insecure, int& labelMode, int& labelSize,
+// Display / Screen protection. Edits the working values in place on its own OK
+// only (its Cancel leaves them untouched, like the Windows dialog). Insecure
+// moved into the per-connection editor -- certificate verification is a
+// property of the server. PEM CA/cert/key, login-refresh, poll-interval and
+// software-decode have no UI anymore -- the settings-store keys are still
+// honored (registry/defaults-level escape hatches); they ride through
+// unchanged.
+void showAdvancedDialog(int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         const std::function<void(int)>& onDimPreview)
 {
     @autoreleasepool {
-        const CGFloat height = 468;
+        const CGFloat height = 376;
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWinW, height)
                                                        styleMask:NSWindowStyleMaskTitled
                                                          backing:NSBackingStoreBuffered
@@ -214,12 +332,6 @@ void showAdvancedDialog(bool& insecure, int& labelMode, int& labelSize,
         NSMutableArray* helpers = [NSMutableArray array]; // keep target objects alive
 
         CGFloat top = height - kMargin;
-
-        addCardHeader(content, top, @"Security");
-        NSView* security = addCard(content, top, 56);
-        addRowText(security, 28, @"Skip server certificate verification",
-                   @"Insecure — disables pinning. For testing only.", kSwitchW + 8);
-        NSSwitch* insecureSwitch = addSwitch(security, 28, insecure);
 
         addCardHeader(content, top, @"Display");
         NSView* display = addCard(content, top, 96);
@@ -283,7 +395,6 @@ void showAdvancedDialog(bool& insecure, int& labelMode, int& labelSize,
             return;
         }
 
-        insecure = (insecureSwitch.state == NSControlStateValueOn);
         labelMode = static_cast<int>(labelPopup.indexOfSelectedItem);
         labelSize = std::clamp(static_cast<int>(sizePopup.indexOfSelectedItem), 0, 2);
         dimLevelPercent = std::clamp(static_cast<int>(std::lround(dimSlider.doubleValue)), 10, 100);
@@ -312,25 +423,17 @@ bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, 
 
     @autoreleasepool {
         // Edit working copies so Cancel (in either window) leaves the caller's
-        // values untouched; commit only on the primary OK.
-        //
-        // TRANSITIONAL until the chunk-4 card rework: this window still edits
-        // ONE connection -- the active entry (or a brand-new first entry) --
-        // with the same fields as before. Add/Delete/switching arrive with
-        // the list UI; the staged-list contract is already honored (the
-        // vector is only written back on OK).
-        ConnectionInfo active;
-        if (activeIndex >= 0 && activeIndex < static_cast<int>(connections.size())) {
-            active = connections[static_cast<std::size_t>(activeIndex)];
-        }
-        bool workingInsecure = active.insecure;
+        // values untouched (connection adds/edits/deletes included); commit
+        // only on the primary OK. The popup selection is the entry the app
+        // connects to after OK.
+        std::vector<ConnectionInfo> working = connections;
         int workingLabelMode = labelMode;
         int workingLabelSize = labelSize;
         int workingDimLevel = dimLevelPercent;
         int workingDimDelay = dimDelaySeconds;
         int workingOrbitStep = orbitStepSeconds;
 
-        const CGFloat height = 566;
+        const CGFloat height = 560;
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWinW, height)
                                                        styleMask:NSWindowStyleMaskTitled
                                                          backing:NSBackingStoreBuffered
@@ -342,16 +445,32 @@ bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, 
 
         CGFloat top = height - kMargin;
 
-        // Connection card: label-left / field-right rows (the active entry).
-        NSView* connection = addCard(content, top, 128);
-        addRowText(connection, 106, @"Frigate URL", nil, 380);
-        NSTextField* baseField = addField(connection, 106, 370, active.baseUrl, NO);
-        addSeparator(connection, 84);
-        addRowText(connection, 63, @"User", nil, 380);
-        NSTextField* userField = addField(connection, 63, 370, active.user, NO);
-        addSeparator(connection, 42);
-        addRowText(connection, 21, @"Password", nil, 380);
-        NSTextField* passField = addField(connection, 21, 370, active.password, YES);
+        // Connections card: the multi-server registry -- a popup of the saved
+        // entries (selection = the server the app connects to on OK) with
+        // Add/Edit/Delete beneath; per-connection fields live in the nested
+        // editor (runConnectionEditor).
+        addCardHeader(content, top, @"Connections");
+        NSView* connCard = addCard(content, top, 100);
+        addRowText(connCard, 76, @"Server", nil, 340);
+        NSPopUpButton* connPopup =
+            [[NSPopUpButton alloc] initWithFrame:NSMakeRect(kCardW - kInset - 330, 76 - 14, 330, 28)
+                                       pullsDown:NO];
+        connPopup.controlSize = NSControlSizeLarge;
+        [connCard addSubview:connPopup];
+        reloadConnectionPopup(connPopup, working, activeIndex);
+        addSeparator(connCard, 52);
+        NSButton* addButton =
+            [NSButton buttonWithTitle:@"Add…" target:controller action:@selector(addConnection:)];
+        addButton.frame = NSMakeRect(kCardW - kInset - 296, 11, 96, 30);
+        [connCard addSubview:addButton];
+        NSButton* editButton =
+            [NSButton buttonWithTitle:@"Edit…" target:controller action:@selector(editConnection:)];
+        editButton.frame = NSMakeRect(kCardW - kInset - 196, 11, 96, 30);
+        [connCard addSubview:editButton];
+        NSButton* deleteButton =
+            [NSButton buttonWithTitle:@"Delete" target:controller action:@selector(deleteConnection:)];
+        deleteButton.frame = NSMakeRect(kCardW - kInset - 96, 11, 96, 30);
+        [connCard addSubview:deleteButton];
 
         // The View card lives HERE, not in Advanced: what the wall shows
         // day-to-day belongs where the user can reach it.
@@ -407,17 +526,68 @@ bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, 
         cancelButton.keyEquivalent = @"\033";
         [content addSubview:cancelButton];
 
-        bool* insecurePtr = &workingInsecure;
+        // The registry buttons run while the primary modal spins (nested
+        // modals, like Advanced); plain pointer captures into the stack-local
+        // working state, alive for the whole modal.
+        std::vector<ConnectionInfo>* workingPtr = &working;
+        NSPopUpButton* popupRef = connPopup;
+        controller.onAddConnection = ^{
+            ConnectionInfo fresh;
+            if (runConnectionEditor(fresh, *workingPtr, -1)) {
+                workingPtr->push_back(std::move(fresh));
+                reloadConnectionPopup(popupRef, *workingPtr,
+                                      static_cast<int>(workingPtr->size()) - 1);
+            }
+        };
+        controller.onEditConnection = ^{
+            const int sel = static_cast<int>(popupRef.indexOfSelectedItem);
+            if (sel < 0 || sel >= static_cast<int>(workingPtr->size())) {
+                return;
+            }
+            ConnectionInfo edited = (*workingPtr)[static_cast<std::size_t>(sel)];
+            if (runConnectionEditor(edited, *workingPtr, sel)) {
+                (*workingPtr)[static_cast<std::size_t>(sel)] = std::move(edited);
+                reloadConnectionPopup(popupRef, *workingPtr, sel);
+            }
+        };
+        controller.onDeleteConnection = ^{
+            const int sel = static_cast<int>(popupRef.indexOfSelectedItem);
+            if (sel < 0 || sel >= static_cast<int>(workingPtr->size())) {
+                return;
+            }
+            // Confirm even though the edit is staged (Cancel would undo it):
+            // one habitual OK after a stray Delete would drop saved credentials.
+            NSAlert* alert = [[NSAlert alloc] init];
+            alert.messageText = [NSString stringWithFormat:@"Delete “%@”?",
+                toNs((*workingPtr)[static_cast<std::size_t>(sel)].listLabel())];
+            alert.informativeText = @"Its saved credentials are removed.";
+            alert.alertStyle = NSAlertStyleWarning;
+            [alert addButtonWithTitle:@"Cancel"];
+            [alert addButtonWithTitle:@"Delete"];
+            if ([alert runModal] == NSAlertSecondButtonReturn) {
+                workingPtr->erase(workingPtr->begin() + sel);
+                reloadConnectionPopup(popupRef, *workingPtr, sel);
+            }
+        };
         int* labelPtr = &workingLabelMode;
         int* labelSizePtr = &workingLabelSize;
         int* dimLevelPtr = &workingDimLevel;
         int* dimDelayPtr = &workingDimDelay;
         int* orbitStepPtr = &workingOrbitStep;
         controller.onAdvanced = ^{
-            showAdvancedDialog(*insecurePtr, *labelPtr, *labelSizePtr, *dimLevelPtr, *dimDelayPtr,
+            showAdvancedDialog(*labelPtr, *labelSizePtr, *dimLevelPtr, *dimDelayPtr,
                                *orbitStepPtr, onDimPreview);
         };
 
+        if (working.empty()) {
+            // First run (or everything deleted): drop straight into the Add
+            // editor once the modal loop is spinning (queued into the modal
+            // run-loop mode so the primary window appears first).
+            [controller performSelector:@selector(addConnection:)
+                             withObject:nil
+                             afterDelay:0.0
+                                inModes:@[ NSModalPanelRunLoopMode ]];
+        }
         [window center];
         [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
@@ -431,22 +601,11 @@ bool showSettingsDialog(void* parent, std::vector<ConnectionInfo>& connections, 
             return false;
         }
 
-        active.baseUrl = fromField(baseField);
-        active.user = fromField(userField);
-        active.password = fromField(passField);
-        active.insecure = workingInsecure;
-        if (!active.identityUrl().empty()) {
-            if (activeIndex >= 0 && activeIndex < static_cast<int>(connections.size())) {
-                connections[static_cast<std::size_t>(activeIndex)] = active;
-            } else {
-                connections.push_back(active);
-                activeIndex = static_cast<int>(connections.size()) - 1;
-            }
-        } else if (activeIndex >= 0 && activeIndex < static_cast<int>(connections.size())) {
-            // URL cleared: the old "empty config" semantics -- drop the entry.
-            connections.erase(connections.begin() + activeIndex);
-            activeIndex = connections.empty() ? -1 : 0;
+        {
+            const int sel = static_cast<int>(connPopup.indexOfSelectedItem);
+            activeIndex = (sel >= 0 && sel < static_cast<int>(working.size())) ? sel : -1;
         }
+        connections = std::move(working);
         labelMode = workingLabelMode;
         labelSize = workingLabelSize;
         dimLevelPercent = workingDimLevel;

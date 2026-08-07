@@ -82,6 +82,27 @@ Uint32 installAppMenu()
         [appMenu addItem:quit];
 
         appItem.submenu = appMenu;
+
+        // Edit menu: the standard editing selectors with nil targets (they
+        // route up the responder chain to the focused field editor). Without
+        // this menu Cmd+V/C/X/A dead-end -- macOS resolves those key
+        // equivalents through the MAIN MENU, which is exactly why right-click
+        // paste worked in the settings fields while Cmd+V did not. Menu key
+        // equivalents stay live during modal sessions, so the dialogs get
+        // them too; in windows with nothing editable the items auto-disable
+        // (responder-chain validation), so the main video window is unaffected.
+        NSMenuItem* editItem = [[NSMenuItem alloc] init];
+        [menubar addItem:editItem];
+        NSMenu* editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+        [editMenu addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+        [editMenu addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
+        [editMenu addItem:[NSMenuItem separatorItem]];
+        [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+        [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+        [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+        [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+        editItem.submenu = editMenu;
+
         [app setMainMenu:menubar];
 
         return prefsEvent;
