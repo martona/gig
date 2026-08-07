@@ -94,6 +94,10 @@
     BOOL _activeOnly;
     BOOL _keepHiddenStreams;
     BOOL _showBoxes;
+    BOOL _hideOffline;
+    // "Hide offline cameras" stays disarmed for a grace period after every
+    // session (re)build so first connects don't read as an offline wall.
+    CFTimeInterval _sessionStartedAt;
     std::vector<int> _visibleTiles;
     CFTimeInterval _lastActivityWake;
     NSString *_quietText;
@@ -125,6 +129,7 @@
         _showBoxes = YES;
         _lastInteraction = CACurrentMediaTime();
         _lastActivityWake = _lastInteraction;
+        _sessionStartedAt = _lastInteraction;
         _quietText = @"";
         _quietPos = CGPointZero;
     }
@@ -172,6 +177,12 @@
 - (void)setKeepHiddenStreams:(BOOL)keep
 {
     _keepHiddenStreams = keep;
+}
+
+- (void)setHideOfflineCameras:(BOOL)hide
+{
+    _hideOffline = hide;
+    _needsRender = YES;
 }
 
 - (NSString *)quietStatusText
@@ -369,6 +380,7 @@
             _gate.reset();
             _streamPolicy.reset();
             _visibleTiles.clear();
+            _sessionStartedAt = CACurrentMediaTime(); // re-arm the offline-hide grace
             _needsRender = YES;
         }
 
@@ -382,7 +394,30 @@
         if (activity.wakeEdge) {
             _lastActivityWake = CACurrentMediaTime();
         }
-        if (activity.visible != _visibleTiles) {
+
+        // "Hide offline cameras": drop frameless tiles from what the gate
+        // wants shown -- RENDER-side only (the stream policy below keeps
+        // consuming the unfiltered set, so a hidden camera keeps its stream
+        // and can recover; filtering it there would wedge it offline
+        // forever). Post-grace, "no frame" is truthful: the supervisor drops
+        // a dead stream's stale frame after ~10s, and a connecting camera
+        // simply pops in with its first keyframe.
+        std::vector<int> renderVisible = activity.visible;
+        bool allCamerasOffline = false;
+        if (_hideOffline && !snap.frames.empty()
+            && CACurrentMediaTime() - _sessionStartedAt >= gig::kHideOfflineGraceSeconds) {
+            renderVisible.erase(
+                std::remove_if(renderVisible.begin(), renderVisible.end(),
+                    [&](int cam) {
+                        return cam < 0 || cam >= static_cast<int>(snap.frames.size())
+                            || !snap.frames[static_cast<std::size_t>(cam)];
+                    }),
+                renderVisible.end());
+            allCamerasOffline = std::none_of(snap.frames.begin(), snap.frames.end(),
+                [](const std::shared_ptr<VideoFrame> &f) { return f != nullptr; });
+        }
+
+        if (renderVisible != _visibleTiles) {
             // Keep focus on the same CAMERA across the reshuffle; drop it if
             // that camera left the subset (a stale out-of-range focus wedges
             // the zoom state).
@@ -390,15 +425,15 @@
             int remapped = -1;
             if (focused >= 0 && focused < static_cast<int>(_visibleTiles.size())) {
                 const int cam = _visibleTiles[static_cast<std::size_t>(focused)];
-                const auto pos = std::find(activity.visible.begin(), activity.visible.end(), cam);
-                if (pos != activity.visible.end()) {
-                    remapped = static_cast<int>(pos - activity.visible.begin());
+                const auto pos = std::find(renderVisible.begin(), renderVisible.end(), cam);
+                if (pos != renderVisible.end()) {
+                    remapped = static_cast<int>(pos - renderVisible.begin());
                 }
             }
             // Immediate (no zoom transition): the animation state refers to
             // the OLD index space and would visibly zoom the wrong camera.
             _scene->setFocusedTileImmediate(remapped);
-            _visibleTiles = activity.visible;
+            _visibleTiles = std::move(renderVisible);
             _needsRender = YES;
         }
 
@@ -412,7 +447,10 @@
             if (focused >= 0 && focused < static_cast<int>(_visibleTiles.size())) {
                 onScreen.push_back(_visibleTiles[static_cast<std::size_t>(focused)]);
             } else {
-                onScreen = _visibleTiles;
+                // The GATE's set, not the offline-filtered one: a camera
+                // hidden for having no frame must keep its stream so it can
+                // produce the frame that un-hides it.
+                onScreen = activity.visible;
             }
             const std::vector<char>& desired = _streamPolicy.evaluate(
                 static_cast<int>(snap.frames.size()), onScreen,
@@ -425,7 +463,13 @@
         // early-out below (it must move once a minute on a static screen).
         NSString *quietText = @"";
         CGPoint quietPos = CGPointZero;
-        if (activity.filtered && activity.quiet) {
+        std::string line;
+        if (allCamerasOffline) {
+            // Every camera hidden by "hide offline cameras": the wall is
+            // deliberately empty -- say why. Outranks the quiet line ("all
+            // quiet" would be misleading when nothing is decoding).
+            line = gig::offlineStatusLine(static_cast<int>(snap.frames.size()));
+        } else if (activity.filtered && activity.quiet) {
             // Down = the /ws heartbeat says so (explicit non-online or 35s
             // stale) -- NOT our streaming state, which the on-demand stream
             // policy tears down on purpose.
@@ -437,10 +481,12 @@
             const std::time_t nowWall = std::time(nullptr);
             std::tm local {};
             localtime_r(&nowWall, &local);
-            const std::string line = gig::quietStatusLine(local, camerasDown);
+            line = gig::quietStatusLine(local, camerasDown);
+        }
+        if (!line.empty()) {
             float fx = 0.0f;
             float fy = 0.0f;
-            gig::quietStatusPlacement(static_cast<long long>(nowWall / 60), fx, fy);
+            gig::quietStatusPlacement(static_cast<long long>(std::time(nullptr) / 60), fx, fy);
             quietText = [NSString stringWithUTF8String:line.c_str()] ?: @"";
             quietPos = CGPointMake(fx, fy);
         }

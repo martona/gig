@@ -63,6 +63,29 @@ inline std::string quietStatusLine(const std::tm& local, int camerasDown = 0)
     return line + ".";
 }
 
+// --- "Hide offline cameras" ---------------------------------------------------
+// The setting drops tiles with no displayable frame from the wall entirely.
+// Shared policy bits so every platform hides (and says) exactly the same thing:
+
+// How long after a session (re)build the hiding stays disarmed. Fresh decoders
+// need a few seconds to their first keyframe; without the grace every startup
+// would flash an empty wall + "N/N cameras are offline" before the first
+// frames land. (A dead stream's stale frame is dropped by the supervisor after
+// ~10s, so post-grace "no frame" is a truthful offline signal.)
+constexpr double kHideOfflineGraceSeconds = 20.0;
+
+// The empty-wall line when EVERY camera is offline (the only all-hidden case
+// that gets a caption; a partially-hidden wall just shows the live tiles).
+// Placed with quietStatusPlacement, exactly like the all-quiet line.
+inline std::string offlineStatusLine(int camerasTotal)
+{
+    if (camerasTotal == 1) {
+        return "1/1 camera is offline.";
+    }
+    const std::string n = std::to_string(camerasTotal);
+    return n + "/" + n + " cameras are offline.";
+}
+
 // Deterministic wandering placement for the line, as fractions of the drawable
 // area (top-left of the text). Feed it time(nullptr)/60 so every platform puts
 // the text in the same spot and moves it once a minute.

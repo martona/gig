@@ -28,3 +28,4 @@
 #define IDC_ACTIVE_ONLY     2029
 #define IDC_SHOW_BOXES      2030
 #define IDC_LABELSIZE       2031
+#define IDC_HIDE_OFFLINE    2032

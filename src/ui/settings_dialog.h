@@ -27,11 +27,13 @@ namespace gig {
 // an activity trigger (tracked objects always count); `activeOnly` ignores
 // STATIONARY objects (a parked car stops counting ~10s after it parks);
 // `keepHiddenStreams` keeps off-screen cameras' streams connected (off = tear
-// down + reconnect on demand, saving power at the cost of a 1-2s wake).
+// down + reconnect on demand, saving power at the cost of a 1-2s wake);
+// `hideOffline` drops cameras with no incoming video from the wall entirely
+// (a wandering status line appears when every camera is down).
 bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
-                        bool& showBoxes, bool& keepHiddenStreams,
+                        bool& showBoxes, bool& keepHiddenStreams, bool& hideOffline,
                         bool& forgetRequested, const std::string& statusMessage = {},
                         const std::function<void(int dimPercent)>& onDimPreview = {});
 

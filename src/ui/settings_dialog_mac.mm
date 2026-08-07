@@ -302,7 +302,7 @@ void showAdvancedDialog(AppConfig& config, int& labelMode, int& labelSize,
 bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
-                        bool& showBoxes, bool& keepHiddenStreams,
+                        bool& showBoxes, bool& keepHiddenStreams, bool& hideOffline,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -319,7 +319,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
         int workingDimDelay = dimDelaySeconds;
         int workingOrbitStep = orbitStepSeconds;
 
-        const CGFloat height = 518;
+        const CGFloat height = 566;
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, kWinW, height)
                                                        styleMask:NSWindowStyleMaskTitled
                                                          backing:NSBackingStoreBuffered
@@ -345,28 +345,32 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
         // The View card lives HERE, not in Advanced: what the wall shows
         // day-to-day belongs where the user can reach it.
         addCardHeader(content, top, @"View");
-        NSView* view = addCard(content, top, 240);
-        // Show row (240..196, center 218).
-        addRowText(view, 218, @"Show", nil, 220);
-        NSPopUpButton* viewPopup = addPopup(view, 218, 210,
+        NSView* view = addCard(content, top, 288);
+        // Show row (288..244, center 266).
+        addRowText(view, 266, @"Show", nil, 220);
+        NSPopUpButton* viewPopup = addPopup(view, 266, 210,
             @[ @"All cameras", @"Active cameras only" ], viewMode == 1 ? 1 : 0);
-        addSeparator(view, 196);
-        // Switch rows (48 each, centers 172 / 124 / 76 / 28).
-        addRowText(view, 172, @"Raw motion counts as activity",
+        addSeparator(view, 244);
+        // Switch rows (48 each, centers 220 / 172 / 124 / 76 / 28).
+        addRowText(view, 220, @"Raw motion counts as activity",
                    @"Noisy on windy days — moving shadows and foliage count too.", kSwitchW + 8);
-        NSSwitch* motionSwitch = addSwitch(view, 172, motionActivity);
-        addSeparator(view, 148);
-        addRowText(view, 124, @"Ignore stationary objects",
+        NSSwitch* motionSwitch = addSwitch(view, 220, motionActivity);
+        addSeparator(view, 196);
+        addRowText(view, 172, @"Ignore stationary objects",
                    @"Parked cars and settled packages stop counting once they stop moving.", kSwitchW + 8);
-        NSSwitch* activeOnlySwitch = addSwitch(view, 124, activeOnly);
-        addSeparator(view, 100);
-        addRowText(view, 76, @"Draw detection boxes",
+        NSSwitch* activeOnlySwitch = addSwitch(view, 172, activeOnly);
+        addSeparator(view, 148);
+        addRowText(view, 124, @"Draw detection boxes",
                    @"Red pulses around a live detection; blue lingers where one just ended.", kSwitchW + 8);
-        NSSwitch* boxesSwitch = addSwitch(view, 76, showBoxes);
-        addSeparator(view, 52);
-        addRowText(view, 28, @"Keep hidden cameras streaming",
+        NSSwitch* boxesSwitch = addSwitch(view, 124, showBoxes);
+        addSeparator(view, 100);
+        addRowText(view, 76, @"Keep hidden cameras streaming",
                    @"Off saves power; a hidden camera reconnects in a second or two.", kSwitchW + 8);
-        NSSwitch* keepStreamsSwitch = addSwitch(view, 28, keepHiddenStreams);
+        NSSwitch* keepStreamsSwitch = addSwitch(view, 76, keepHiddenStreams);
+        addSeparator(view, 52);
+        addRowText(view, 28, @"Hide offline cameras",
+                   @"A camera with no video disappears; a status line appears if all are down.", kSwitchW + 8);
+        NSSwitch* hideOfflineSwitch = addSwitch(view, 28, hideOffline);
 
         if (!statusMessage.empty()) {
             NSTextField* status = [NSTextField labelWithString:toNs(statusMessage)];
@@ -430,6 +434,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
         activeOnly = (activeOnlySwitch.state == NSControlStateValueOn);
         showBoxes = (boxesSwitch.state == NSControlStateValueOn);
         keepHiddenStreams = (keepStreamsSwitch.state == NSControlStateValueOn);
+        hideOffline = (hideOfflineSwitch.state == NSControlStateValueOn);
         return true;
     }
 }

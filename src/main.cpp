@@ -179,6 +179,12 @@ struct StartupConfig {
     // camera's stream down after a short delay and reconnect when it appears
     // (saves decode power; costs ~1-2s + the scope animation on wake).
     bool keepHiddenStreams = true;
+    // Hide cameras with no incoming video (default off): a down camera
+    // disappears from the wall instead of showing an error tile; when every
+    // camera is down, a wandering status line says so ("10/10 cameras are
+    // offline"). Cameras still connecting count as offline (they render the
+    // same) and pop in with their first frame.
+    bool hideOffline = false;
     // Draw detection bounding boxes over the video (default on): pulsing red
     // for a live tracked object, blue while it lingers "(gone)".
     bool showBoxes = true;
@@ -223,6 +229,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
     cfg.motionActivity = store.getBool("motion-activity").value_or(false);
     cfg.activeOnly = store.getBool("active-only").value_or(true);
     cfg.keepHiddenStreams = store.getBool("stream-hidden").value_or(true);
+    cfg.hideOffline = store.getBool("hide-offline").value_or(false);
     cfg.showBoxes = store.getBool("boxes").value_or(true);
     s.tls.verifyServer = !store.getBool("insecure").value_or(false);
     s.pollIntervalSeconds = static_cast<int>(store.getInt("poll-interval").value_or(5));
@@ -261,7 +268,7 @@ StartupConfig loadConfig(const gig::SettingsStore& store)
 void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode labelMode,
                 int labelSize, int dimLevelPercent, int dimDelaySeconds, int orbitStepSeconds,
                 int viewMode, bool motionActivity, bool activeOnly, bool showBoxes,
-                bool keepHiddenStreams)
+                bool keepHiddenStreams, bool hideOffline)
 {
     store.setInt("label-size", std::clamp(labelSize, 0, 2));
     store.setInt("dim-level", dimLevelPercent);
@@ -272,6 +279,7 @@ void saveConfig(gig::SettingsStore& store, const gig::AppConfig& s, LabelMode la
     store.setBool("active-only", activeOnly);
     store.setBool("boxes", showBoxes);
     store.setBool("stream-hidden", keepHiddenStreams);
+    store.setBool("hide-offline", hideOffline);
     store.setString("base", s.baseUrl);
     store.setString("url", s.url);
     store.setString("user", s.user);
@@ -520,6 +528,9 @@ int main(int argc, char** argv)
         std::vector<int> visibleTiles;
         std::vector<std::string> tileReasons;  // last pushed, subset-aligned
         std::vector<gig::TileBoxList> tileBoxes; // last pushed, subset-aligned
+        // "Hide offline cameras" stays disarmed for a grace period after every
+        // session (re)build so first connects don't read as an offline wall.
+        auto sessionStartedAt = std::chrono::steady_clock::now();
         auto restartActivityFeed = [&]() {
             activityFeed.reset();
             activityGate.reset();
@@ -527,6 +538,7 @@ int main(int argc, char** argv)
             visibleTiles.clear(); // force a re-derive (and label re-push) next tick
             tileReasons.clear();
             tileBoxes.clear();
+            sessionStartedAt = std::chrono::steady_clock::now();
             if (session.running() && !cfg.session.baseUrl.empty()) {
                 activityFeed = std::make_unique<gig::FrigateEvents>(
                     cfg.session.baseUrl, cfg.session.tls, sessionCache, cookieJar);
@@ -714,6 +726,7 @@ int main(int argc, char** argv)
             bool activeOnly = cfg.activeOnly;
             bool showBoxes = cfg.showBoxes;
             bool keepHiddenStreams = cfg.keepHiddenStreams;
+            bool hideOffline = cfg.hideOffline;
             bool forget = false;
             // Live idle-dim preview: while the slider moves, apply the previewed
             // luminance to the main view behind the modal dialog by rendering one
@@ -725,11 +738,11 @@ int main(int argc, char** argv)
             };
             if (gig::showSettingsDialog(mainHwnd, edited, labelMode, labelSize, dimLevel, dimDelay,
                                         orbitStep, viewMode, motionActivity, activeOnly,
-                                        showBoxes, keepHiddenStreams, forget, lastConnectError,
-                                        onDimPreview)) {
+                                        showBoxes, keepHiddenStreams, hideOffline, forget,
+                                        lastConnectError, onDimPreview)) {
                 saveConfig(*settings, edited, static_cast<LabelMode>(labelMode), labelSize,
                            dimLevel, dimDelay, orbitStep, viewMode, motionActivity, activeOnly,
-                           showBoxes, keepHiddenStreams);
+                           showBoxes, keepHiddenStreams, hideOffline);
                 cfg = loadConfig(*settings); // re-derive useSystemStore + re-validate
                 renderer->setLabelMode(cfg.labelMode);
                 renderer->setLabelScale(labelScaleFor(cfg.labelSize));
@@ -892,7 +905,33 @@ int main(int argc, char** argv)
             if (activity.wakeEdge) {
                 lastActivityWake = frameStart;
             }
-            const bool visibleChanged = activity.visible != visibleTiles;
+
+            // "Hide offline cameras": drop frameless tiles from what the gate
+            // wants shown -- RENDER-side only (the stream policy below keeps
+            // consuming the unfiltered set, so a hidden camera keeps its stream
+            // and can recover; filtering it there would wedge it offline
+            // forever). Post-grace, "no frame" is truthful: the supervisor
+            // drops a dead stream's stale frame after ~10s, and a connecting
+            // camera simply pops in with its first keyframe.
+            std::vector<int> renderVisible = activity.visible;
+            bool allCamerasOffline = false;
+            if (cfg.hideOffline && session.running()
+                && std::chrono::duration<double>(frameStart - sessionStartedAt).count()
+                    >= gig::kHideOfflineGraceSeconds) {
+                const std::vector<std::shared_ptr<VideoFrame>> gateFrames = session.snapshotFrames();
+                renderVisible.erase(
+                    std::remove_if(renderVisible.begin(), renderVisible.end(),
+                        [&](int cam) {
+                            return cam < 0 || cam >= static_cast<int>(gateFrames.size())
+                                || !gateFrames[static_cast<std::size_t>(cam)];
+                        }),
+                    renderVisible.end());
+                allCamerasOffline = !gateFrames.empty()
+                    && std::none_of(gateFrames.begin(), gateFrames.end(),
+                                    [](const std::shared_ptr<VideoFrame>& f) { return f != nullptr; });
+            }
+
+            const bool visibleChanged = renderVisible != visibleTiles;
             if (visibleChanged) {
                 // Keep focus on the same CAMERA across the reshuffle; drop it
                 // if that camera left the subset (a stale focused index past
@@ -901,16 +940,16 @@ int main(int argc, char** argv)
                 int remapped = -1;
                 if (focused >= 0 && focused < static_cast<int>(visibleTiles.size())) {
                     const int cam = visibleTiles[static_cast<std::size_t>(focused)];
-                    const auto pos = std::find(activity.visible.begin(), activity.visible.end(), cam);
-                    if (pos != activity.visible.end()) {
-                        remapped = static_cast<int>(pos - activity.visible.begin());
+                    const auto pos = std::find(renderVisible.begin(), renderVisible.end(), cam);
+                    if (pos != renderVisible.end()) {
+                        remapped = static_cast<int>(pos - renderVisible.begin());
                     }
                 }
                 // Immediate (no zoom transition): the animation state refers to
                 // the OLD index space and would visibly zoom the wrong camera.
                 renderer->setFocusedTileImmediate(remapped);
                 renderer->setHoveredTile(-1);
-                visibleTiles = activity.visible;
+                visibleTiles = std::move(renderVisible);
                 // Re-run the stats tick next loop so quietStatus (and the
                 // banner counts) track the subset change within a frame.
                 lastTitleUpdate = frameStart - std::chrono::seconds(2);
@@ -992,7 +1031,10 @@ int main(int argc, char** argv)
                 if (focused >= 0 && focused < static_cast<int>(visibleTiles.size())) {
                     onScreen.push_back(visibleTiles[static_cast<std::size_t>(focused)]);
                 } else {
-                    onScreen = visibleTiles;
+                    // The GATE's set, not the offline-filtered one: a camera
+                    // hidden for having no frame must keep its stream so it
+                    // can produce the frame that un-hides it.
+                    onScreen = activity.visible;
                 }
                 const std::vector<char>& desired = streamPolicy.evaluate(
                     static_cast<int>(session.cameraCount()), onScreen,
@@ -1040,7 +1082,15 @@ int main(int argc, char** argv)
                 stats.healthDegraded = cp.schemaError;
                 stats.statusHost = cfg.session.baseUrl.empty() ? cfg.session.url : cfg.session.baseUrl;
                 applyScreenState(stats);
-                if (activity.filtered && activity.quiet) {
+                if (allCamerasOffline) {
+                    // Every camera hidden by "hide offline cameras": the wall
+                    // is deliberately empty -- say why (wandering, like the
+                    // quiet line, so it can't burn in). Outranks the quiet
+                    // line: "all quiet" would be misleading when the real
+                    // story is that nothing is decoding.
+                    stats.quietStatus = gig::offlineStatusLine(
+                        static_cast<int>(session.cameraCount()));
+                } else if (activity.filtered && activity.quiet) {
                     // Down = the /ws heartbeat says so (explicit non-online or
                     // 35s stale) -- NOT our streaming state, which the
                     // on-demand stream policy tears down on purpose.

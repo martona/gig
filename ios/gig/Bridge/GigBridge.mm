@@ -110,6 +110,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     settings.labelSize = std::clamp<NSInteger>(
         static_cast<NSInteger>(store->getInt("label-size").value_or(0)), 0, 2);
     settings.keepHiddenStreams = store->getBool("stream-hidden").value_or(true);
+    settings.hideOfflineCameras = store->getBool("hide-offline").value_or(false);
     return settings;
 }
 
@@ -142,6 +143,7 @@ gig::AppConfig loadAppConfig(const gig::SettingsStore &store)
     store->setBool("boxes", settings.showBoxes);
     store->setInt("label-size", std::clamp<NSInteger>(settings.labelSize, 0, 2));
     store->setBool("stream-hidden", settings.keepHiddenStreams);
+    store->setBool("hide-offline", settings.hideOfflineCameras);
 }
 
 // TODO(onboarding-project): temporary; remove with the Forget Settings UI.

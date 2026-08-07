@@ -97,6 +97,11 @@ NS_SWIFT_NAME(VideoHost)
 // policy tears hidden cameras down and reconnects them when they appear.
 - (void)setKeepHiddenStreams:(BOOL)keep NS_SWIFT_NAME(setKeepHiddenStreams(_:));
 
+// Hide cameras with no incoming video (default NO): a down camera disappears
+// from the wall instead of showing an error tile; when every camera is down,
+// the wandering status line says so ("10/10 cameras are offline").
+- (void)setHideOfflineCameras:(BOOL)hide NS_SWIFT_NAME(setHideOfflineCameras(_:));
+
 // Draw detection bounding boxes over the video (default YES): pulsing red for
 // a live tracked object, blue while it lingers "(gone)".
 - (void)setShowBoxes:(BOOL)show NS_SWIFT_NAME(setShowBoxes(_:));

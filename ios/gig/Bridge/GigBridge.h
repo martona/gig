@@ -54,6 +54,10 @@ NS_SWIFT_NAME(Settings)
 // stream down and reconnect when it appears (saves decode power; costs ~1-2s
 // + the scope animation on wake).
 @property (nonatomic, assign) BOOL keepHiddenStreams;
+// Hide cameras with no incoming video (default off): a down camera disappears
+// from the wall instead of showing an error tile; when every camera is down,
+// a wandering status line says so ("10/10 cameras are offline").
+@property (nonatomic, assign) BOOL hideOfflineCameras;
 @end
 
 NS_SWIFT_NAME(SettingsBridge)

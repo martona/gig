@@ -566,6 +566,7 @@ struct ContentView: View {
                                        activeOnly: s.activeOnly)
         VideoHost.shared().setShowBoxes(s.showBoxes)
         VideoHost.shared().setKeepHiddenStreams(s.keepHiddenStreams)
+        VideoHost.shared().setHideOfflineCameras(s.hideOfflineCameras)
         let scales: [CGFloat] = [1.0, 1.5, 2.0]
         overlay.labelScale = scales[max(0, min(2, s.labelSize))]
     }

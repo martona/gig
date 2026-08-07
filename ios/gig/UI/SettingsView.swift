@@ -35,6 +35,7 @@ struct SettingsView: View {
     @State private var showBoxes = true
     @State private var labelSize = 0
     @State private var keepHiddenStreams = true
+    @State private var hideOfflineCameras = false
     @State private var confirmForget = false
 
     // Delay choices (seconds); matches the desktop dropdown.
@@ -96,6 +97,8 @@ struct SettingsView: View {
                     .padding(.vertical, 2)
                     toggleRow("Keep hidden cameras streaming", isOn: $keepHiddenStreams,
                               note: "Off saves power; a hidden camera reconnects in a second or two when it appears.")
+                    toggleRow("Hide offline cameras", isOn: $hideOfflineCameras,
+                              note: "A camera with no video disappears from the wall; a status line appears if all are down.")
                 } header: {
                     Text("View")
                 } footer: {
@@ -201,6 +204,7 @@ struct SettingsView: View {
         showBoxes = s.showBoxes
         labelSize = s.labelSize
         keepHiddenStreams = s.keepHiddenStreams
+        hideOfflineCameras = s.hideOfflineCameras
     }
 
     private func save() {
@@ -219,6 +223,7 @@ struct SettingsView: View {
         s.showBoxes = showBoxes
         s.labelSize = labelSize
         s.keepHiddenStreams = keepHiddenStreams
+        s.hideOfflineCameras = hideOfflineCameras
         SettingsBridge.save(s)
     }
 }

@@ -68,6 +68,7 @@ struct DialogState {
     bool* activeOnly;     // ignore stationary objects (opt-in)
     bool* showBoxes;      // detection-box overlay (default on)
     bool* keepHiddenStreams; // keep off-screen cameras streaming (default on)
+    bool* hideOffline;       // hide cameras with no incoming video (default off)
     std::string status;
     std::function<void(int)> onDimPreview; // live dim preview while the slider moves
 };
@@ -131,6 +132,8 @@ void populatePrimary(HWND dlg, const DialogState& state)
                    (!state.showBoxes || *state.showBoxes) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dlg, IDC_STREAM_HIDDEN,
                    (!state.keepHiddenStreams || *state.keepHiddenStreams) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dlg, IDC_HIDE_OFFLINE,
+                   (state.hideOffline && *state.hideOffline) ? BST_CHECKED : BST_UNCHECKED);
 }
 
 void readBackPrimary(HWND dlg, const DialogState& state)
@@ -157,6 +160,9 @@ void readBackPrimary(HWND dlg, const DialogState& state)
     }
     if (state.keepHiddenStreams) {
         *state.keepHiddenStreams = IsDlgButtonChecked(dlg, IDC_STREAM_HIDDEN) == BST_CHECKED;
+    }
+    if (state.hideOffline) {
+        *state.hideOffline = IsDlgButtonChecked(dlg, IDC_HIDE_OFFLINE) == BST_CHECKED;
     }
 }
 
@@ -348,7 +354,7 @@ INT_PTR CALLBACK primaryDlgProc(HWND dlg, UINT message, WPARAM wParam, LPARAM lP
 bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& labelSize,
                         int& dimLevelPercent, int& dimDelaySeconds, int& orbitStepSeconds,
                         int& viewMode, bool& motionActivity, bool& activeOnly,
-                        bool& showBoxes, bool& keepHiddenStreams,
+                        bool& showBoxes, bool& keepHiddenStreams, bool& hideOffline,
                         bool& forgetRequested, const std::string& statusMessage,
                         const std::function<void(int)>& onDimPreview)
 {
@@ -371,10 +377,11 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
     bool workingActiveOnly = activeOnly;
     bool workingShowBoxes = showBoxes;
     bool workingKeepHidden = keepHiddenStreams;
+    bool workingHideOffline = hideOffline;
     DialogState state { &working, &workingLabelMode, &workingLabelSize,
                         &workingDimLevel, &workingDimDelay, &workingOrbitStep,
                         &workingViewMode, &workingMotionActivity, &workingActiveOnly,
-                        &workingShowBoxes, &workingKeepHidden,
+                        &workingShowBoxes, &workingKeepHidden, &workingHideOffline,
                         statusMessage, onDimPreview };
     const INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS), static_cast<HWND>(parent),
@@ -397,6 +404,7 @@ bool showSettingsDialog(void* parent, AppConfig& config, int& labelMode, int& la
     activeOnly = workingActiveOnly;
     showBoxes = workingShowBoxes;
     keepHiddenStreams = workingKeepHidden;
+    hideOffline = workingHideOffline;
     return true;
 }
 
