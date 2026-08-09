@@ -489,8 +489,13 @@
         if (claimAllOffline) {
             // Every camera hidden by "hide offline cameras": the wall is
             // deliberately empty -- say why. Outranks the quiet line ("all
-            // quiet" would be misleading when nothing is decoding).
-            line = gig::offlineStatusLine(static_cast<int>(snap.frames.size()));
+            // quiet" would be misleading when nothing is decoding). Captures
+            // running with no frames is a transport/client fault -- calling
+            // that "offline" would contradict the producer-side live count.
+            line = snap.liveCameraCount > 0
+                ? gig::noVideoStatusLine(snap.liveCameraCount,
+                                         static_cast<int>(snap.frames.size()))
+                : gig::offlineStatusLine(static_cast<int>(snap.frames.size()));
         } else if (activity.filtered && activity.quiet) {
             // Down = the /ws heartbeat says so (explicit non-online or 35s
             // stale) -- NOT our streaming state, which the on-demand stream

@@ -1153,9 +1153,15 @@ int main(int argc, char** argv)
                     // is deliberately empty -- say why (wandering, like the
                     // quiet line, so it can't burn in). Outranks the quiet
                     // line: "all quiet" would be misleading when the real
-                    // story is that nothing is decoding.
-                    stats.quietStatus = gig::offlineStatusLine(
-                        static_cast<int>(session.cameraCount()));
+                    // story is that nothing is decoding. Which story depends
+                    // on the PRODUCER-side live count -- captures running
+                    // with no frames is a transport/client fault, and calling
+                    // that "offline" would contradict the toolbar's N/N live.
+                    const int online = session.liveCameraCount();
+                    const int total = static_cast<int>(session.cameraCount());
+                    stats.quietStatus = online > 0
+                        ? gig::noVideoStatusLine(online, total)
+                        : gig::offlineStatusLine(total);
                 } else if (activity.filtered && activity.quiet) {
                     // Down = the /ws heartbeat says so (explicit non-online or
                     // 35s stale) -- NOT our streaming state, which the

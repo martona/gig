@@ -81,9 +81,12 @@ constexpr double kHideOfflineGraceSeconds = 20.0;
 // it true forever, so the debounce separates the two.
 constexpr double kOfflineClaimSeconds = 10.0;
 
-// The empty-wall line when EVERY camera is offline (the only all-hidden case
-// that gets a caption; a partially-hidden wall just shows the live tiles).
-// Placed with quietStatusPlacement, exactly like the all-quiet line.
+// The empty-wall line when EVERY camera is frameless (the only all-hidden
+// case that gets a caption; a partially-hidden wall just shows the live
+// tiles). Placed with quietStatusPlacement, exactly like the all-quiet line.
+// The claim is only honest when the control plane AGREES the captures are
+// down -- the caller checks the producer-side live count and uses
+// noVideoStatusLine when they are running (see below).
 inline std::string offlineStatusLine(int camerasTotal)
 {
     if (camerasTotal == 1) {
@@ -91,6 +94,19 @@ inline std::string offlineStatusLine(int camerasTotal)
     }
     const std::string n = std::to_string(camerasTotal);
     return n + "/" + n + " cameras are offline.";
+}
+
+// The empty-wall line when every camera is frameless but the control plane
+// says captures ARE running: the cameras aren't down, VIDEO isn't arriving
+// or decoding -- a transport- or client-side fault the offline line would
+// misreport, contradicting the toolbar's producer-side "N/N live" count.
+// (Live incident: an app linking a stale FFmpeg without the mp4 demuxer read
+// "10/10 cameras are offline" while the toolbar honestly said 10/10 live.)
+inline std::string noVideoStatusLine(int camerasOnline, int camerasTotal)
+{
+    return std::to_string(camerasOnline) + "/" + std::to_string(camerasTotal)
+        + (camerasOnline == 1 ? " camera is online" : " cameras are online")
+        + ", but no video is arriving.";
 }
 
 // Deterministic wandering placement for the line, as fractions of the drawable

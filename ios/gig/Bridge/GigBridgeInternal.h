@@ -38,6 +38,10 @@ struct GIGEngineTickSnapshot {
     std::vector<std::string> labels;                 // display labels
     std::vector<gig::FrigateEvents::CameraState> activity; // /ws feed states
     bool feedConnected = false;                      // /ws socket is up
+    // Producer-side live count (/api/stats capture fps, via the supervisor):
+    // splits the all-frameless wall caption into "offline" (captures down)
+    // vs "no video is arriving" (captures fine -- a transport/client fault).
+    int liveCameraCount = 0;
 };
 
 @interface GIGEngine (Internal)

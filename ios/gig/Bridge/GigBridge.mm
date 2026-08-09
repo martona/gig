@@ -549,6 +549,7 @@ gig::AppConfig loadAppConfig(gig::SettingsStore &store)
         out.frames = _session->snapshotFrames();
         out.bytes = _session->tileByteCounts();
         out.labels = _session->cameraLabels();
+        out.liveCameraCount = _session->liveCameraCount();
     }
     if (_events) {
         out.activity = _events->snapshot();
