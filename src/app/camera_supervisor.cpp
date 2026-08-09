@@ -158,17 +158,14 @@ void CameraSupervisor::reconcile()
 {
     // Apply the stream policy FIRST, independent of health-poll success: a
     // teardown/wake must not wait out a down control plane, and a woken
-    // camera should be connecting while the byte counters are fetched.
+    // camera should be connecting while the stats are fetched. Liveness
+    // verdicts are PRODUCER-side now (Frigate's capture fps), so they stay
+    // honest across enable/disable -- no re-enable amnesia needed: a
+    // re-enabled camera that is genuinely down correctly stays down until
+    // the stats say otherwise.
     for (std::size_t i = 0; i < slots_.size(); ++i) {
         CameraSlot& slot = slots_[i];
         const bool enabled = slotEnabled_[i].load(std::memory_order_relaxed);
-        if (enabled && !slot.wasEnabled) {
-            // Re-enable edge: forget stale liveness accumulated while we were
-            // not consuming, so an old Offline verdict can't block the restart.
-            slot.liveness = Liveness::Unknown;
-            slot.haveByteBaseline = false;
-        }
-        slot.wasEnabled = enabled;
         if (!enabled && slot.decoder) {
             stopDecoder(i);
         } else if (enabled && !slot.decoder && slot.liveness != Liveness::Offline) {
@@ -193,37 +190,21 @@ void CameraSupervisor::reconcile()
         }
     }
 
-    bool anyDisabled = false;
-    for (std::size_t i = 0; i < slots_.size(); ++i) {
-        anyDisabled = anyDisabled || !slotEnabled_[i].load(std::memory_order_relaxed);
-    }
-
-    const StreamBytes bytes = fetchStreamBytes(*healthClient_);
-    if (!bytes.ok && bytes.schemaError && anyDisabled) {
-        // With every consumer torn down (stream policy), go2rtc idles the
-        // producers and they marshal without byte fields -- that reads as a
-        // "schema change" but isn't one. The control plane answered; there is
-        // just nothing to assess this cycle. Stay quiet, keep all state.
-        std::lock_guard<std::mutex> lock(healthMutex_);
-        healthOk_ = true;
-        healthSchemaError_ = false;
-        healthLastOk_ = std::chrono::steady_clock::now();
-        return;
-    }
-    if (!bytes.ok) {
-        // Never flip every camera offline on a fetch/parse failure -- that is the
-        // go2rtc-reshuffle trap. Log (loudly on a schema change) and leave the
-        // running decoders exactly as they are. Record the failure so the UI can
-        // surface "lost contact" / "health unreadable" non-modally.
+    const CameraHealth health = fetchCameraHealth(*healthClient_);
+    if (!health.ok) {
+        // Never flip every camera offline on a fetch/parse failure -- that is
+        // the schema-reshuffle trap. Log (loudly on a schema change) and leave
+        // the running decoders exactly as they are. Record the failure so the
+        // UI can surface "lost contact" / "health unreadable" non-modally.
         {
             std::lock_guard<std::mutex> lock(healthMutex_);
             healthOk_ = false;
-            healthSchemaError_ = bytes.schemaError;
+            healthSchemaError_ = health.schemaError;
         }
-        if (bytes.schemaError) {
-            logError() << "supervisor: " << bytes.error << " -- leaving decoders unchanged";
+        if (health.schemaError) {
+            logError() << "supervisor: " << health.error << " -- leaving decoders unchanged";
         } else {
-            logWarning() << "supervisor: health poll failed (" << bytes.error
+            logWarning() << "supervisor: health poll failed (" << health.error
                          << "); leaving decoders unchanged";
         }
         return;
@@ -239,44 +220,22 @@ void CameraSupervisor::reconcile()
     int online = 0;
     for (std::size_t i = 0; i < slots_.size(); ++i) {
         CameraSlot& slot = slots_[i];
-        if (!slotEnabled_[i].load(std::memory_order_relaxed)) {
-            // A disabled slot's producer may have idled BECAUSE we stopped
-            // consuming it (we might be its only consumer), so its byte
-            // counter says nothing about camera health. Keep the last
-            // verdict for the live count, drop the baseline so re-enable
-            // starts fresh, and skip reclassification entirely -- a policy-
-            // hidden camera must never read as a down camera.
-            slot.haveByteBaseline = false;
-            if (slot.liveness == Liveness::Online) {
-                ++online;
-            }
-            continue;
-        }
-        const auto found = bytes.bytesByStream.find(slot.info.streamName);
-        const std::uint64_t current = (found != bytes.bytesByStream.end()) ? found->second : 0;
+        // Stats are keyed by the FRIGATE camera name (streams are a go2rtc
+        // concept the stats endpoint knows nothing about).
+        const auto found = health.fpsByCamera.find(slot.info.cameraName);
+        const bool producing = found != health.fpsByCamera.end() && found->second > 0.0;
 
-        Liveness newLiveness;
-        if (!slot.haveByteBaseline) {
-            // First sample only establishes a baseline; assume runnable until a
-            // delta proves otherwise.
-            newLiveness = Liveness::Unknown;
-        } else if (current == 0) {
-            // No producer / no bytes at all -> camera is genuinely down.
-            newLiveness = Liveness::Offline;
-        } else if (current > slot.lastByteCount) {
+        Liveness newLiveness = slot.liveness;
+        if (producing) {
+            slot.zeroFpsPolls = 0;
             newLiveness = Liveness::Online;
-        } else if (current < slot.lastByteCount) {
-            // Counter went backwards but bytes still flow -> go2rtc/producer
-            // restarted. Re-baseline and keep running this cycle rather than
-            // bouncing every decoder.
-            newLiveness = Liveness::Unknown;
-        } else {
-            // current == lastByteCount (and non-zero): stalled producer.
+        } else if (++slot.zeroFpsPolls >= 2) {
+            // Debounce: a single zero sample can be a Frigate restart or a
+            // stats interval straddling a camera reconnect; two consecutive
+            // polls at zero is a genuinely stopped capture (or a camera
+            // absent from the stats -- removed/disabled server-side).
             newLiveness = Liveness::Offline;
         }
-
-        slot.lastByteCount = current;
-        slot.haveByteBaseline = true;
 
         if (newLiveness != slot.liveness) {
             logInfo() << "supervisor: " << slot.info.cameraName << " "
@@ -298,13 +257,17 @@ void CameraSupervisor::reconcile()
     }
     liveCameras_.store(online, std::memory_order_relaxed);
 
-    // Aggregate ingest bandwidth from the same byte counters. Skip the cycle on
-    // a counter reset (go2rtc restart) so it never reports a huge negative blip.
+    // Download bandwidth: the sum of our own per-slot byte counters (what the
+    // decoders actually pull over the MSE websockets) -- the old number came
+    // from go2rtc's ingest counters, which left with the proxy endpoint.
+    // Monotonic per supervisor lifetime, so no reset case to guard.
     std::uint64_t totalBytes = 0;
-    for (const auto& entry : bytes.bytesByStream) {
-        totalBytes += entry.second;
+    if (slotBytes_) {
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            totalBytes += slotBytes_[i].load(std::memory_order_relaxed);
+        }
     }
-    if (haveBandwidthBaseline_ && totalBytes >= lastTotalBytes_) {
+    if (haveBandwidthBaseline_) {
         const double seconds = config_.pollInterval.count() > 0 ? static_cast<double>(config_.pollInterval.count()) : 5.0;
         const double kbps = static_cast<double>(totalBytes - lastTotalBytes_) * 8.0 / 1000.0 / seconds;
         ingestKbps_.store(static_cast<int>(kbps + 0.5), std::memory_order_relaxed);

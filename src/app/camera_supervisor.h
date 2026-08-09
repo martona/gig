@@ -31,10 +31,12 @@ struct SupervisorConfig {
 };
 
 // Owns one decoder per camera and the authoritative liveness signal. A health
-// thread polls go2rtc byte counters every pollInterval and reconciles: a camera
-// whose bytes advance should be running; one that stalls is torn down; one that
-// resumes is brought back. FFmpeg handles its own transient reconnects in
-// between. Layout/order is fixed (stable slots); liveness only changes contents.
+// thread polls Frigate's /api/stats every pollInterval and reconciles from the
+// per-camera capture fps (a PRODUCER-side gauge, independent of whether gig
+// consumes the stream): a producing camera should be running; one whose
+// capture stops is torn down; one that resumes is brought back. FFmpeg handles
+// its own transient reconnects in between. Layout/order is fixed (stable
+// slots); liveness only changes contents.
 class CameraSupervisor {
 public:
     CameraSupervisor(
@@ -59,7 +61,7 @@ public:
     std::size_t cameraCount() const { return slots_.size(); }
     std::uint64_t totalDecodedFrames() const { return decodedFrames_.load(); }
     int liveCameraCount() const { return liveCameras_.load(); }
-    // Aggregate go2rtc ingest bandwidth (camera->go2rtc) across all streams.
+    // Aggregate download bandwidth (what our decoders pull) across all streams.
     int ingestKbps() const { return ingestKbps_.load(); }
 
     // Control-plane (go2rtc health poll) reachability for the status UI. Updated
@@ -83,12 +85,10 @@ public:
     // the health poll running the change is applied BY the poll thread (kicked
     // immediately, so a woken camera connects right away and the caller never
     // blocks on a join); without polling (single-url mode) it applies inline
-    // on the caller thread, which owns slot lifecycle in that mode. A disabled
-    // slot keeps its LAST liveness verdict (its go2rtc producer may idle
-    // precisely because we stopped consuming it, so its byte counter proves
-    // nothing) -- a policy-hidden camera never reads as a down camera; health
-    // is re-assessed on re-enable. Safe to call from the UI thread; no-op when
-    // unchanged.
+    // on the caller thread, which owns slot lifecycle in that mode. Liveness
+    // verdicts are producer-side (capture fps), so they stay honest for
+    // disabled slots too -- a policy-hidden camera counts as live exactly when
+    // its capture runs. Safe to call from the UI thread; no-op when unchanged.
     void setSlotEnabled(std::size_t index, bool enabled);
 
 private:
@@ -103,10 +103,8 @@ private:
     struct CameraSlot {
         CameraStream info;
         std::unique_ptr<FfmpegDecoder> decoder;
-        std::uint64_t lastByteCount = 0;
-        bool haveByteBaseline = false;
         Liveness liveness = Liveness::Unknown;
-        bool wasEnabled = true; // poll-thread only: enable-edge detection
+        int zeroFpsPolls = 0; // consecutive polls at camera_fps == 0 (Offline at 2)
     };
 
     void pollLoop();

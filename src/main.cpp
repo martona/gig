@@ -1181,7 +1181,7 @@ int main(int argc, char** argv)
                 gig::logInfo() << "decoded " << total << " frames total ("
                                << static_cast<int>(fps + 0.5) << "/s), live "
                                << session.liveCameraCount() << "/" << session.cameraCount()
-                               << ", ingest " << session.ingestKbps() << " kbps, cpu "
+                               << ", pull " << session.ingestKbps() << " kbps, cpu "
                                << static_cast<int>(lastCpuPercent + 0.5) << "%";
                 lastStatsLog = now;
                 lastStatsFrames = total;
