@@ -221,8 +221,13 @@ std::string buildStreamUrl(const std::string& templ, const std::string& streamNa
 
 std::vector<CameraStream> discoverCameras(HttpClient& client)
 {
+    // go2rtc websocket-MSE (fMP4 over ws), the one video path every Frigate
+    // in the 0.14..0.18 envelope proxies (byte-identical nginx block, cookie
+    // auth) -- 0.18 REMOVED the generic /api/go2rtc/api proxy that used to
+    // serve stream.ts (GHSA-mgh5-cr9h-g6hr). TlsClient::open recognizes the
+    // path and speaks the ws protocol; FfmpegDecoder picks the mp4 demuxer.
     const std::string streamTemplate =
-        trimTrailingSlashes(client.baseUrl()) + "/api/go2rtc/api/stream.ts?src={src}";
+        trimTrailingSlashes(client.baseUrl()) + "/live/mse/api/ws?src={src}";
 
     logInfo() << "discovery: GET " << trimTrailingSlashes(client.baseUrl()) << "/api/config";
     const HttpResponse response = client.get("/api/config");

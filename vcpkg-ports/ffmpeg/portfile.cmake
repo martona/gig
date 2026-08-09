@@ -735,9 +735,12 @@ if(VCPKG_LIBRARY_LINKAGE STREQUAL "static")
 endif()
 
 # ---- gig overlay: minimal media surface (appended last so it wins) ----------
-# gig uses exactly: mpegts demux over custom AVIO (zero FFmpeg protocols, no
-# network), h264/hevc decode (hardware where available, else software), and
-# swscale for the BGRA fallback. Everything else is stripped -- the codec and
+# gig uses exactly: mpegts + mov demux over custom AVIO (zero FFmpeg protocols,
+# no network), h264/hevc decode (hardware where available, else software), and
+# swscale for the BGRA fallback. mov (the mp4-family demuxer) carries the
+# fragmented-MP4 byte stream from go2rtc's websocket MSE endpoint -- Frigate
+# 0.18 removed the generic go2rtc proxy that served MPEG-TS; mpegts stays for
+# the bare-URL escape hatch. Everything else is stripped -- the codec and
 # demuxer registration tables otherwise reference every component, forcing the
 # linker to pull all of libavcodec/libavformat into the (static) exe.
 # --disable-everything only clears COMPONENTS; library selection (avcodec/
@@ -749,7 +752,7 @@ string(APPEND OPTIONS " --disable-everything\
  --disable-network\
  --enable-decoder=h264,hevc\
  --enable-parser=h264,hevc\
- --enable-demuxer=mpegts\
+ --enable-demuxer=mpegts,mov\
  --enable-bsf=extract_extradata")
 # Hardware decode is platform-specific. Windows keeps the shared-device D3D11VA
 # zero-copy path (the *_d3d11va2 variants are the AV_PIX_FMT_D3D11 + hw_device_ctx

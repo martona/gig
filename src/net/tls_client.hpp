@@ -16,9 +16,12 @@ namespace gig {
 class TlsSessionCache;
 class CookieJar;
 
-// A live, de-chunked HTTP(S) response body fed by our own Boost.Beast TLS stack.
-// One per streaming connection; created by TlsClient::open(). read() blocks until
-// data, end-of-stream, the read timeout, or cancel() fires -- it never polls.
+// A live video byte stream fed by our own Boost.Beast TLS stack: either a
+// de-chunked HTTP(S) response body (the bare-URL escape hatch) or the binary
+// fMP4 payload of a go2rtc websocket-MSE connection (the Frigate transport --
+// open() picks by URL shape, see tls_client.cpp). One per streaming
+// connection; created by TlsClient::open(). read() blocks until data,
+// end-of-stream, the read timeout, or cancel() fires -- it never polls.
 class MediaStream {
 public:
     struct Impl; // opaque; defined in tls_client.cpp

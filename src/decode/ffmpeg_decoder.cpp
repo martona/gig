@@ -864,9 +864,17 @@ void FfmpegDecoder::decodeOnce()
     rawAvioContext->seekable = 0;
     AvioContextPtr avioContext(rawAvioContext);
 
-    const AVInputFormat* inputFormat = av_find_input_format("mpegts");
+    // The URL is the transport marker: go2rtc's websocket-MSE endpoint
+    // delivers fragmented MP4 (the mp4-family demuxer's registered name is
+    // the full comma list); everything else -- the bare-URL escape hatch --
+    // stays MPEG-TS. Both demuxers handle a non-seekable custom AVIO; the
+    // MSE stream always leads with its init segment, which is all the mov
+    // demuxer needs on a pipe.
+    const bool fmp4 = url_.find("/live/mse/api/ws") != std::string::npos;
+    const char* const demuxerName = fmp4 ? "mov,mp4,m4a,3gp,3g2,mj2" : "mpegts";
+    const AVInputFormat* inputFormat = av_find_input_format(demuxerName);
     if (!inputFormat) {
-        throw std::runtime_error("FFmpeg is missing the mpegts demuxer.");
+        throw std::runtime_error(std::string("FFmpeg is missing the demuxer: ") + demuxerName);
     }
 
     AVFormatContext* rawFormatContext = avformat_alloc_context();
@@ -879,8 +887,8 @@ void FfmpegDecoder::decodeOnce()
     rawFormatContext->interrupt_callback.opaque = &stopRequested_;
     FormatContextPtr formatContext(rawFormatContext);
 
-    // Force the mpegts demuxer (the stream is non-seekable, so it must not be
-    // probed by seeking). On failure avformat_open_input frees the context and
+    // Force the demuxer chosen above (the stream is non-seekable, so it must
+    // not be probed by seeking). On failure avformat_open_input frees the context and
     // NULLs our pointer but leaves pb untouched (AVFMT_FLAG_CUSTOM_IO), so the
     // AVIO + stream still unwind via RAII.
     gig::logInfo() << "Opening stream: " << url_;
