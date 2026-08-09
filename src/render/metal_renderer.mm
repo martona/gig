@@ -500,7 +500,7 @@ private:
             }
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%d fps   %.1f Mbps   cpu %.0f%%", static_cast<int>(overlayStats_.fps + 0.5),
+            ImGui::TextDisabled("%d fps   %.1f Mbps   cpu %.1f%%", static_cast<int>(overlayStats_.fps + 0.5),
                                 overlayStats_.kbps / 1000.0, overlayStats_.cpuPercent);
 
             // Right-aligned buttons: SF Symbol glyphs when available, else text.
