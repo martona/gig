@@ -102,6 +102,11 @@
     // true); the offline line shows only after it has held for
     // kOfflineClaimSeconds (the peek's reconnect burst must not flash it).
     CFTimeInterval _allOfflineSince;
+    // /ws-feed reconnect verification (see verifyServerConfigInternal): a
+    // rising feedConnected edge AFTER the feed was already up this session
+    // means the server may have restarted with config changes.
+    BOOL _feedWasUp;
+    BOOL _feedSeenUp;
     std::vector<int> _visibleTiles;
     CFTimeInterval _lastActivityWake;
     NSString *_quietText;
@@ -385,8 +390,22 @@
             _streamPolicy.reset();
             _visibleTiles.clear();
             _sessionStartedAt = CACurrentMediaTime(); // re-arm the offline-hide grace
+            _feedWasUp = NO;
+            _feedSeenUp = NO;
             _needsRender = YES;
         }
+
+        // Server-config verification on feed RECONNECT edges (not the first
+        // connect of a session -- discovery just ran then): the engine
+        // compares a fresh /api/config off-thread and reconnects only on a
+        // real change.
+        if (snap.feedConnected && !_feedWasUp) {
+            if (_feedSeenUp) {
+                [engine verifyServerConfigInternal];
+            }
+            _feedSeenUp = YES;
+        }
+        _feedWasUp = snap.feedConnected ? YES : NO;
 
         // Activity view: derive the visible tile subset from the /ws feed.
         // Interaction "peeks" the full grid (same idle clock as chrome-hide);

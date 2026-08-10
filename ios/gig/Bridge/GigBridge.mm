@@ -27,6 +27,7 @@
 #include "platform/settings_store.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -322,6 +323,8 @@ gig::AppConfig loadAppConfig(gig::SettingsStore &store)
     std::uint64_t _sessionEpoch;
     // The last connect failure's classification (drives the error screen's CTA).
     bool _lastConfigError;
+    // verifyServerConfigInternal coalescing (one verification at a time).
+    std::atomic_bool _verifyInFlight;
 }
 // Last successfully built status, returned by status() when the engine is busy.
 // atomic: written under _mutex, read without it.
@@ -556,6 +559,31 @@ gig::AppConfig loadAppConfig(gig::SettingsStore &store)
         out.feedConnected = _events->connected();
     }
     return out;
+}
+
+- (void)verifyServerConfigInternal
+{
+    if (_verifyInFlight.exchange(true)) {
+        return; // one verification at a time; edges are rare
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        bool changed = false;
+        {
+            // Blocking lock is fine off-main; if a connect is in flight we
+            // simply verify against the freshly rebuilt session (and find
+            // nothing changed).
+            std::lock_guard<std::mutex> lock(self->_mutex);
+            if (self->_session && self->_store) {
+                const gig::AppConfig cfg = loadAppConfig(*self->_store);
+                changed = self->_session->serverConfigChanged(cfg);
+            }
+        }
+        if (changed) {
+            gig::logInfo() << "reconnecting to pick up server config changes";
+            [self connect]; // takes _mutex itself; EngineModel's poll picks up the status
+        }
+        self->_verifyInFlight = false;
+    });
 }
 
 - (void)applyStreamPolicyInternal:(const std::vector<char> &)desired

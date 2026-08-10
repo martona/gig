@@ -10,12 +10,19 @@ namespace gig {
 struct CameraStream {
     std::string cameraName; // Frigate camera key, e.g. "cam_frontgate"
     std::string streamName; // go2rtc stream name, e.g. "frontgate"
-    std::string streamUrl;  // full stream.ts URL handed to FFmpeg
+    std::string streamUrl;  // full ws-MSE stream URL handed to the decoder
     // Detect-stream resolution (cameras.<name>.detect.width/height) -- the
     // coordinate space of /ws "events" bounding boxes. 0 = not reported;
     // that camera gets no detection-box overlay.
     int detectWidth = 0;
     int detectHeight = 0;
+
+    bool operator==(const CameraStream& other) const
+    {
+        return cameraName == other.cameraName && streamName == other.streamName
+            && streamUrl == other.streamUrl && detectWidth == other.detectWidth
+            && detectHeight == other.detectHeight;
+    }
 };
 
 // Fetch /api/config through `client` and map every camera to its primary

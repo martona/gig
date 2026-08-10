@@ -38,6 +38,7 @@ void AppSession::stop()
         supervisor_->stop();
         supervisor_.reset();
     }
+    cameras_.clear();
     cameraLabels_.clear();
     cameraNames_.clear();
     cameraDetectSizes_.clear();
@@ -96,10 +97,12 @@ ApplyResult AppSession::applyConfig(const AppConfig& cfg)
             return { false, "connected, but Frigate reported no cameras", ApplyFailure::Transient };
         }
 
-        // 3. Labels for the renderer (stable camera order), plus the raw
+        // 3. Keep the discovery result as serverConfigChanged's baseline, then
+        //    derive labels for the renderer (stable camera order), plus the raw
         //    Frigate camera names (the /api/config keys) in the same order --
         //    the activity feed's topics are keyed by those, and the label may
         //    be the go2rtc stream name instead.
+        cameras_ = cameras;
         cameraLabels_.clear();
         cameraLabels_.reserve(cameras.size());
         cameraNames_.clear();
@@ -173,6 +176,36 @@ void AppSession::setCameraStreamEnabled(std::size_t index, bool enabled)
     if (supervisor_) {
         supervisor_->setSlotEnabled(index, enabled);
     }
+}
+
+bool AppSession::serverConfigChanged(const AppConfig& cfg) const
+{
+    if (!supervisor_ || cfg.baseUrl.empty()) {
+        return false; // nothing to compare against (stopped, or single-url mode)
+    }
+    std::vector<CameraStream> fresh;
+    try {
+        HttpClient client(cfg.baseUrl, cfg.tls, sessionCache_, cookieJar_);
+        fresh = discoverCameras(client);
+    } catch (const std::exception& error) {
+        // Best-effort: a failed fetch (server still coming back up) must not
+        // trigger rebuild churn; the next reconnect edge retries.
+        logDebug() << "discovery verify failed: " << error.what();
+        return false;
+    }
+    if (fresh.size() != cameras_.size()) {
+        logInfo() << "server config changed: " << cameras_.size() << " -> " << fresh.size()
+                  << " camera(s)";
+        return true;
+    }
+    for (std::size_t i = 0; i < fresh.size(); ++i) {
+        if (!(fresh[i] == cameras_[i])) {
+            logInfo() << "server config changed: camera " << fresh[i].cameraName
+                      << " (stream mapping or detect dimensions)";
+            return true;
+        }
+    }
+    return false;
 }
 
 ControlPlaneStatus AppSession::controlPlaneStatus() const

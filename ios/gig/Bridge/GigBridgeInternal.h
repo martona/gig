@@ -55,4 +55,13 @@ struct GIGEngineTickSnapshot {
 // entry is a no-op inside the supervisor.
 - (void)applyStreamPolicyInternal:(const std::vector<char> &)desired;
 
+// Fired by the render tick on a /ws-feed RECONNECT edge (a Frigate restart
+// necessarily drops that socket): off-thread, compare a fresh /api/config
+// against the running session and reconnect only on a real change -- e.g.
+// detection moved to substreams re-probes detect dims, and boxes would
+// otherwise arrive in a coordinate space the cached divisor no longer
+// matches. Network blips that changed nothing cost one config fetch.
+// Coalesces: a verification already in flight absorbs further calls.
+- (void)verifyServerConfigInternal;
+
 @end

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d11_decode_context.h"
+#include "discovery/frigate_discovery.h"
 #include "net/frigate_events.hpp"
 #include "net/tls_options.h"
 #include "video_frame.h"
@@ -114,6 +115,18 @@ public:
     // Control-plane reachability for the status UI (default/healthy when stopped).
     ControlPlaneStatus controlPlaneStatus() const;
 
+    // Re-fetch /api/config and compare the discovery-derived facts (camera
+    // set, stream mapping, detect dimensions) against the RUNNING session.
+    // True = the server's config changed under us -- e.g. a Frigate restart
+    // after moving detection to substreams re-probes detect dims, and boxes
+    // then arrive in a coordinate space our cached divisor no longer matches
+    // -- so a full applyConfig rebuild is warranted. False = unchanged, not
+    // running, single-url mode, or the fetch failed (verification must never
+    // cause rebuild churn on a flaky network; the next reconnect edge
+    // retries). Blocking for ~one HTTP round trip: call it on /ws-feed
+    // RECONNECT edges, not per tick.
+    bool serverConfigChanged(const AppConfig& cfg) const;
+
     // Per-camera cumulative downloaded bytes (stable order) for the per-tile
     // "receiving" activity animation; empty when stopped.
     std::vector<std::uint64_t> tileByteCounts() const;
@@ -130,6 +143,7 @@ private:
 
     std::unique_ptr<FrigateAuth> auth_;
     std::unique_ptr<CameraSupervisor> supervisor_;
+    std::vector<CameraStream> cameras_; // discovery result (serverConfigChanged's baseline)
     std::vector<std::string> cameraLabels_;
     std::vector<std::string> cameraNames_;
     std::vector<FrigateEvents::DetectSize> cameraDetectSizes_;

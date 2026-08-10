@@ -531,6 +531,15 @@ int main(int argc, char** argv)
         // "Hide offline cameras" stays disarmed for a grace period after every
         // session (re)build so first connects don't read as an offline wall.
         auto sessionStartedAt = std::chrono::steady_clock::now();
+        // /ws-feed reconnect verification: a Frigate restart necessarily drops
+        // the feed socket, so a RECONNECT edge (rising after the feed had
+        // already been up this session -- not the first connect, discovery
+        // just ran then) is the moment the server's config may have changed
+        // under a healthy session (live incident: detection moved to
+        // substreams re-probed the detect dims, and boxes arrived in a
+        // coordinate space the cached divisor no longer matched).
+        bool feedWasUp = false;
+        bool feedSeenUp = false;
         // When the all-cameras-offline condition became true (zero = not
         // currently true); the offline line shows only after it has held for
         // kOfflineClaimSeconds (the peek's reconnect burst must not flash it).
@@ -543,6 +552,8 @@ int main(int argc, char** argv)
             tileReasons.clear();
             tileBoxes.clear();
             sessionStartedAt = std::chrono::steady_clock::now();
+            feedWasUp = false;
+            feedSeenUp = false;
             if (session.running() && !cfg.session.baseUrl.empty()) {
                 activityFeed = std::make_unique<gig::FrigateEvents>(
                     cfg.session.baseUrl, cfg.session.tls, sessionCache, cookieJar);
@@ -943,6 +954,22 @@ int main(int argc, char** argv)
             const double sinceInteraction =
                 std::chrono::duration<double>(frameStart - lastInteraction).count();
             const bool feedUp = activityFeed && activityFeed->connected();
+            if (feedUp && !feedWasUp) {
+                const bool reconnectEdge = feedSeenUp;
+                feedSeenUp = true;
+                feedWasUp = true;
+                if (reconnectEdge && session.serverConfigChanged(cfg.session)) {
+                    // The server's camera/stream/detect facts changed under a
+                    // healthy session: rebuild against them (same path as F5;
+                    // a network blip that changed nothing costs one config
+                    // fetch and no disruption). restartActivityFeed inside
+                    // resets the edge tracking for the new session.
+                    gig::logInfo() << "reconnecting to pick up server config changes";
+                    applyAndReport(cfg.session, /*userInitiated=*/false);
+                    continue;
+                }
+            }
+            feedWasUp = feedUp;
             const std::vector<gig::FrigateEvents::CameraState> feedStates =
                 activityFeed ? activityFeed->snapshot()
                              : std::vector<gig::FrigateEvents::CameraState> {};
@@ -1158,10 +1185,10 @@ int main(int argc, char** argv)
                     // with no frames is a transport/client fault, and calling
                     // that "offline" would contradict the toolbar's N/N live.
                     const int online = session.liveCameraCount();
-                    const int total = static_cast<int>(session.cameraCount());
+                    const int cameraTotal = static_cast<int>(session.cameraCount());
                     stats.quietStatus = online > 0
-                        ? gig::noVideoStatusLine(online, total)
-                        : gig::offlineStatusLine(total);
+                        ? gig::noVideoStatusLine(online, cameraTotal)
+                        : gig::offlineStatusLine(cameraTotal);
                 } else if (activity.filtered && activity.quiet) {
                     // Down = the /ws heartbeat says so (explicit non-online or
                     // 35s stale) -- NOT our streaming state, which the
