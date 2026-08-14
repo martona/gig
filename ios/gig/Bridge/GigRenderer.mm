@@ -410,10 +410,16 @@
         // Activity view: derive the visible tile subset from the /ws feed.
         // Interaction "peeks" the full grid (same idle clock as chrome-hide);
         // startup counts as interaction, which also covers /ws having no
-        // state replay on connect.
+        // state replay on connect. A pinch-zoomed hero holds the peek open
+        // indefinitely: the filtered view settling would evict an inactive
+        // focused camera (and the zoom with it), but watching something
+        // quiet up close is exactly what the zoom is for. Deliberately fed
+        // to the gate only -- chrome-hide and idle-dim keep their own clock.
+        const bool zoomHold = _scene->focusedTile() >= 0 && _scene->focusZoomedIn();
         const gig::ActivityGate::Result activity = _gate.evaluate(
             _viewModeActivity == YES, _motionActivity == YES, _activeOnly == YES,
-            snap.feedConnected, idle, snap.activity, static_cast<int>(snap.frames.size()));
+            snap.feedConnected, zoomHold ? 0.0 : idle, snap.activity,
+            static_cast<int>(snap.frames.size()));
         if (activity.wakeEdge) {
             _lastActivityWake = CACurrentMediaTime();
         }
