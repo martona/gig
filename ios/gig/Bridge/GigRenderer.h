@@ -120,6 +120,10 @@ NS_SWIFT_NAME(VideoHost)
 // FRACTIONS of the view (both 0..1); it moves once a minute.
 @property (nonatomic, copy, readonly) NSString *quietStatusText;
 @property (nonatomic, assign, readonly) CGPoint quietStatusPosition;
+// The line is a problem report (offline / no-video / "N cameras down"), not
+// the reassuring clock: the SwiftUI overlay pulses it so a distant glance can
+// tell trouble from calm. Only the pure all-quiet clock renders steady.
+@property (nonatomic, assign, readonly) BOOL quietStatusAlert;
 
 // Fired on the main thread whenever visibleLabels/zoomed/chromeHidden/
 // quietStatus changed.

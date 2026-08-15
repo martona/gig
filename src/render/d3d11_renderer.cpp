@@ -783,6 +783,11 @@ public:
 
     bool wantsRepaint() const override
     {
+        // A pulsing alert line must keep the on-demand loop drawing: the
+        // empty wall it wanders over produces no frames to mark ticks dirty.
+        if (overlayStats_.quietAlert && !overlayStats_.quietStatus.empty()) {
+            return true;
+        }
         if (!haveOrbitEpoch_) {
             return false;
         }

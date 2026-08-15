@@ -111,6 +111,7 @@
     CFTimeInterval _lastActivityWake;
     NSString *_quietText;
     CGPoint _quietPos;
+    BOOL _quietAlert;
 }
 
 + (instancetype)shared
@@ -141,6 +142,7 @@
         _sessionStartedAt = _lastInteraction;
         _quietText = @"";
         _quietPos = CGPointZero;
+        _quietAlert = NO;
     }
     return self;
 }
@@ -202,6 +204,11 @@
 - (CGPoint)quietStatusPosition
 {
     return _quietPos;
+}
+
+- (BOOL)quietStatusAlert
+{
+    return _quietAlert;
 }
 
 - (BOOL)chromeHidden
@@ -510,6 +517,7 @@
         // early-out below (it must move once a minute on a static screen).
         NSString *quietText = @"";
         CGPoint quietPos = CGPointZero;
+        BOOL quietAlert = NO;
         std::string line;
         if (claimAllOffline) {
             // Every camera hidden by "hide offline cameras": the wall is
@@ -521,6 +529,7 @@
                 ? gig::noVideoStatusLine(snap.liveCameraCount,
                                          static_cast<int>(snap.frames.size()))
                 : gig::offlineStatusLine(static_cast<int>(snap.frames.size()));
+            quietAlert = YES;
         } else if (activity.filtered && activity.quiet) {
             // Down = the /ws heartbeat says so (explicit non-online or 35s
             // stale) -- NOT our streaming state, which the on-demand stream
@@ -534,6 +543,9 @@
             std::tm local {};
             localtime_r(&nowWall, &local);
             line = gig::quietStatusLine(local, camerasDown);
+            // "...but N cameras are down" is a problem too; only the pure
+            // all-quiet clock reads as steady.
+            quietAlert = camerasDown > 0 ? YES : NO;
         }
         if (!line.empty()) {
             float fx = 0.0f;
@@ -542,9 +554,11 @@
             quietText = [NSString stringWithUTF8String:line.c_str()] ?: @"";
             quietPos = CGPointMake(fx, fy);
         }
-        if (![quietText isEqualToString:_quietText] || !CGPointEqualToPoint(quietPos, _quietPos)) {
+        if (![quietText isEqualToString:_quietText] || !CGPointEqualToPoint(quietPos, _quietPos)
+            || quietAlert != _quietAlert) {
             _quietText = quietText;
             _quietPos = quietPos;
+            _quietAlert = quietAlert;
             if (self.onOverlayChanged) {
                 self.onOverlayChanged();
             }

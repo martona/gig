@@ -1189,6 +1189,7 @@ int main(int argc, char** argv)
                     stats.quietStatus = online > 0
                         ? gig::noVideoStatusLine(online, cameraTotal)
                         : gig::offlineStatusLine(cameraTotal);
+                    stats.quietAlert = true;
                 } else if (activity.filtered && activity.quiet) {
                     // Down = the /ws heartbeat says so (explicit non-online or
                     // 35s stale) -- NOT our streaming state, which the
@@ -1199,6 +1200,9 @@ int main(int argc, char** argv)
                         camerasDown += s.down(nowSeconds) ? 1 : 0;
                     }
                     stats.quietStatus = quietLineNow(camerasDown);
+                    // "...but N cameras are down" is a problem too; only the
+                    // pure all-quiet clock reads as steady.
+                    stats.quietAlert = camerasDown > 0;
                 }
 
                 renderer->setDiagnostics(stats);

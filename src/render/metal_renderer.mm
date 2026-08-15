@@ -254,7 +254,15 @@ public:
     void setDimFactor(float factor) override { dimFactor_ = factor; }
     void setOrbitStepSeconds(float seconds) override { orbitStepSeconds_ = seconds; }
 
-    bool wantsRepaint() const override { return scene_->wantsOrbitRepaint(); }
+    bool wantsRepaint() const override
+    {
+        // A pulsing alert line must keep the on-demand loop drawing: the
+        // empty wall it wanders over produces no frames to mark ticks dirty.
+        if (overlayStats_.quietAlert && !overlayStats_.quietStatus.empty()) {
+            return true;
+        }
+        return scene_->wantsOrbitRepaint();
+    }
 
 private:
     // Rasterize an SF Symbol to a white-on-transparent RGBA texture for the toolbar

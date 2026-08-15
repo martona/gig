@@ -239,9 +239,13 @@ final class OverlayModel: ObservableObject {
     @Published var zoomed = false
     @Published var chromeHidden = false
     // Activity view, empty grid: the wandering "all quiet" line ("" = hidden);
-    // position is fractional (0..1) within the video area.
+    // position is fractional (0..1) within the video area. quietAlert = the
+    // line is a problem report (offline / no-video / "N cameras down"), not
+    // the reassuring clock; it pulses so a distant glance can tell trouble
+    // from calm.
     @Published var quietText = ""
     @Published var quietPos = CGPoint.zero
+    @Published var quietAlert = false
     // Label-size setting as a text multiplier (Normal/Large/Larger = 1/1.5/2),
     // applied to the tile labels and the quiet line. Set from settings apply.
     @Published var labelScale: CGFloat = 1
@@ -262,6 +266,7 @@ final class OverlayModel: ObservableObject {
         chromeHidden = host.chromeHidden
         quietText = host.quietStatusText
         quietPos = host.quietStatusPosition
+        quietAlert = host.quietStatusAlert
     }
 }
 
@@ -493,11 +498,22 @@ struct ContentView: View {
                                 max(8, geo.size.width - textSize.width - 8))
                     let y = min(geo.size.height * overlay.quietPos.y,
                                 max(8, geo.size.height - textSize.height - 8))
-                    Text(overlay.quietText)
-                        .font(.system(size: quietSize))
-                        .foregroundStyle(Color(white: 0.62))
-                        .fixedSize()
-                        .offset(x: x, y: y)
+                    // A problem report (offline / no-video / cameras down)
+                    // breathes so a distant glance can tell trouble from the
+                    // steady all-quiet clock. Same curve as the desktop
+                    // (gig::quietStatusPulse): 2s sine, alpha 0.3..1. The
+                    // TimelineView is paused (one static frame) when steady.
+                    TimelineView(.animation(minimumInterval: 1.0 / 30.0,
+                                            paused: !overlay.quietAlert)) { timeline in
+                        let t = timeline.date.timeIntervalSinceReferenceDate
+                        let wave = 0.5 + 0.5 * sin(t * .pi) // 2s period
+                        Text(overlay.quietText)
+                            .font(.system(size: quietSize))
+                            .foregroundStyle(Color(white: 0.62))
+                            .fixedSize()
+                            .offset(x: x, y: y)
+                            .opacity(overlay.quietAlert ? 0.3 + 0.7 * wave : 1.0)
+                    }
                 }
                 .allowsHitTesting(false)
             }

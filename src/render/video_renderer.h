@@ -45,7 +45,12 @@ struct OverlayStats {
     // "Active cameras" view mode with nothing active: the grid is deliberately
     // empty and this liveness line ("It's ten past four and everything is
     // quiet.") wanders across the window instead. Empty = don't draw.
+    // quietAlert = the line is a problem report (offline / no-video /
+    // "N cameras down"), not the reassuring clock: it pulses so a distant
+    // glance can tell trouble from calm. (Also keeps the on-demand render
+    // loop drawing -- the empty wall under it produces no dirty frames.)
     std::string quietStatus;
+    bool quietAlert = false;
 };
 
 // When to draw the per-tile camera label. ErrorOnly shows it only while a tile

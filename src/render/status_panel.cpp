@@ -80,8 +80,14 @@ StatusPanelAction buildStatusPanel(const OverlayStats& stats, float topOffsetLog
             const float y = viewport->WorkPos.y + topOffsetLogical
                 + std::clamp((viewport->WorkSize.y - topOffsetLogical) * fy, 8.0f,
                              std::max(8.0f, viewport->WorkSize.y - topOffsetLogical - textSize.y - 8.0f));
+            // A problem report breathes (shared curve; the renderers keep the
+            // on-demand loop repainting while quietAlert is set); only the
+            // reassuring all-quiet clock renders steady.
+            const float alpha =
+                stats.quietAlert ? quietStatusPulse(ImGui::GetTime()) : 1.0f;
             ImGui::GetBackgroundDrawList()->AddText(
-                font, fontSize, ImVec2(x, y), IM_COL32(150, 158, 170, 200),
+                font, fontSize, ImVec2(x, y),
+                IM_COL32(150, 158, 170, static_cast<int>(200.0f * alpha)),
                 stats.quietStatus.c_str());
         }
         return action;

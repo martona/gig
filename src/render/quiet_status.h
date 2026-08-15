@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <ctime>
 #include <string>
 
@@ -107,6 +108,22 @@ inline std::string noVideoStatusLine(int camerasOnline, int camerasTotal)
     return std::to_string(camerasOnline) + "/" + std::to_string(camerasTotal)
         + (camerasOnline == 1 ? " camera is online" : " cameras are online")
         + ", but no video is arriving.";
+}
+
+// Alert pulse for the wandering line when it reports a PROBLEM (offline /
+// no-video / "N cameras down") instead of the reassuring clock: the text
+// breathes so a corner-of-the-eye glance can tell trouble from calm without
+// reading a word. Multiply the text alpha by this. Feed seconds on any
+// monotonic-ish epoch -- cross-platform PHASE alignment doesn't matter, the
+// shared rhythm and floor do. Only the pure all-quiet clock renders steady;
+// every other message pulses.
+inline float quietStatusPulse(double seconds)
+{
+    constexpr double kPeriodSeconds = 2.0;
+    constexpr double kTau = 6.283185307179586;
+    const float wave =
+        0.5f + 0.5f * static_cast<float>(std::sin(seconds * (kTau / kPeriodSeconds)));
+    return 0.3f + 0.7f * wave; // 0.3..1.0: never fully gone, clearly breathing
 }
 
 // Deterministic wandering placement for the line, as fractions of the drawable
